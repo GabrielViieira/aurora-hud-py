@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200" width="400" height="200">
+  <defs>
+    <linearGradient id="auroraGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#00d4ff;stop-opacity:0.8" />
+      <stop offset="50%" style="stop-color:#7b42ff;stop-opacity:0.6" />
+      <stop offset="100%" style="stop-color:#ff00aa;stop-opacity:0.8" />
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="4" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <path d="M0,100 Q100,50 200,100 T400,100 L400,200 L0,200 Z" fill="url(#auroraGrad)" filter="url(#glow)" opacity="0.9">
+    <animate attributeName="d" dur="6s" repeatCount="indefinite"
+      values="M0,100 Q100,50 200,100 T400,100 L400,200 L0,200 Z;
+              M0,100 Q100,80 200,100 T400,100 L400,200 L0,200 Z;
+              M0,100 Q100,50 200,100 T400,100 L400,200 L0,200 Z"/>
+  </path>
+  <circle cx="200" cy="60" r="8" fill="#ffffff" filter="url(#glow)">
+    <animate attributeName="r" values="4;12;4" dur="3s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0.3;1;0.3" dur="3s" repeatCount="indefinite"/>
+  </circle>
+</svg>

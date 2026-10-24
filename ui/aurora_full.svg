@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+    width="800"
+    height="800"
+    viewBox="0 0 800 800">
+          <defs>
+            <radialGradient id="coreGlow" cx="50%" cy="50%" r="50%">
+              <stop offset="0%" stop-color="#ffffff" stop-opacity="1"/>
+              <stop offset="25%" stop-color="#ffffff" stop-opacity="0.9"/>
+              <stop offset="65%" stop-color="#f0f0f5" stop-opacity="0.2"/>
+              <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+            </radialGradient>
+
+            <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+              <feGaussianBlur stdDeviation="4" result="blur" />
+              <feMerge>
+                <feMergeNode in="blur"/>
+                <feMergeNode in="SourceGraphic"/>
+              </feMerge>
+            </filter>
+            
+            <filter id="heavyGlow" x="-50%" y="-50%" width="200%" height="200%">
+              <feGaussianBlur stdDeviation="15" result="blur" />
+              <feMerge>
+                <feMergeNode in="blur"/>
+                <feMergeNode in="SourceGraphic"/>
+              </feMerge>
+            </filter>
+          </defs>
+
+          <!-- LAYER 1: RECONSTRUÇÃO DE 12 FEIXES DE LUZ TOTAIS E ESTÁTICOS NO FUNDO -->
+          <g filter="url(#glow)">
+            <!-- Eixos Principais (2 linhas) -->
+            <line x1="0" y1="400" x2="800" y2="400" stroke="#ffffff" stroke-width="1.5" opacity="0.3" />
+            <line x1="400" y1="0" x2="400" y2="800" stroke="#ffffff" stroke-width="1.5" opacity="0.3" />
+            
+            <!-- Diagonais de 45 Graus (2 linhas) -->
+            <line x1="117" y1="117" x2="683" y2="683" stroke="#ffffff" stroke-width="1.2" opacity="0.25" />
+            <line x1="117" y1="683" x2="683" y2="117" stroke="#ffffff" stroke-width="1.2" opacity="0.25" />
+            
+            <!-- Ângulos Intermediários de Dispersão (8 linhas para totalizar 12 feixes estáticos) -->
+            <line x1="0" y1="200" x2="800" y2="600" stroke="#ffffff" stroke-width="0.8" opacity="0.15" />
+            <line x1="0" y1="600" x2="800" y2="200" stroke="#ffffff" stroke-width="0.8" opacity="0.15" />
+            <line x1="200" y1="0" x2="600" y2="800" stroke="#ffffff" stroke-width="0.8" opacity="0.15" />
+            <line x1="600" y1="0" x2="200" y2="800" stroke="#ffffff" stroke-width="0.8" opacity="0.15" />
+            
+            <line x1="0" y1="100" x2="800" y2="700" stroke="#ffffff" stroke-width="0.6" opacity="0.12" />
+            <line x1="0" y1="700" x2="800" y2="100" stroke="#ffffff" stroke-width="0.6" opacity="0.12" />
+            <line x1="100" y1="0" x2="700" y2="800" stroke="#ffffff" stroke-width="0.6" opacity="0.12" />
+            <line x1="700" y1="0" x2="100" y2="800" stroke="#ffffff" stroke-width="0.6" opacity="0.12" />
+          </g>
+
+          <!-- LAYER 2: EMISSÃO AMPLADA DE PARTÍCULAS EXPANSIVAS -->
+          <g filter="url(#glow)">
+            <circle class="particula" cx="400" cy="400" r="3.5" fill="#ffffff" style="--tx: 300px; --ty: -300px; animation-delay: 0s;" />
+            <rect class="particula" x="397" y="397" width="6" height="6" fill="#ffffff" style="--tx: -320px; --ty: 200px; animation-delay: 0.5s;" />
+            <circle class="particula" cx="400" cy="400" r="4.5" fill="#ffffff" style="--tx: 150px; --ty: 340px; animation-delay: 1s;" />
+            <circle class="particula" cx="400" cy="400" r="2.5" fill="#ffffff" style="--tx: -250px; --ty: -270px; animation-delay: 1.5s;" />
+            <rect class="particula" x="398" y="398" width="5" height="5" fill="#ffffff" style="--tx: 350px; --ty: 80px; animation-delay: 2s;" />
+            <circle class="particula" cx="400" cy="400" r="3.5" fill="#ffffff" style="--tx: -330px; --ty: -120px; animation-delay: 2.5s;" />
+            <circle class="particula" cx="400" cy="400" r="2" fill="#ffffff" style="--tx: 100px; --ty: -350px; animation-delay: 3s;" />
+            <rect class="particula" x="397" y="397" width="5" height="5" fill="#ffffff" style="--tx: -150px; --ty: 370px; animation-delay: 3.5s;" />
+            <circle class="particula" cx="400" cy="400" r="3" fill="#ffffff" style="--tx: 200px; --ty: 280px; animation-delay: 4s;" />
+            <circle class="particula" cx="400" cy="400" r="4" fill="#ffffff" style="--tx: -280px; --ty: -200px; animation-delay: 4.5s;" />
+          </g>
+
+          <!-- LAYER 3: MOTOR DA ARMAÇÃO DO D20 3D REAL (VIA JAVASCRIPT) -->
+          <g id="d20-mesh" filter="url(#glow)"></g>
+
+          <!-- LAYER 4: NÚCLEO DE ENERGIA CENTRAL -->
+          <g class="nucleo">
+            <circle cx="400" cy="400" r="110" fill="url(#coreGlow)" filter="url(#heavyGlow)" opacity="0.4"/>
+            <circle cx="400" cy="400" r="60" fill="url(#coreGlow)" />
+            <circle cx="400" cy="400" r="18" fill="#ffffff" filter="url(#glow)" />
+          </g>
+        </svg>

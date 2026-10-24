@@ -1,0 +1,314 @@
+"""Configuração central da Aurora.
+
+Precedência: variáveis de ambiente > arquivo `.env` > padrões do código.
+Nenhuma credencial é guardada em objeto de configuração: só o *nome* da
+variável de ambiente que contém a chave (`api_key_env`).
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import Mapping
+
+APP_DIR = Path(__file__).resolve().parents[2]
+DEFAULT_WORKSPACE = APP_DIR / "workspace"
+DEFAULT_DATA_DIR = APP_DIR / "data"
+DEFAULT_LOGS_DIR = APP_DIR / "logs"
+DEFAULT_SCRIPTS_DIR = APP_DIR / "scripts"
+DEFAULT_DB_PATH = DEFAULT_DATA_DIR / "aurora.db"
+DEFAULT_ENV_FILE = APP_DIR / ".env"
+
+
+class ConfigError(RuntimeError):
+    """Configuração inválida ou ausente."""
+
+
+def parse_dotenv(path: Path) -> dict[str, str]:
+    """Lê um `.env` simples (KEY=VALUE), sem expandir variáveis."""
+    values: dict[str, str] = {}
+    if not path.is_file():
+        return values
+    for raw in path.read_text(encoding="utf-8-sig").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if key.startswith("export "):
+            key = key[len("export ") :].strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        if key:
+            values[key] = value
+    return values
+
+
+def _get(env: Mapping[str, str], key: str, default: str) -> str:
+    value = env.get(key)
+    return default if value is None or value == "" else value
+
+
+def _get_bool(env: Mapping[str, str], key: str, default: bool) -> bool:
+    raw = env.get(key)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on", "sim"}
+
+
+def _get_int(env: Mapping[str, str], key: str, default: int) -> int:
+    raw = env.get(key)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{key} deve ser inteiro, recebido {raw!r}") from exc
+
+
+def _get_float(env: Mapping[str, str], key: str, default: float) -> float:
+    raw = env.get(key)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{key} deve ser numérico, recebido {raw!r}") from exc
+
+
+def _get_list(env: Mapping[str, str], key: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw = env.get(key)
+    if raw is None or raw == "":
+        return default
+    return tuple(part.strip() for part in raw.split(";") if part.strip())
+
+
+@dataclass(frozen=True)
+class LLMSettings:
+    base_url: str = "http://localhost:3001/v1"
+    api_key_env: str = "FREELLMAPI_API_KEY"
+    fallback_api_key_env: str = "AURORA_LLM_API_KEY"
+    model: str = "auto"
+    utility_model: str = "auto"
+    planner_model: str = "auto"
+    coder_model: str = "auto"
+    temperature: float = 0.3
+    max_output_tokens: int = 1200
+    timeout_s: float = 60.0
+    max_retries: int = 2
+    stream: bool = False
+    context_window: int = 32000
+
+
+@dataclass(frozen=True)
+class LimitsSettings:
+    max_tool_iterations: int = 8
+    max_plan_steps: int = 8
+    max_task_seconds: float = 300.0
+    max_retries_per_step: int = 1
+    max_output_chars: int = 20000
+    max_read_lines: int = 400
+    max_search_results: int = 100
+    max_recent_messages: int = 16
+
+
+@dataclass(frozen=True)
+class PathsSettings:
+    app_dir: Path = APP_DIR
+    workspace_dir: Path = DEFAULT_WORKSPACE
+    data_dir: Path = DEFAULT_DATA_DIR
+    logs_dir: Path = DEFAULT_LOGS_DIR
+    scripts_dir: Path = DEFAULT_SCRIPTS_DIR
+    db_path: Path = DEFAULT_DB_PATH
+    allowed_roots: tuple[Path, ...] = (DEFAULT_WORKSPACE,)
+    audit_path: Path = DEFAULT_DATA_DIR / "audit.jsonl"
+
+
+@dataclass(frozen=True)
+class VoiceSettings:
+    enabled: bool = True
+    backend: str = "sapi"  # sapi | voicevox | none
+    language: str = "ja-JP"
+    voice_name: str = ""
+    rate: int = 0
+    volume: int = 100
+    voicevox_url: str = "http://127.0.0.1:50021"
+    voicevox_speaker: int = 3
+    max_chars: int = 400
+
+
+@dataclass(frozen=True)
+class MemorySettings:
+    history_limit: int = 200
+    retrieval_limit: int = 5
+    min_importance: float = 0.35
+    auto_remember: bool = True
+
+
+@dataclass(frozen=True)
+class Settings:
+    llm: LLMSettings = field(default_factory=LLMSettings)
+    limits: LimitsSettings = field(default_factory=LimitsSettings)
+    paths: PathsSettings = field(default_factory=PathsSettings)
+    voice: VoiceSettings = field(default_factory=VoiceSettings)
+    memory: MemorySettings = field(default_factory=MemorySettings)
+    auto_approve_max_risk: str = "L1"
+    enabled_tools: tuple[str, ...] = ()
+    log_level: str = "INFO"
+    user_name: str = ""
+    _api_key: str = field(default="", repr=False, compare=False)
+    _read_environ: bool = field(default=True, repr=False, compare=False)
+
+    # ------------------------------------------------------------------ load
+    @classmethod
+    def load(
+        cls,
+        env: Mapping[str, str] | None = None,
+        dotenv_path: Path | None = None,
+        app_dir: Path | None = None,
+    ) -> "Settings":
+        base_file = parse_dotenv(dotenv_path or DEFAULT_ENV_FILE)
+        merged: dict[str, str] = dict(base_file)
+        merged.update(os.environ if env is None else env)
+
+        root = Path(_get(merged, "AURORA_HOME", str(app_dir or APP_DIR))).expanduser()
+        workspace = Path(
+            _get(merged, "AURORA_WORKSPACE_DIR", str(root / "workspace"))
+        ).expanduser()
+        data_dir = Path(_get(merged, "AURORA_DATA_DIR", str(root / "data"))).expanduser()
+        logs_dir = Path(_get(merged, "AURORA_LOGS_DIR", str(root / "logs"))).expanduser()
+        scripts_dir = Path(
+            _get(merged, "AURORA_SCRIPTS_DIR", str(root / "scripts"))
+        ).expanduser()
+        db_path = Path(_get(merged, "AURORA_DB_PATH", str(data_dir / "aurora.db")))
+        audit_path = Path(_get(merged, "AURORA_AUDIT_PATH", str(data_dir / "audit.jsonl")))
+
+        default_roots = (str(workspace),)
+        allowed_roots = tuple(
+            Path(item).expanduser() for item in _get_list(merged, "AURORA_ALLOWED_ROOTS", default_roots)
+        )
+
+        llm = LLMSettings(
+            base_url=_get(merged, "AURORA_LLM_BASE_URL", "http://localhost:3001/v1").rstrip("/"),
+            api_key_env=_get(merged, "AURORA_LLM_API_KEY_ENV", "FREELLMAPI_API_KEY"),
+            fallback_api_key_env=_get(merged, "AURORA_LLM_FALLBACK_KEY_ENV", "AURORA_LLM_API_KEY"),
+            model=_get(merged, "AURORA_LLM_MODEL", "auto"),
+            utility_model=_get(merged, "AURORA_LLM_UTILITY_MODEL", "auto"),
+            planner_model=_get(merged, "AURORA_LLM_PLANNER_MODEL", "auto"),
+            coder_model=_get(merged, "AURORA_LLM_CODER_MODEL", "auto"),
+            temperature=_get_float(merged, "AURORA_LLM_TEMPERATURE", 0.3),
+            max_output_tokens=_get_int(merged, "AURORA_LLM_MAX_OUTPUT_TOKENS", 1200),
+            timeout_s=_get_float(merged, "AURORA_LLM_TIMEOUT_S", 60.0),
+            max_retries=_get_int(merged, "AURORA_LLM_MAX_RETRIES", 2),
+            stream=_get_bool(merged, "AURORA_LLM_STREAM", False),
+            context_window=_get_int(merged, "AURORA_LLM_CONTEXT_WINDOW", 32000),
+        )
+
+        limits = LimitsSettings(
+            max_tool_iterations=_get_int(merged, "AURORA_MAX_TOOL_ITERATIONS", 8),
+            max_plan_steps=_get_int(merged, "AURORA_MAX_PLAN_STEPS", 8),
+            max_task_seconds=_get_float(merged, "AURORA_MAX_TASK_SECONDS", 300.0),
+            max_retries_per_step=_get_int(merged, "AURORA_MAX_RETRIES_PER_STEP", 1),
+            max_output_chars=_get_int(merged, "AURORA_MAX_OUTPUT_CHARS", 20000),
+            max_read_lines=_get_int(merged, "AURORA_MAX_READ_LINES", 400),
+            max_search_results=_get_int(merged, "AURORA_MAX_SEARCH_RESULTS", 100),
+            max_recent_messages=_get_int(merged, "AURORA_MAX_RECENT_MESSAGES", 16),
+        )
+
+        paths = PathsSettings(
+            app_dir=root,
+            workspace_dir=workspace,
+            data_dir=data_dir,
+            logs_dir=logs_dir,
+            scripts_dir=scripts_dir,
+            db_path=db_path,
+            allowed_roots=allowed_roots,
+            audit_path=audit_path,
+        )
+
+        voice = VoiceSettings(
+            enabled=_get_bool(merged, "AURORA_VOICE_ENABLED", True),
+            backend=_get(merged, "AURORA_VOICE_BACKEND", "sapi").lower(),
+            language=_get(merged, "AURORA_VOICE_LANGUAGE", "ja-JP"),
+            voice_name=_get(merged, "AURORA_VOICE_NAME", ""),
+            rate=_get_int(merged, "AURORA_VOICE_RATE", 0),
+            volume=_get_int(merged, "AURORA_VOICE_VOLUME", 100),
+            voicevox_url=_get(merged, "AURORA_VOICEVOX_URL", "http://127.0.0.1:50021").rstrip("/"),
+            voicevox_speaker=_get_int(merged, "AURORA_VOICEVOX_SPEAKER", 3),
+            max_chars=_get_int(merged, "AURORA_VOICE_MAX_CHARS", 400),
+        )
+
+        memory = MemorySettings(
+            history_limit=_get_int(merged, "AURORA_MEMORY_HISTORY_LIMIT", 200),
+            retrieval_limit=_get_int(merged, "AURORA_MEMORY_RETRIEVAL_LIMIT", 5),
+            min_importance=_get_float(merged, "AURORA_MEMORY_MIN_IMPORTANCE", 0.35),
+            auto_remember=_get_bool(merged, "AURORA_MEMORY_AUTO_REMEMBER", True),
+        )
+
+        return cls(
+            llm=llm,
+            limits=limits,
+            paths=paths,
+            voice=voice,
+            memory=memory,
+            auto_approve_max_risk=_get(merged, "AURORA_AUTO_APPROVE_MAX_RISK", "L1").upper(),
+            enabled_tools=_get_list(merged, "AURORA_ENABLED_TOOLS", ()),
+            log_level=_get(merged, "AURORA_LOG_LEVEL", "INFO").upper(),
+            user_name=_get(merged, "AURORA_USER_NAME", ""),
+            _api_key=(
+                merged.get(llm.api_key_env, "").strip()
+                or merged.get(llm.fallback_api_key_env, "").strip()
+            ),
+            # `env` explícito (ex.: testes) isola a configuração do ambiente real.
+            _read_environ=env is None,
+        )
+
+    # --------------------------------------------------------------- helpers
+    def ensure_directories(self) -> None:
+        for directory in (
+            self.paths.workspace_dir,
+            self.paths.data_dir,
+            self.paths.logs_dir,
+            self.paths.scripts_dir,
+        ):
+            directory.mkdir(parents=True, exist_ok=True)
+        self.paths.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.paths.audit_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def api_key(self) -> str:
+        if self._read_environ:
+            for name in (self.llm.api_key_env, self.llm.fallback_api_key_env):
+                value = os.environ.get(name, "").strip()
+                if value:
+                    return value
+        if self._api_key:
+            return self._api_key
+        raise ConfigError(
+            f"Chave do FreeLLM ausente. Defina {self.llm.api_key_env} no ambiente "
+            f"ou no arquivo .env (veja .env.example)."
+        )
+
+    def has_api_key(self) -> bool:
+        try:
+            self.api_key()
+            return True
+        except ConfigError:
+            return False
+
+    def with_paths(self, base: Path) -> "Settings":
+        """Retorna uma cópia com dados/logs/workspace dentro de `base` (testes)."""
+        base = base.resolve()
+        paths = replace(
+            self.paths,
+            app_dir=base,
+            workspace_dir=base / "workspace",
+            data_dir=base / "data",
+            logs_dir=base / "logs",
+            scripts_dir=base / "scripts",
+            db_path=base / "data" / "aurora.db",
+            allowed_roots=(base / "workspace",),
+            audit_path=base / "data" / "audit.jsonl",
+        )
+        return replace(self, paths=paths)

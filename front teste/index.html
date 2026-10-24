@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <title>Visualizador Aurora - d20 3D com Feixes Estáticos</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #030305; 
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+        }
+        .container {
+            width: 750px;
+            height: 750px;
+            position: relative;
+        }
+        svg {
+            width: 100%;
+            height: 100%;
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+        
+        /* --- ANIMAÇÕES GEOMÉTRICAS --- */
+        @keyframes pulseCore {
+            0%, 100% { transform: scale(0.95); opacity: 0.85; }
+            50% { transform: scale(1.1); opacity: 1; }
+        }
+        @keyframes particleBurst {
+            0% { transform: translate(0, 0) scale(0.2); opacity: 0; }
+            10% { opacity: 1; }
+            100% { transform: translate(var(--tx), var(--ty)) scale(1.4); opacity: 0; }
+        }
+
+        .nucleo { transform-origin: 400px 400px; animation: pulseCore 2.5s ease-in-out infinite; }
+        .particula { transform-origin: 400px 400px; animation: particleBurst 5s cubic-bezier(0.12, 0.85, 0.35, 1) infinite; }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <svg xmlns="http://w3.org" viewBox="0 0 800 800">
+          <defs>
+            <radialGradient id="coreGlow" cx="50%" cy="50%" r="50%">
+              <stop offset="0%" stop-color="#ffffff" stop-opacity="1"/>
+              <stop offset="25%" stop-color="#ffffff" stop-opacity="0.9"/>
+              <stop offset="65%" stop-color="#f0f0f5" stop-opacity="0.2"/>
+              <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+            </radialGradient>
+
+            <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+              <feGaussianBlur stdDeviation="4" result="blur" />
+              <feMerge>
+                <feMergeNode in="blur"/>
+                <feMergeNode in="SourceGraphic"/>
+              </feMerge>
+            </filter>
+            
+            <filter id="heavyGlow" x="-50%" y="-50%" width="200%" height="200%">
+              <feGaussianBlur stdDeviation="15" result="blur" />
+              <feMerge>
+                <feMergeNode in="blur"/>
+                <feMergeNode in="SourceGraphic"/>
+              </feMerge>
+            </filter>
+          </defs>
+
+          <!-- LAYER 1: RECONSTRUÇÃO DE 12 FEIXES DE LUZ TOTAIS E ESTÁTICOS NO FUNDO -->
+          <g filter="url(#glow)">
+            <!-- Eixos Principais (2 linhas) -->
+            <line x1="0" y1="400" x2="800" y2="400" stroke="#ffffff" stroke-width="1.5" opacity="0.3" />
+            <line x1="400" y1="0" x2="400" y2="800" stroke="#ffffff" stroke-width="1.5" opacity="0.3" />
+            
+            <!-- Diagonais de 45 Graus (2 linhas) -->
+            <line x1="117" y1="117" x2="683" y2="683" stroke="#ffffff" stroke-width="1.2" opacity="0.25" />
+            <line x1="117" y1="683" x2="683" y2="117" stroke="#ffffff" stroke-width="1.2" opacity="0.25" />
+            
+            <!-- Ângulos Intermediários de Dispersão (8 linhas para totalizar 12 feixes estáticos) -->
+            <line x1="0" y1="200" x2="800" y2="600" stroke="#ffffff" stroke-width="0.8" opacity="0.15" />
+            <line x1="0" y1="600" x2="800" y2="200" stroke="#ffffff" stroke-width="0.8" opacity="0.15" />
+            <line x1="200" y1="0" x2="600" y2="800" stroke="#ffffff" stroke-width="0.8" opacity="0.15" />
+            <line x1="600" y1="0" x2="200" y2="800" stroke="#ffffff" stroke-width="0.8" opacity="0.15" />
+            
+            <line x1="0" y1="100" x2="800" y2="700" stroke="#ffffff" stroke-width="0.6" opacity="0.12" />
+            <line x1="0" y1="700" x2="800" y2="100" stroke="#ffffff" stroke-width="0.6" opacity="0.12" />
+            <line x1="100" y1="0" x2="700" y2="800" stroke="#ffffff" stroke-width="0.6" opacity="0.12" />
+            <line x1="700" y1="0" x2="100" y2="800" stroke="#ffffff" stroke-width="0.6" opacity="0.12" />
+          </g>
+
+          <!-- LAYER 2: EMISSÃO AMPLADA DE PARTÍCULAS EXPANSIVAS -->
+          <g filter="url(#glow)">
+            <circle class="particula" cx="400" cy="400" r="3.5" fill="#ffffff" style="--tx: 300px; --ty: -300px; animation-delay: 0s;" />
+            <rect class="particula" x="397" y="397" width="6" height="6" fill="#ffffff" style="--tx: -320px; --ty: 200px; animation-delay: 0.5s;" />
+            <circle class="particula" cx="400" cy="400" r="4.5" fill="#ffffff" style="--tx: 150px; --ty: 340px; animation-delay: 1s;" />
+            <circle class="particula" cx="400" cy="400" r="2.5" fill="#ffffff" style="--tx: -250px; --ty: -270px; animation-delay: 1.5s;" />
+            <rect class="particula" x="398" y="398" width="5" height="5" fill="#ffffff" style="--tx: 350px; --ty: 80px; animation-delay: 2s;" />
+            <circle class="particula" cx="400" cy="400" r="3.5" fill="#ffffff" style="--tx: -330px; --ty: -120px; animation-delay: 2.5s;" />
+            <circle class="particula" cx="400" cy="400" r="2" fill="#ffffff" style="--tx: 100px; --ty: -350px; animation-delay: 3s;" />
+            <rect class="particula" x="397" y="397" width="5" height="5" fill="#ffffff" style="--tx: -150px; --ty: 370px; animation-delay: 3.5s;" />
+            <circle class="particula" cx="400" cy="400" r="3" fill="#ffffff" style="--tx: 200px; --ty: 280px; animation-delay: 4s;" />
+            <circle class="particula" cx="400" cy="400" r="4" fill="#ffffff" style="--tx: -280px; --ty: -200px; animation-delay: 4.5s;" />
+          </g>
+
+          <!-- LAYER 3: MOTOR DA ARMAÇÃO DO D20 3D REAL (VIA JAVASCRIPT) -->
+          <g id="d20-mesh" filter="url(#glow)"></g>
+
+          <!-- LAYER 4: NÚCLEO DE ENERGIA CENTRAL -->
+          <g class="nucleo">
+            <circle cx="400" cy="400" r="110" fill="url(#coreGlow)" filter="url(#heavyGlow)" opacity="0.4"/>
+            <circle cx="400" cy="400" r="60" fill="url(#coreGlow)" />
+            <circle cx="400" cy="400" r="18" fill="#ffffff" filter="url(#glow)" />
+          </g>
+        </svg>
+    </div>
+
+    <!-- ================= MOTOR GEOMÉTRICO D20 3D VOLUMÉTRICO ================= -->
+    <script>
+        const svgMesh = document.getElementById('d20-mesh');
+        const centro = 400; 
+        const escala = 165;  
+        let anguloY = 0;    
+
+        const phi = (1.0 + Math.sqrt(5.0)) / 2.0;
+        let verticesOriginais = [
+            {x: -1, y:  phi, z:  0}, {x:  1, y:  phi, z:  0}, {x: -1, y: -phi, z:  0}, {x:  1, y: -phi, z:  0},
+            {x:  0, y: -1, z:  phi}, {x:  0, y:  1, z:  phi}, {x:  0, y: -1, z: -phi}, {x:  0, y:  1, z: -phi},
+            {x:  phi, y:  0, z: -1}, {x:  phi, y:  0, z:  1}, {x: -phi, y:  0, z: -1}, {x: -phi, y:  0, z:  1}
+        ].map(v => {
+            const d = Math.sqrt(v.x*v.x + v.y*v.y + v.z*v.z);
+            return { x: (v.x/d)*escala, y: (v.y/d)*escala, z: (v.z/d)*escala };
+        });
+
+        // Índices numéricos completos das 30 arestas do d20
+        const arestas = [, [0,5], [0,7], [0,10], [0,11],
+, [1,7], [1,8], [1,9],
+, [2,4], [2,6], [2,10], [2,11],
+, [3,6], [3,8], [3,9],
+, [4,9], [4,11],
+, [5,11],
+, [6,8], [6,10],
+, [7,10],
+, [10,11]
+        ];
+
+        function renderizarD20() {
+            anguloY += 0.012; // Velocidade suave e constante do giro horizontal
+            const cosY = Math.cos(anguloY);
+            const sinY = Math.sin(anguloY);
+
+            // Inclinação sutil estável de câmera para visualização tridimensional
+            const cosX = Math.cos(0.2);
+            const sinX = Math.sin(0.2);
+
+            const verticesProjetados = verticesOriginais.map(v => {
+                let x1 = v.x * cosY - v.z * sinY;
+                let z1 = v.x * sinY + v.z * cosY;
+                let y2 = v.y * cosX - z1 * sinX;
+                let z2 = v.y * sinX + z1 * cosX;
+
+                const pFactor = 1200 / (1200 + z2);
+                return { x: centro + x1 * pFactor, y: centro + y2 * pFactor, z: z2 };
+            });
+
+            let htmlConteudo = '';
+
+            // Renderização da armação vazada com controle preciso de paralaxe Z
+            arestas.forEach(par => {
+                const p1 = verticesProjetados[par[0]];
+                const p2 = verticesProjetados[par[1]];
+                
+                const profundidadeMedia = (p1.z + p2.z) / 2;
+                
+                // As linhas de trás ficam progressivamente mais finas e ganham traçado pontilhado
+                let opacidade = profundidadeMedia > 0 ? 0.75 : 0.25;
+                let espessura = profundidadeMedia > 0 ? 1.8 : 0.9;
+                let estiloLinha = profundidadeMedia < -40 ? 'stroke-dasharray="3,3"' : '';
+
+                htmlConteudo += `<line x1="${p1.x}" y1="${p1.y}" x2="${p2.x}" y2="${p2.y}" stroke="#ffffff" stroke-width="${espessura}" opacity="${opacidade}" ${estiloLinha} />`;
+            });
+
+            // Criação dos pontos nodais brilhantes nas quinas do d20
+            verticesProjetados.forEach(p => {
+                let opacidadeNo = p.z > 0 ? 0.85 : 0.3;
+                let tamanhoNo = p.z > 0 ? 2.8 : 1.5;
+                htmlConteudo += `<circle cx="${p.x}" cy="${p.y}" r="${tamanhoNo}" fill="#ffffff" opacity="${opacidadeNo}" />`;
+            });
+
+            svgMesh.innerHTML = htmlConteudo;
+            requestAnimationFrame(renderizarD20);
+        }
+
+        renderizarD20();
+    </script>
+</body>
+</html>
