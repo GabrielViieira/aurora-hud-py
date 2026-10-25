@@ -1,12 +1,11 @@
-"""Abrir aplicativos do Menu Iniciar e restaurar janelas/minimizados/tray no Windows.
+"""Gerenciador de aplicativos Windows com resolução conservadora e sem cliques cegos na bandeja.
 
-A abertura é limitada a atalhos .lnk conhecidos no Menu Iniciar/área de trabalho.
-Não executa comandos arbitrários nem encerra processos.
+A automação usa nomes/processos/atalhos conhecidos. Para Steam, usa steam://open/main
+quando o processo já existe; nunca escolhe um ícone anônimo da bandeja por aproximação.
 """
 from __future__ import annotations
 
 import csv
-import ctypes
 import os
 import re
 import subprocess
@@ -18,101 +17,200 @@ from typing import Any
 from aurora.config.permissions import Risk
 from aurora.tools.base import ToolContext, ToolResult, ToolSpec
 
-_APP_ALIASES: dict[str, tuple[str, ...]] = {
-    "chrome": ("chrome", "google chrome", "chrome.exe"),
-    "google chrome": ("chrome", "google chrome", "chrome.exe"),
-    "edge": ("edge", "microsoft edge", "msedge", "msedge.exe"),
-    "microsoft edge": ("edge", "microsoft edge", "msedge", "msedge.exe"),
-    "vscode": ("vscode", "visual studio code", "code", "code.exe"),
-    "vs code": ("vscode", "visual studio code", "code", "code.exe"),
-    "visual studio code": ("vscode", "visual studio code", "code", "code.exe"),
+_ALIASES: dict[str, tuple[str, ...]] = {
+    "steam": ("steam", "steam.exe", "valve steam"),
+    "chrome": ("chrome", "chrome.exe", "google chrome"),
+    "google chrome": ("chrome", "chrome.exe", "google chrome"),
+    "edge": ("msedge", "msedge.exe", "microsoft edge", "edge"),
+    "microsoft edge": ("msedge", "msedge.exe", "microsoft edge", "edge"),
+    "vscode": ("code", "code.exe", "visual studio code", "vs code"),
+    "vs code": ("code", "code.exe", "visual studio code", "vs code"),
+    "visual studio code": ("code", "code.exe", "visual studio code", "vs code"),
     "discord": ("discord", "discord.exe", "discordapp"),
     "spotify": ("spotify", "spotify.exe"),
-    "steam": ("steam", "steam.exe"),
-    "obs": ("obs", "obs studio", "obs64", "obs64.exe"),
-    "obs studio": ("obs", "obs studio", "obs64", "obs64.exe"),
-    "telegram": ("telegram", "telegram desktop", "telegram.exe"),
+    "obs": ("obs64", "obs64.exe", "obs studio", "obs"),
+    "obs studio": ("obs64", "obs64.exe", "obs studio", "obs"),
+    "telegram": ("telegram", "telegram.exe", "telegram desktop"),
     "whatsapp": ("whatsapp", "whatsapp.exe"),
-    "bloco de notas": ("bloco de notas", "notepad", "notepad.exe"),
-    "notepad": ("bloco de notas", "notepad", "notepad.exe"),
-    "calculadora": ("calculadora", "calculator", "calc", "calc.exe"),
-    "calculator": ("calculadora", "calculator", "calc", "calc.exe"),
-    "paint": ("paint", "mspaint", "mspaint.exe"),
-    "explorador de arquivos": ("explorador de arquivos", "file explorer", "explorer"),
-    "file explorer": ("explorador de arquivos", "file explorer", "explorer"),
+    "bloco de notas": ("notepad", "notepad.exe", "bloco de notas"),
+    "notepad": ("notepad", "notepad.exe", "bloco de notas"),
+    "calculadora": ("calc", "calc.exe", "calculator", "calculadora"),
+    "calculator": ("calc", "calc.exe", "calculator", "calculadora"),
+    "paint": ("mspaint", "mspaint.exe", "paint"),
+    "explorador de arquivos": ("explorer", "explorer.exe", "file explorer"),
+    "file explorer": ("explorer", "explorer.exe", "file explorer"),
 }
 
 
 def _norm(value: object) -> str:
-    text = unicodedata.normalize("NFKD", str(value or ""))
-    text = "".join(ch for ch in text if not unicodedata.combining(ch))
-    text = text.casefold()
-    text = re.sub(r"\.(exe|lnk|url)$", "", text)
-    text = re.sub(r"[^a-z0-9]+", " ", text)
-    return " ".join(text.split())
+    raw = unicodedata.normalize("NFKD", str(value or ""))
+    raw = "".join(ch for ch in raw if not unicodedata.combining(ch)).casefold()
+    raw = re.sub(r"\.(exe|lnk|url)$", "", raw)
+    return re.sub(r"[^a-z0-9]+", "", raw)
 
 
-def _names_for(query: str) -> set[str]:
+def _aliases(query: str) -> set[str]:
     base = _norm(query)
-    names = {base} if base else set()
-    names.update(_norm(item) for item in _APP_ALIASES.get(base, ()))
-    # Also resolve an alias when the user says only a common short name.
-    for key, aliases in _APP_ALIASES.items():
-        normalized_aliases = {_norm(item) for item in aliases}
-        if base == _norm(key) or base in normalized_aliases:
-            names.update(normalized_aliases)
-    return {item for item in names if item}
+    result = {base} if base else set()
+    for key, values in _ALIASES.items():
+        key_norm = _norm(key)
+        value_norms = {_norm(v) for v in values}
+        if base == key_norm or base in value_norms:
+            result.update(value_norms)
+            result.add(key_norm)
+    return {v for v in result if v}
 
 
-def _matches(query: str, title: str = "", executable: str = "") -> bool:
-    query_names = _names_for(query)
-    title_norm = _norm(title)
-    exe_norm = _norm(Path(executable).stem if executable else "")
-    if not query_names:
-        return False
-    if exe_norm in query_names:
-        return True
-    if any(name == title_norm or (len(name) >= 3 and name in title_norm) for name in query_names):
-        return True
-    # For display names such as "Visual Studio Code" against a process called "Code".
-    return any(len(exe_norm) >= 3 and exe_norm in name.split() for name in query_names)
+def _is_steam(query: str) -> bool:
+    return _norm(query) in _aliases("steam")
+
+
+def _start_menu_roots() -> list[Path]:
+    candidates = [
+        Path(os.environ.get("APPDATA", r"C:\Users\Default\AppData\Roaming")) / "Microsoft" / "Windows" / "Start Menu" / "Programs",
+        Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "Microsoft" / "Windows" / "Start Menu" / "Programs",
+        Path(os.environ.get("USERPROFILE", r"C:\Users\Default")) / "Desktop",
+        Path(os.environ.get("PUBLIC", r"C:\Users\Public")) / "Desktop",
+    ]
+    return [p for p in candidates if p.is_dir()]
+
+
+def _shortcuts() -> list[Path]:
+    items: list[Path] = []
+    seen: set[str] = set()
+    for root in _start_menu_roots():
+        try:
+            for path in root.rglob("*.lnk"):
+                try:
+                    key = os.path.normcase(str(path.resolve()))
+                    if path.is_file() and key not in seen:
+                        seen.add(key)
+                        items.append(path)
+                    if len(items) >= 12000:
+                        return items
+                except OSError:
+                    continue
+        except OSError:
+            continue
+    return items
+
+
+def _find_shortcuts(query: str, limit: int = 8) -> tuple[list[Path], list[str]]:
+    names = _aliases(query)
+    if not names:
+        return [], []
+    exact: list[Path] = []
+    fuzzy: list[tuple[int, Path]] = []
+    for path in _shortcuts():
+        stem = _norm(path.stem)
+        if not stem:
+            continue
+        if stem in names:
+            exact.append(path)
+        elif any(len(n) >= 4 and (n in stem or stem in n) for n in names):
+            # Correspondências aproximadas só são sugestões, nunca executadas automaticamente.
+            score = max(min(len(n), len(stem)) for n in names if len(n) >= 4 and (n in stem or stem in n))
+            fuzzy.append((score, path))
+    exact.sort(key=lambda p: (len(p.stem), str(p).casefold()))
+    if exact:
+        unique = {str(p.resolve()).casefold(): p for p in exact}
+        matches = list(unique.values())
+        if len(matches) == 1:
+            return matches, []
+        # Atalhos duplicados para o mesmo nome são equivalentes: usar o primeiro é seguro.
+        same_names = {_norm(p.stem) for p in matches}
+        if len(same_names) == 1:
+            return [matches[0]], []
+        return [], sorted({p.stem for p in matches})[:limit]
+    if fuzzy:
+        fuzzy.sort(key=lambda x: (-x[0], x[1].stem.casefold(), str(x[1]).casefold()))
+        top_score = fuzzy[0][0]
+        top = [p for score, p in fuzzy if score == top_score]
+        return [], sorted({p.stem for p in top})[:limit]
+    return [], []
+
+
+def _steam_path() -> Path | None:
+    candidates: list[Path] = []
+    for env in ("PROGRAMFILES(X86)", "PROGRAMFILES", "LOCALAPPDATA"):
+        base = os.environ.get(env)
+        if base:
+            candidates.append(Path(base) / ("Programs/Steam/steam.exe" if env == "LOCALAPPDATA" else "Steam/steam.exe"))
+    candidates.extend([Path(r"C:\Program Files (x86)\Steam\steam.exe"), Path(r"C:\Program Files\Steam\steam.exe")])
+    if os.name == "nt":
+        try:
+            import winreg
+            keys = (
+                (winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam", "SteamPath"),
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam", "InstallPath"),
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Valve\Steam", "InstallPath"),
+            )
+            for hive, key_name, value_name in keys:
+                try:
+                    with winreg.OpenKey(hive, key_name) as key:
+                        value, _ = winreg.QueryValueEx(key, value_name)
+                    if value:
+                        candidates.append(Path(value) / "steam.exe")
+                except OSError:
+                    pass
+        except ImportError:
+            pass
+    for path in candidates:
+        try:
+            if path.is_file():
+                return path
+        except OSError:
+            continue
+    return None
+
+
+def _processes() -> list[dict[str, str]]:
+    if os.name != "nt":
+        return []
+    try:
+        result = subprocess.run(
+            ["tasklist.exe", "/FO", "CSV", "/NH"],
+            capture_output=True, timeout=8, shell=False, check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode:
+            return []
+        import io
+        text = result.stdout.decode("utf-8-sig", errors="replace")
+        return [{"nome": row[0], "pid": row[1]} for row in csv.reader(io.StringIO(text)) if len(row) >= 2]
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+
+
+def _matching_processes(query: str) -> list[dict[str, str]]:
+    names = _aliases(query)
+    return [p for p in _processes() if _norm(p["nome"]) in names]
 
 
 def _window_records() -> list[dict[str, Any]]:
     if os.name != "nt":
         return []
+    import ctypes
+    from ctypes import wintypes
     user32 = ctypes.windll.user32
     kernel32 = ctypes.windll.kernel32
-    # Declare pointer-sized HWND signatures so 64-bit handles are not truncated.
-    user32.GetWindowTextLengthW.argtypes = [ctypes.c_void_p]
-    user32.GetWindowTextLengthW.restype = ctypes.c_int
-    user32.GetWindowTextW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
-    user32.GetWindowTextW.restype = ctypes.c_int
-    user32.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
-    user32.GetWindowThreadProcessId.restype = ctypes.c_ulong
-    user32.IsWindowVisible.argtypes = [ctypes.c_void_p]
-    user32.IsWindowVisible.restype = ctypes.c_bool
-    user32.IsIconic.argtypes = [ctypes.c_void_p]
-    user32.IsIconic.restype = ctypes.c_bool
-    kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_bool, ctypes.c_ulong]
-    kernel32.OpenProcess.restype = ctypes.c_void_p
-    kernel32.QueryFullProcessImageNameW.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_ulong)]
-    kernel32.QueryFullProcessImageNameW.restype = ctypes.c_bool
-    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-    kernel32.CloseHandle.restype = ctypes.c_bool
-    records: list[dict[str, Any]] = []
-    enum_proc_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    windows: list[dict[str, Any]] = []
+    # OpenProcess/QueryFullProcessImageName identifies the owning executable rather than guessing from title text.
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    enum_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
-    def process_image(pid: int) -> str:
-        if not pid:
-            return ""
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    def image_for_pid(pid: int) -> str:
+        handle = kernel32.OpenProcess(0x1000, False, pid)
         if not handle:
             return ""
         try:
             buf = ctypes.create_unicode_buffer(2048)
-            size = ctypes.c_ulong(len(buf))
+            size = wintypes.DWORD(len(buf))
             if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
                 return buf.value
         except Exception:
@@ -121,313 +219,111 @@ def _window_records() -> list[dict[str, Any]]:
             kernel32.CloseHandle(handle)
         return ""
 
-    @enum_proc_type
-    def enum_callback(hwnd, _lparam):
+    def callback(hwnd, _lparam):
         try:
             length = user32.GetWindowTextLengthW(hwnd)
             if length <= 0:
                 return True
-            title_buf = ctypes.create_unicode_buffer(min(length + 1, 2048))
-            user32.GetWindowTextW(hwnd, title_buf, len(title_buf))
-            title = title_buf.value.strip()
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            title = buf.value.strip()
             if not title:
                 return True
-            pid = ctypes.c_ulong(0)
+            pid = wintypes.DWORD()
             user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            path = process_image(int(pid.value))
-            visible = bool(user32.IsWindowVisible(hwnd))
-            minimized = bool(user32.IsIconic(hwnd))
-            records.append({
-                "hwnd": int(hwnd), "titulo": title[:180], "pid": int(pid.value),
-                "executavel": Path(path).name if path else "", "caminho": path,
-                "visivel": visible, "minimizada": minimized,
+            exe_path = image_for_pid(int(pid.value))
+            windows.append({
+                "hwnd": int(hwnd), "pid": int(pid.value), "titulo": title,
+                "executavel": Path(exe_path).name if exe_path else "",
+                "caminho": exe_path,
+                "visivel": bool(user32.IsWindowVisible(hwnd)),
+                "minimizada": bool(user32.IsIconic(hwnd)),
             })
         except Exception:
             pass
         return True
-
     try:
-        user32.EnumWindows(enum_callback, 0)
+        user32.EnumWindows(enum_proc(callback), 0)
     except Exception:
         return []
-    return records
+    return windows
 
 
-def _restore_matching_window(query: str) -> dict[str, Any] | None:
-    if os.name != "nt":
-        return None
+def _restore_window(query: str) -> dict[str, Any] | None:
+    names = _aliases(query)
     records = _window_records()
-    matches = [r for r in records if _matches(query, r["titulo"], r["executavel"])]
+    # Match executable name first. Only use an exact title as a fallback; no substring title matching.
+    matches = [r for r in records if _norm(r["executavel"]) in names]
+    if not matches:
+        matches = [r for r in records if _norm(r["titulo"]) in names]
     if not matches:
         return None
-    # Prefer a window with a useful title and currently visible/minimized.
     matches.sort(key=lambda r: (bool(r["visivel"]), bool(r["minimizada"]), len(r["titulo"])), reverse=True)
-    user32 = ctypes.windll.user32
-    user32.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
-    user32.ShowWindow.restype = ctypes.c_bool
-    user32.BringWindowToTop.argtypes = [ctypes.c_void_p]
-    user32.BringWindowToTop.restype = ctypes.c_bool
-    user32.SetForegroundWindow.argtypes = [ctypes.c_void_p]
-    user32.SetForegroundWindow.restype = ctypes.c_bool
-    user32.IsWindowVisible.argtypes = [ctypes.c_void_p]
-    user32.IsWindowVisible.restype = ctypes.c_bool
-    for record in matches:
-        hwnd = record["hwnd"]
-        try:
-            # SW_RESTORE restores minimized windows; SW_SHOW also unhides ordinary hidden windows.
-            user32.ShowWindow(hwnd, 9)
-            user32.ShowWindow(hwnd, 5)
-            user32.BringWindowToTop(hwnd)
-            user32.SetForegroundWindow(hwnd)
-            time.sleep(0.12)
-            if user32.IsWindowVisible(hwnd):
-                return record
-        except Exception:
-            continue
-    return None
+    user32 = __import__("ctypes").windll.user32
+    user32.ShowWindow(matches[0]["hwnd"], 9)  # SW_RESTORE
+    user32.BringWindowToTop(matches[0]["hwnd"])
+    user32.SetForegroundWindow(matches[0]["hwnd"])
+    time.sleep(0.2)
+    matches[0]["visivel"] = bool(user32.IsWindowVisible(matches[0]["hwnd"]))
+    return matches[0] if matches[0]["visivel"] else None
 
 
-def _tray_controls(query: str, click: bool = False) -> list[str]:
-    """Inspeciona os ícones da área de notificação; suporte varia por versão do Windows."""
+def _launch_steam() -> ToolResult:
     if os.name != "nt":
-        return []
-    try:
-        from pywinauto import Desktop
-        from pywinauto.application import Application
-    except Exception:
-        return []
-
-    query_names = _names_for(query)
-    candidates: list[tuple[str, Any]] = []
-    seen: set[str] = set()
-
-    def add_control(control: Any) -> None:
+        return ToolResult.fail("A abertura do Steam só é suportada no Windows.")
+    running = _matching_processes("steam")
+    if running:
+        # Método oficial do Steam para pedir à instância existente a janela principal.
         try:
-            name = (control.window_text() or getattr(control.element_info, "name", "") or "").strip()
-            if not name or not _matches(query, name, ""):
-                return
-            control_type = str(getattr(getattr(control, "element_info", None), "control_type", "") or "")
-            if control_type and control_type not in {"Button", "MenuItem", "ListItem", "CheckBox", "ToggleButton"}:
-                # Win32 wrappers may not expose a UIA control type; keep those if they are buttons.
-                class_name = str(getattr(control, "class_name", lambda: "")() or "")
-                if "button" not in class_name.casefold() and control_type not in {"Toolbar", ""}:
-                    return
-            key = _norm(name)
-            if key and key not in seen:
-                candidates.append((name, control))
-                seen.add(key)
-        except Exception:
-            return
-
-    # Win32's classic Notification Area toolbar is the most reliable source for visible tray icons.
-    try:
-        app = Application(backend="win32").connect(path="explorer.exe", timeout=2)
-        taskbar = app.window(class_name="Shell_TrayWnd")
-        toolbar = taskbar.child_window(title="Notification Area", class_name="ToolbarWindow32")
-        for control in toolbar.children():
-            add_control(control)
-    except Exception:
-        pass
-
-    # UIA fallback covers some newer Windows builds and exposed overflow controls.
-    try:
-        desktop = Desktop(backend="uia")
-        roots = desktop.windows()
-        expand_names = {"show hidden icons", "mostrar icones ocultos", "hidden icons", "mostrar icones escondidos"}
-        expanded = False
-        for root in roots:
-            try:
-                info = getattr(root, "element_info", None)
-                root_name = _norm(root.window_text())
-                root_class = str(getattr(info, "class_name", "") or "")
-                is_tray_root = (
-                    root_class in {"Shell_TrayWnd", "NotifyIconOverflowWindow", "TopLevelWindowForOverflowXamlIsland"}
-                    or any(part in root_name for part in ("notification area", "system tray", "overflow", "area de notificacao", "icones ocultos"))
-                )
-                if not is_tray_root:
-                    continue
-                controls = root.descendants()
-                for control in controls:
-                    try:
-                        if _norm(control.window_text()) in expand_names:
-                            control.click_input()
-                            time.sleep(0.25)
-                            expanded = True
-                    except Exception:
-                        pass
-            except Exception:
-                continue
-        if expanded:
-            try:
-                roots = Desktop(backend="uia").windows()
-            except Exception:
-                pass
-        for root in roots:
-            try:
-                info = getattr(root, "element_info", None)
-                root_name = _norm(root.window_text())
-                root_class = str(getattr(info, "class_name", "") or "")
-                is_tray_root = (
-                    root_class in {"Shell_TrayWnd", "NotifyIconOverflowWindow", "TopLevelWindowForOverflowXamlIsland"}
-                    or any(part in root_name for part in ("notification area", "system tray", "overflow", "area de notificacao", "icones ocultos"))
-                )
-                if is_tray_root:
-                    for control in root.descendants():
-                        add_control(control)
-            except Exception:
-                continue
-    except Exception:
-        pass
-
-    if not candidates:
-        return []
-    names = sorted({name for name, _ in candidates}, key=str.casefold)
-    if not click:
-        return names
-    exact = [(name, control) for name, control in candidates if _norm(name) in query_names]
-    selected = exact if exact else candidates
-    if len(selected) != 1:
-        return names
-    try:
-        selected[0][1].click_input()
-        return [selected[0][0]]
-    except Exception:
-        return []
-
-
-def _start_menu_roots() -> list[Path]:
-    candidates = [
-        Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows" / "Start Menu" / "Programs",
-        Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "Microsoft" / "Windows" / "Start Menu" / "Programs",
-        Path(os.environ.get("USERPROFILE", "")) / "Desktop",
-        Path(os.environ.get("PUBLIC", r"C:\Users\Public")) / "Desktop",
-    ]
-    return [p for p in candidates if str(p) and p.is_dir()]
-
-
-def _shortcuts() -> list[Path]:
-    results: list[Path] = []
-    seen: set[str] = set()
-    for root in _start_menu_roots():
-        try:
-            for path in root.rglob("*.lnk"):
-                try:
-                    normalized = os.path.normcase(str(path.resolve()))
-                    if normalized not in seen and path.is_file():
-                        results.append(path)
-                        seen.add(normalized)
-                    if len(results) >= 12000:
-                        return results
-                except OSError:
-                    continue
-        except OSError:
-            continue
-    return results
-
-
-def _resolve_shortcut(query: str) -> tuple[Path | None, list[str]]:
-    names = _names_for(query)
-    literal = _norm(query)
-    ranked: list[tuple[int, Path]] = []
-    for path in _shortcuts():
-        stem = _norm(path.stem)
-        if not stem:
-            continue
-        score = 0
-        if stem == literal:
-            score = 120
-        elif stem in names:
-            score = 100
-        elif any(name in stem for name in names if len(name) >= 3):
-            score = 90
-        elif any(stem in name for name in names if len(stem) >= 3):
-            score = 75
-        else:
-            tokens = set(stem.split())
-            best = max((len(tokens & set(name.split())) / max(1, len(tokens | set(name.split()))) for name in names), default=0.0)
-            if best >= 0.5:
-                score = int(50 + best * 20)
-        if score:
-            ranked.append((score, path))
-    if not ranked:
-        return None, []
-    ranked.sort(key=lambda item: (-item[0], _norm(item[1].stem), str(item[1]).casefold()))
-    top_score = ranked[0][0]
-    top = [path for score, path in ranked if score == top_score]
-    unique_stems = {_norm(path.stem) for path in top}
-    if len(top) > 1 and len(unique_stems) > 1:
-        return None, sorted({path.stem for path in top})[:8]
-    return top[0], []
-
-
-def _running_process_names() -> list[str]:
-    if os.name != "nt":
-        return []
-    try:
-        done = subprocess.run(
-            ["tasklist", "/FO", "CSV", "/NH"], capture_output=True, timeout=8,
-            text=True, encoding="utf-8", errors="replace", check=False,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            os.startfile("steam://open/main")  # type: ignore[attr-defined]
+        except OSError as exc:
+            return ToolResult.fail(f"O Steam está em execução, mas não consegui enviar steam://open/main: {exc}")
+        time.sleep(1.2)
+        window = _restore_window("steam")
+        if window:
+            return ToolResult(ok=True, summary="Steam já estava em execução; solicitei a janela principal e confirmei uma janela Steam visível.", data={"metodo": "steam-uri", "janela": window["titulo"]})
+        # Não alegar sucesso total e, principalmente, não clicar num ícone de bandeja adivinhado.
+        return ToolResult.fail(
+            "Enviei steam://open/main para a instância existente, mas o Windows não expôs uma janela principal Steam confirmável. "
+            "Não cliquei em nenhum ícone da bandeja para evitar acionar outro aplicativo. "
+            "Confira uma vez manualmente se o Steam está minimizado/ocupado e tente de novo.",
+            metodo="steam-uri", processos=running[:8],
         )
-        if done.returncode != 0:
-            return []
-        return [row[0] for row in csv.reader(done.stdout.splitlines()) if row]
-    except Exception:
-        return []
-
-
-def _process_matches(query: str) -> list[str]:
-    return sorted({name for name in _running_process_names() if _matches(query, "", name)})
+    executable = _steam_path()
+    if not executable:
+        return ToolResult.fail("Não encontrei steam.exe nas pastas comuns nem no Registro do Windows. Abra o Steam manualmente uma vez para confirmar a instalação.")
+    try:
+        subprocess.Popen([str(executable)], cwd=str(executable.parent), shell=False,
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return ToolResult(ok=True, summary="Iniciei o Steam pelo steam.exe instalado. Aguarde a inicialização e depois peça para confirmar a tela.", data={"metodo": "exe", "executavel": str(executable), "verificado": False})
+    except OSError as exc:
+        return ToolResult.fail(f"Não consegui iniciar o Steam por {executable}: {exc}")
 
 
 def list_apps(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     del ctx
-    filtro = str(args.get("filtro") or "").strip()
+    query = str(args.get("filtro") or "").strip()
     limit = min(max(int(args.get("max_resultados", 40)), 1), 100)
+    names = _aliases(query) if query else set()
     shortcuts = _shortcuts()
-    names = sorted({p.stem for p in shortcuts if not filtro or _matches(filtro, p.stem, "")}, key=str.casefold)
+    if query:
+        shortcuts = [p for p in shortcuts if _norm(p.stem) in names or any(n in _norm(p.stem) for n in names if len(n) >= 4)]
     windows = _window_records()
-    if filtro:
-        windows = [r for r in windows if _matches(filtro, r["titulo"], r["executavel"])]
-    tray = _tray_controls(filtro, click=False) if filtro else []
-    return ToolResult(
-        ok=True,
-        summary=f"{len(names)} atalhos de aplicativos, {len(windows)} janela(s) correspondente(s) e {len(tray)} ícone(s) de bandeja correspondente(s).",
-        data={
-            "atalhos": names[:limit],
-            "janelas": [{k: r[k] for k in ("titulo", "executavel", "visivel", "minimizada", "pid")} for r in windows[:limit]],
-            "icones_bandeja": tray[:limit],
-            "observacao": "A disponibilidade de ícones da bandeja depende da versão e configuração do Windows.",
-        },
-    )
-
-
-def restore_app(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
-    del ctx
-    query = str(args.get("nome") or "").strip()
-    if not query or len(query) > 100:
-        return ToolResult.fail("Informe o nome do aplicativo (máximo 100 caracteres).")
-    if os.name != "nt":
-        return ToolResult.fail("Esta ferramenta só é compatível com Windows.")
-
-    window = _restore_matching_window(query)
-    if window:
-        return ToolResult(ok=True, summary=f"Janela de {query} restaurada e trazida para frente.", data={"titulo": window["titulo"], "executavel": window["executavel"], "minimizada_antes": window["minimizada"]})
-
-    tray = _tray_controls(query, click=True)
-    if tray and len(tray) == 1:
-        return ToolResult(ok=True, summary=f"Cliquei no ícone de bandeja '{tray[0]}'. Confira se a janela foi restaurada.", data={"icone": tray[0], "verificado": False})
-    if tray and len(tray) > 1:
-        return ToolResult.fail(f"Há mais de um controle da bandeja correspondente a '{query}'.", candidatos=tray[:8])
-
-    running = _process_matches(query)
-    if running:
-        return ToolResult.fail(
-            f"O processo parece estar ativo ({', '.join(running[:5])}), mas não consegui restaurar a janela automaticamente. "
-            "Alguns aplicativos escondidos na bandeja exigem clique específico no ícone ou um comando próprio do aplicativo. "
-            "Não abri uma segunda instância para evitar duplicá-lo."
-        )
-    return ToolResult.fail(f"Não encontrei janela nem ícone de bandeja correspondente a '{query}'.")
+    if query:
+        windows = [w for w in windows if _norm(w["executavel"]) in names or _norm(w["titulo"]) in names]
+    processes = _processes()
+    if query:
+        processes = [p for p in processes if _norm(p["nome"]) in names]
+    data: dict[str, Any] = {
+        "atalhos": [{"nome": p.stem, "caminho": str(p)} for p in shortcuts[:limit]],
+        "janelas": [{k: w[k] for k in ("titulo", "executavel", "visivel", "minimizada", "pid")} for w in windows[:limit]],
+        "processos": processes[:limit],
+        "nota": "A bandeja não é clicada automaticamente: ícones sem nome acessível podem apontar para o aplicativo errado.",
+    }
+    steam = _steam_path() if not query or _is_steam(query) else None
+    if steam:
+        data["steam_exe"] = str(steam)
+    return ToolResult(ok=True, summary=f"Encontrei {len(shortcuts)} atalho(s), {len(windows)} janela(s) e {len(processes)} processo(s) correspondente(s).", data=data)
 
 
 def open_app(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
@@ -437,77 +333,68 @@ def open_app(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         return ToolResult.fail("Informe o nome do aplicativo (máximo 100 caracteres).")
     if os.name != "nt":
         return ToolResult.fail("Esta ferramenta só é compatível com Windows.")
-
-    # Primeiro tenta restaurar uma instância existente para não abrir duplicatas.
-    existing = _restore_matching_window(query)
-    if existing:
-        return ToolResult(ok=True, summary=f"O aplicativo {query} já estava aberto; restaurei a janela existente.", data={"titulo": existing["titulo"], "executavel": existing["executavel"]})
-    tray = _tray_controls(query, click=True)
-    if tray and len(tray) == 1:
-        return ToolResult(ok=True, summary=f"O aplicativo parece estar na bandeja; cliquei em '{tray[0]}'. Confira se abriu.", data={"icone": tray[0], "verificado": False})
-    running = _process_matches(query)
-    if running:
-        return ToolResult.fail(
-            f"O processo {', '.join(running[:5])} já está ativo, mas não consegui restaurar sua janela. "
-            "Não iniciei outra instância para evitar duplicatas. Tente 'restaurar aplicativo' ou confira o ícone da bandeja."
-        )
-
-    shortcut, suggestions = _resolve_shortcut(query)
-    if suggestions:
-        return ToolResult.fail(f"O nome '{query}' corresponde a vários atalhos. Diga qual deseja abrir.", candidatos=suggestions)
-    if shortcut is None:
-        return ToolResult.fail(
-            f"Não encontrei um atalho chamado '{query}' no Menu Iniciar ou nas áreas de trabalho. "
-            "Peça para listar os aplicativos ou crie um atalho do programa no Menu Iniciar."
-        )
+    if _is_steam(query):
+        return _launch_steam()
     try:
-        os.startfile(str(shortcut))  # Windows abre o atalho através do Shell.
-        return ToolResult(ok=True, summary=f"Solicitei ao Windows a abertura de {shortcut.stem}.", data={"aplicativo": shortcut.stem, "atalho": str(shortcut)})
+        existing = _restore_window(query)
+        if existing:
+            return ToolResult(ok=True, summary=f"Restaurei a janela existente '{existing['titulo']}'.", data={"janela": existing["titulo"], "executavel": existing["executavel"]})
+        running = _matching_processes(query)
+        if running:
+            return ToolResult.fail(
+                f"O processo {', '.join(p['nome'] for p in running[:5])} está ativo, mas não há janela correspondente confirmável. "
+                "Não cliquei na bandeja nem abri outra instância, para não acionar o programa errado."
+            )
+        shortcuts, suggestions = _find_shortcuts(query)
+        if suggestions:
+            return ToolResult.fail(f"Encontrei nomes parecidos com '{query}', mas nenhum atalho exato. Diga qual é o correto.", candidatos=suggestions)
+        if not shortcuts:
+            return ToolResult.fail(f"Não encontrei atalho exato para '{query}' no Menu Iniciar/área de trabalho. Use listar_aplicativos para conferir os nomes.")
+        os.startfile(str(shortcuts[0]))  # type: ignore[attr-defined]
+        return ToolResult(ok=True, summary=f"Solicitei ao Windows a abertura do atalho '{shortcuts[0].stem}'. A abertura ainda precisa ser confirmada visualmente.", data={"atalho": str(shortcuts[0]), "verificado": False})
     except Exception as exc:
-        return ToolResult.fail(f"Falha ao abrir o atalho {shortcut.stem}: {type(exc).__name__}: {exc}")
+        return ToolResult.fail(f"Falha ao abrir '{query}': {type(exc).__name__}: {exc}")
+
+
+def restore_app(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    del ctx
+    query = str(args.get("nome") or "").strip()
+    if not query or len(query) > 100:
+        return ToolResult.fail("Informe o nome do aplicativo (máximo 100 caracteres).")
+    if os.name != "nt":
+        return ToolResult.fail("Esta ferramenta só é compatível com Windows.")
+    if _is_steam(query):
+        return _launch_steam()
+    try:
+        window = _restore_window(query)
+        if window:
+            return ToolResult(ok=True, summary=f"Restaurei a janela '{window['titulo']}' e trouxe-a para frente.", data={"janela": window["titulo"], "executavel": window["executavel"], "minimizada_antes": window["minimizada"]})
+        running = _matching_processes(query)
+        if running:
+            return ToolResult.fail(f"O processo {', '.join(p['nome'] for p in running[:5])} está ativo, mas nenhuma janela compatível foi encontrada. Não cliquei em ícones de bandeja sem identificação.")
+        return ToolResult.fail(f"Não encontrei janela nem processo correspondente a '{query}'. Use abrir_aplicativo para iniciá-lo.")
+    except Exception as exc:
+        return ToolResult.fail(f"Falha ao restaurar '{query}': {type(exc).__name__}: {exc}")
 
 
 def build_tools() -> list[ToolSpec]:
     return [
         ToolSpec(
             name="listar_aplicativos",
-            description="Lista atalhos do Menu Iniciar/área de trabalho e janelas abertas. Use para descobrir o nome exato de um aplicativo antes de abri-lo ou restaurá-lo.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "filtro": {"type": "string", "maxLength": 100, "description": "Filtro opcional pelo nome do app ou janela."},
-                    "max_resultados": {"type": "integer", "minimum": 1, "maximum": 100},
-                },
-                "additionalProperties": False,
-            },
-            risk=Risk.L0,
-            handler=list_apps,
-            category="desktop",
+            description="Lista atalhos, processos e janelas abertas do Windows. Use filtro para encontrar um nome exato. Não clica na bandeja.",
+            parameters={"type": "object", "properties": {"filtro": {"type": "string", "maxLength": 100}, "max_resultados": {"type": "integer", "minimum": 1, "maximum": 100}}, "additionalProperties": False},
+            risk=Risk.L0, handler=list_apps, category="desktop",
         ),
         ToolSpec(
             name="abrir_aplicativo",
-            description="Abre um aplicativo pelo atalho do Menu Iniciar/área de trabalho; se já estiver aberto ou na bandeja, tenta restaurar a instância existente sem criar duplicatas. Informe o nome, como Chrome, Discord ou VS Code. Não aceita comandos ou caminhos arbitrários.",
-            parameters={
-                "type": "object",
-                "properties": {"nome": {"type": "string", "minLength": 1, "maxLength": 100}},
-                "required": ["nome"],
-                "additionalProperties": False,
-            },
-            risk=Risk.L1,
-            handler=open_app,
-            category="desktop",
+            description="Abre um aplicativo pelo atalho exato do Menu Iniciar. Steam tem fluxo específico via steam.exe/steam://open/main. Não adivinha nem clica em ícones anônimos da bandeja; verifica processos/janelas e relata falhas.",
+            parameters={"type": "object", "properties": {"nome": {"type": "string", "minLength": 1, "maxLength": 100}}, "required": ["nome"], "additionalProperties": False},
+            risk=Risk.L1, handler=open_app, category="desktop",
         ),
         ToolSpec(
             name="restaurar_aplicativo",
-            description="Restaura uma janela minimizada ou tenta trazer um aplicativo da bandeja do Windows para frente, sem iniciar uma segunda instância. Informe o nome do aplicativo.",
-            parameters={
-                "type": "object",
-                "properties": {"nome": {"type": "string", "minLength": 1, "maxLength": 100}},
-                "required": ["nome"],
-                "additionalProperties": False,
-            },
-            risk=Risk.L0,
-            handler=restore_app,
-            category="desktop",
+            description="Restaura uma janela minimizada usando a identidade do processo/título exato. Para Steam usa steam://open/main. Não clica em ícones de bandeja sem identificação.",
+            parameters={"type": "object", "properties": {"nome": {"type": "string", "minLength": 1, "maxLength": 100}}, "required": ["nome"], "additionalProperties": False},
+            risk=Risk.L0, handler=restore_app, category="desktop",
         ),
     ]

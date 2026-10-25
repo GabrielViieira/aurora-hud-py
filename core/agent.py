@@ -6,6 +6,7 @@ import json
 import re
 import threading
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -34,6 +35,34 @@ _MEMORY_REQUEST_RE = re.compile(
     r"(?i)\b(lembre(?:-se)?|guarde|anote|não esqueça|prefiro|minha preferência|sempre use|nunca use)\b"
 )
 _DO_NOT_REMEMBER_RE = re.compile(r"(?i)\b(não (?:registre|guarde|salve|anote)|esqueça isso)\b")
+
+
+# AURORA_LOCAL_APP_ROUTER_V1
+def _local_app_intent(text: str) -> tuple[str, dict[str, str]] | None:
+    """Roteia comandos curtos e explícitos para ferramentas locais, sem consultar o LLM."""
+    value = unicodedata.normalize("NFKD", (text or "").strip().casefold())
+    value = "".join(ch for ch in value if not unicodedata.combining(ch))
+    value = re.sub(r"^[\s,!:;.-]*(?:ei\s+)?aurora[\s,!:;.-]*", "", value)
+    value = re.sub(r"[\s.!?]+$", "", value).strip()
+    if re.fullmatch(r"(?:liste|listar|mostre|mostrar)\s+(?:(?:os|as)\s+)?aplicativos(?:\s+abertos)?", value) or value in {"quais aplicativos estao abertos", "listar apps", "liste apps"}:
+        return ("listar_aplicativos", {"filtro": "", "max_resultados": 40})
+    open_match = re.fullmatch(
+        r"(?:por favor\s+)?(?:abra|abre|abrir|inicie|inicia|iniciar|execute|executar|open|launch|start)\s+(?:(?:o|a|os|as|um|uma|the)\s+)?([a-z0-9][a-z0-9 ._+#()\-]{0,79})",
+        value,
+    )
+    if open_match:
+        name = open_match.group(1).strip(" ._-")
+        if name:
+            return ("abrir_aplicativo", {"nome": name})
+    restore_match = re.fullmatch(
+        r"(?:por favor\s+)?(?:restaure|restaurar|mostre|mostrar|traga(?:\s+para\s+frente)?|reabra|reabrir|restore|show)\s+(?:(?:o|a|os|as|the)\s+)?([a-z0-9][a-z0-9 ._+#()\-]{0,79})",
+        value,
+    )
+    if restore_match:
+        name = restore_match.group(1).strip(" ._-")
+        if name:
+            return ("restaurar_aplicativo", {"nome": name})
+    return None
 
 
 @dataclass
@@ -135,6 +164,7 @@ class AuroraAgent:
             task_id=task.id,
             cancel_event=self.cancel_event,
         )
+        local_app_intent = _local_app_intent(text)
 
         try:
             iterations = 0
@@ -162,6 +192,23 @@ class AuroraAgent:
                     break
 
                 iterations += 1
+                if local_app_intent is not None:
+                    local_name, local_args = local_app_intent
+                    local_call = ToolCall(
+                        id=f"local-{task.id}", name=local_name, arguments=local_args
+                    )
+                    local_result, local_fatal = self._run_tool(local_call, task, ctx)
+                    tool_call_count += 1
+                    tools_used.append(local_name)
+                    final_text = local_result.summary if local_result.ok else (
+                        f"Não consegui concluir o comando local: {local_result.error or local_result.summary}"
+                    )
+                    if local_result.ok:
+                        task.transition(TaskStatus.COMPLETED)
+                    else:
+                        task.error = final_text
+                        task.transition(TaskStatus.FAILED)
+                    break
                 request = LLMRequest(
                     messages=messages,
                     tools=tools,
@@ -312,7 +359,8 @@ class AuroraAgent:
         )
         self.metrics.record("turn", value=latency_ms, model=model_used, tools=len(tools_used))
 
-        self._after_turn(text, final_text, task, tools_used)
+        if local_app_intent is None:
+            self._after_turn(text, final_text, task, tools_used)
         return reply
 
     # --------------------------------------------------------------- ferramentas
