@@ -162,11 +162,21 @@ class SvgWidget(QWidget):
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
             rect = QRectF(self.rect())
 
-            # Mesma ordem visual do HTML fornecido.
-            self.effects.paint_background(painter, rect)
-            self.effects.paint_particles(painter, rect)
-            self.d20.paint(painter, rect)
-            self.effects.paint_core(painter, rect)
+            # Durante listening/thinking/processing/speaking, a composição inteira
+            # gira ao redor do centro. Os anéis e o icosaedro mantêm seus próprios
+            # movimentos, criando uma rotação em camadas. O widget segue transparente.
+            painter.save()
+            painter.translate(rect.center())
+            painter.rotate(self.effects.global_rotation_angle)
+            painter.translate(-rect.center())
+            try:
+                # Camadas transparentes: feixes, partículas, borda japonesa e núcleo.
+                self.effects.paint_background(painter, rect)
+                self.effects.paint_particles(painter, rect)
+                self.d20.paint(painter, rect)
+                self.effects.paint_core(painter, rect)
+            finally:
+                painter.restore()
         finally:
             # Garante que QPainter seja encerrado mesmo se uma camada falhar.
             painter.end()
