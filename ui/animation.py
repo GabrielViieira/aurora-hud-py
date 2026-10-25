@@ -13,14 +13,14 @@ class D20Animation:
     CENTER = 400.0
 
     PALETTES = {
-        "idle": "#38bfff",
-        "listening": "#28dfff",
-        "thinking": "#38f59b",
-        "processing": "#f4fbff",
-        "speaking": "#e9b95b",
-        "completed": "#2f91ff",
-        "success": "#38f59b",
-        "error": "#ff4056",
+        "idle": "#e8b84d",
+        "listening": "#ffe16a",
+        "thinking": "#b9dba7",
+        "processing": "#fff0b3",
+        "speaking": "#e8c16b",
+        "completed": "#d9b765",
+        "success": "#8cdbab",
+        "error": "#ff6570",
     }
 
     def __init__(self, *, scale: float = 165.0, rotation_speed: float = 0.72, tilt_x: float = 0.2) -> None:
