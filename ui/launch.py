@@ -710,7 +710,7 @@ class SvgHologram(QMainWindow):
             if jp_voice:
                 engine.setProperty("voice", jp_voice)
             engine.setProperty("rate", 165)
-            engine.setProperty("volume", 1.0)
+            engine.setProperty("volume", 0.5)
             self._tts_engine = engine
             print(f"[Aurora TTS] Voz japonesa ativa: {jp_voice}")
         except Exception as exc:
@@ -939,6 +939,7 @@ class SvgHologram(QMainWindow):
             print(f"[Aurora visual] Não consegui aplicar {state}: {exc}")
 
     @Slot(str, str, str, str, object)
+    
     def _play_prepared_speech(
         self, caption: str, spoken_text: str, audio_path: str,
         final_state: str, done: object,
@@ -948,7 +949,8 @@ class SvgHologram(QMainWindow):
         if caption:
             self.show_caption(caption)
         self._set_speech_visual_state("speaking")
-
+        if not _lower_wav_volume(audio_path, gain=0.4):
+            print("[Aurora TTS] WAV mantido no volume original.")
         def _play() -> None:
             try:
                 import winsound
@@ -959,15 +961,16 @@ class SvgHologram(QMainWindow):
                 self.speech_preparation_failed.emit(
                     caption, spoken_text, final_state, done
                 )
+                
                 return
             self.speech_playback_finished.emit(final_state, caption, done)
-
+        
         try:
             threading.Thread(target=_play, daemon=True, name="AuroraSpeechPlayback").start()
         except Exception as exc:
             print(f"[Aurora TTS] Não consegui iniciar a reprodução: {exc}")
             self.speech_preparation_failed.emit(caption, spoken_text, final_state, done)
-
+    
     @Slot(str, str, str, object)
     def _speech_preparation_failed(
         self, caption: str, spoken_text: str, final_state: str, done: object,
@@ -1244,7 +1247,49 @@ class SvgHologram(QMainWindow):
             print(f"[Aurora UI] Erro ao fechar runtime: {exc}")
         super().closeEvent(event)
 
+def _lower_wav_volume(path: str, gain: float = 0.4) -> bool:
+    """Reduz o volume de WAV PCM de 16 bits sem alterar a duração."""
+    import array
+    import sys
+    import wave
 
+    try:
+        with wave.open(path, "rb") as source:
+            params = source.getparams()
+
+            # Evita alterar formatos que esta função não suporta.
+            if params.sampwidth != 2 or params.comptype != "NONE":
+                return False
+
+            frames = source.readframes(source.getnframes())
+
+        samples = array.array("h")
+        samples.frombytes(frames)
+
+        if samples.itemsize != 2:
+            return False
+
+        if sys.byteorder != "little":
+            samples.byteswap()
+
+        for i, sample in enumerate(samples):
+            samples[i] = max(
+                -32768,
+                min(32767, int(sample * gain))
+            )
+
+        if sys.byteorder != "little":
+            samples.byteswap()
+
+        with wave.open(path, "wb") as target:
+            target.setparams(params)
+            target.writeframes(samples.tobytes())
+
+        return True
+
+    except (OSError, ValueError, EOFError, wave.Error) as exc:
+        print(f"[Aurora TTS] Não foi possível ajustar o volume: {exc}")
+        return False
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Interface holográfica da Aurora"
