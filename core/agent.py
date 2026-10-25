@@ -186,9 +186,12 @@ class AuroraAgent:
                 messages.append(assistant)
 
                 vision_attachments: list[tuple[str, str]] = []
-                desktop_tool_names = {"capturar_tela", "controlar_mouse", "controlar_teclado"}
+                desktop_tool_names = {"capturar_tela", "controlar_mouse", "controlar_teclado", "abrir_aplicativo", "restaurar_aplicativo"}
                 desktop_calls = [call.name for call in response.tool_calls if call.name in desktop_tool_names]
-                preferred_desktop_tool = ("capturar_tela" if "capturar_tela" in desktop_calls else (desktop_calls[0] if desktop_calls else ""))
+                preferred_desktop_tool = (
+                    next((name for name in ("abrir_aplicativo", "restaurar_aplicativo") if name in desktop_calls), "")
+                    or ("capturar_tela" if "capturar_tela" in desktop_calls else (desktop_calls[0] if desktop_calls else ""))
+                )
                 desktop_batch_requires_serial = len(desktop_calls) > 1
                 for call in response.tool_calls:
                     tool_call_count += 1
@@ -217,13 +220,24 @@ class AuroraAgent:
                         )
                     )
                     key = f"{call.name}:{json.dumps(call.arguments, sort_keys=True, ensure_ascii=False)}"
-                    if not result.ok:
+                    # Uma etapa adiada não é uma ação executada. Conte repetições
+                    # idênticas para evitar consumir todas as iterações em loop.
+                    if result.data.get("adiada"):
+                        failures[key] = failures.get(key, 0) + 1
+                    elif not result.ok:
                         failures[key] = failures.get(key, 0) + 1
                     if fatal or failures.get(key, 0) >= 2:
-                        final_text = (
-                            f"Não consegui concluir usando `{call.name}`. "
-                            f"Motivo: {result.error or result.summary}"
-                        )
+                        if result.data.get("adiada"):
+                            final_text = (
+                                f"Interrompi porque a etapa `{call.name}` foi adiada repetidamente "
+                                "no mesmo ciclo visual. Nenhuma ação foi realizada por esta chamada. "
+                                "Tente novamente com uma etapa por vez: abrir/restaurar, capturar a tela, analisar, agir e verificar."
+                            )
+                        else:
+                            final_text = (
+                                f"Não consegui concluir usando `{call.name}`. "
+                                f"Motivo: {result.error or result.summary}"
+                            )
                         task.error = final_text
                         task.transition(TaskStatus.FAILED)
                         break
