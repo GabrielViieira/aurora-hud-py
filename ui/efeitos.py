@@ -45,14 +45,15 @@ class HologramEffects:
     PARTICLE_DURATION = 5.0
 
     PALETTES: ClassVar[dict[str, dict[str, str]]] = {
-        "idle": {"primary": "#38bfff", "secondary": "#8cecff", "core": "#ffffff"},
-        "listening": {"primary": "#28dfff", "secondary": "#9af6ff", "core": "#ffffff"},
-        "thinking": {"primary": "#38f59b", "secondary": "#a4ffd0", "core": "#effff7"},
-        "processing": {"primary": "#f4fbff", "secondary": "#ffffff", "core": "#ffffff"},
-        "speaking": {"primary": "#e9b95b", "secondary": "#ffe4a0", "core": "#fff5d6"},
-        "completed": {"primary": "#2f91ff", "secondary": "#92caff", "core": "#e5f4ff"},
-        "success": {"primary": "#38f59b", "secondary": "#a4ffd0", "core": "#effff7"},
-        "error": {"primary": "#ff4056", "secondary": "#ff9aa5", "core": "#fff0f2"},
+        # Estética de sistema holográfico: branco frio/ciano, com ouro em execução.
+        "idle": {"primary": "#76e8ff", "secondary": "#d8faff", "core": "#ffffff"},
+        "listening": {"primary": "#35ddff", "secondary": "#c9f8ff", "core": "#ffffff"},
+        "thinking": {"primary": "#b9e9f5", "secondary": "#f1fdff", "core": "#ffffff"},
+        "processing": {"primary": "#f0cf78", "secondary": "#f7f4e7", "core": "#ffffff"},
+        "speaking": {"primary": "#8cdfff", "secondary": "#e0f8ff", "core": "#ffffff"},
+        "completed": {"primary": "#5fbaff", "secondary": "#c4e9ff", "core": "#f0faff"},
+        "success": {"primary": "#89f2c6", "secondary": "#dcfff1", "core": "#ffffff"},
+        "error": {"primary": "#ff6277", "secondary": "#ffdce1", "core": "#ffffff"},
     }
 
     _PARTICLES: ClassVar[tuple[Particle, ...]] = (
@@ -70,18 +71,11 @@ class HologramEffects:
 
     # Tuplas: x1, y1, x2, y2, largura, opacidade-base.
     _BEAMS: ClassVar[tuple[tuple[float, float, float, float, float, float], ...]] = (
-        (0, 400, 800, 400, 1.5, 0.30),
-        (400, 0, 400, 800, 1.5, 0.30),
-        (117, 117, 683, 683, 1.2, 0.25),
-        (117, 683, 683, 117, 1.2, 0.25),
-        (0, 200, 800, 600, 0.8, 0.15),
-        (0, 600, 800, 200, 0.8, 0.15),
-        (200, 0, 600, 800, 0.8, 0.15),
-        (600, 0, 200, 800, 0.8, 0.15),
-        (0, 100, 800, 700, 0.6, 0.12),
-        (0, 700, 800, 100, 0.6, 0.12),
-        (100, 0, 700, 800, 0.6, 0.12),
-        (700, 0, 100, 800, 0.6, 0.12),
+        # Guias de mira delicadas; deixam o icosaedro como foco visual.
+        (0, 400, 800, 400, 0.7, 0.10),
+        (400, 0, 400, 800, 0.7, 0.10),
+        (165, 165, 635, 635, 0.55, 0.07),
+        (165, 635, 635, 165, 0.55, 0.07),
     )
 
     # Three independently rotating rings of tiny rectangles around the nucleus:
@@ -270,13 +264,13 @@ class HologramEffects:
                 painter.setPen(pen)
                 painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
 
-            # Anel fino estático ao redor da malha do icosaedro.
-            fine_pen = QPen(self._color_with_alpha(self.secondary_color, 110), 1.0)
+            # Trilha interna fina: contorno leve, sem preencher o centro.
+            fine_pen = QPen(self._color_with_alpha(self.secondary_color, 95), 0.8)
             painter.setPen(fine_pen)
-            painter.drawEllipse(QPointF(self.CENTER, self.CENTER), 202.0, 202.0)
+            painter.drawEllipse(QPointF(self.CENTER, self.CENTER), 197.0, 197.0)
+            painter.drawEllipse(QPointF(self.CENTER, self.CENTER), 211.0, 211.0)
 
-            # Anel externo: círculo sem preenchimento; apenas contorno e halo.
-            # A transparência interna deixa o icosaedro e o fundo visíveis.
+            # Anel externo transparente, inspirado em círculos de sistema/anime.
             outer_radius = 232.0
             outer_rect = QRectF(
                 self.CENTER - outer_radius,
@@ -285,38 +279,53 @@ class HologramEffects:
                 outer_radius * 2.0,
             )
 
-            # Halo externo discreto para dar profundidade sem preencher o círculo.
-            glow_pen = QPen(self._color_with_alpha(self.primary_color, 48), 18.0)
+            # Halo muito fino: a transparência do desktop continua intacta.
+            glow_pen = QPen(self._color_with_alpha(self.primary_color, 32), 7.0)
             glow_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             painter.setPen(glow_pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawEllipse(outer_rect)
 
-            # Borda principal sólida e contínua. Sua cor varia conforme o estado.
-            border_pen = QPen(self._color_with_alpha(self.primary_color, 245), 9.0)
+            # Contorno técnico delicado — sem aro grosso contínuo.
+            border_pen = QPen(self._color_with_alpha(self.primary_color, 205), 1.8)
             border_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             painter.setPen(border_pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawEllipse(outer_rect)
 
-            # Marcas técnicas na própria borda: arcos curtos e ticks, sem disco
-            # de fundo. A rotação global da HUD faz o padrão girar nas interações.
-            arc_rect = outer_rect.adjusted(7.0, 7.0, -7.0, -7.0)
-            arc_pen = QPen(self._color_with_alpha(self.secondary_color, 230), 2.0)
-            arc_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            painter.setPen(arc_pen)
-            for index in range(8):
-                start_angle = int((-90.0 + index * 45.0 + 4.0) * 16)
-                span_angle = int(24.0 * 16)
-                painter.drawArc(arc_rect, start_angle, span_angle)
+            # Trilhos segmentados, alternando comprimentos como um instrumento
+            # de análise. Os arcos giram junto com o restante da interface.
+            arc_rect = outer_rect.adjusted(8.0, 8.0, -8.0, -8.0)
+            for index in range(16):
+                start_deg = -90.0 + index * 22.5 + 2.4
+                span_deg = 10.8 if index % 2 == 0 else 6.2
+                arc_color = self.primary_color if index % 4 == 0 else self.secondary_color
+                arc_alpha = 235 if index % 4 == 0 else 150
+                arc_pen = QPen(self._color_with_alpha(arc_color, arc_alpha),
+                               2.0 if index % 4 == 0 else 1.1)
+                arc_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                painter.setPen(arc_pen)
+                painter.drawArc(arc_rect, int(start_deg * 16), int(span_deg * 16))
 
-            tick_pen = QPen(self._color_with_alpha(self.secondary_color, 205), 1.4)
-            tick_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            painter.setPen(tick_pen)
-            for index in range(48):
-                angle = -pi / 2 + tau * index / 48
+            # Marcas radiais em cadência dupla: 64 subdivisões e 16 marcas longas.
+            for index in range(64):
+                angle = -pi / 2 + tau * index / 64
                 outer_tick = 229.0
-                inner_tick = 221.0 if index % 4 == 0 else 224.0
+                if index % 4 == 0:
+                    inner_tick = 216.0
+                    tick_width = 1.45
+                    tick_alpha = 220
+                elif index % 2 == 0:
+                    inner_tick = 222.0
+                    tick_width = 0.95
+                    tick_alpha = 145
+                else:
+                    inner_tick = 225.0
+                    tick_width = 0.65
+                    tick_alpha = 105
+                tick_pen = QPen(self._color_with_alpha(self.secondary_color, tick_alpha),
+                                tick_width)
+                painter.setPen(tick_pen)
                 painter.drawLine(
                     QPointF(self.CENTER + cos(angle) * inner_tick,
                             self.CENTER + sin(angle) * inner_tick),
@@ -326,7 +335,7 @@ class HologramEffects:
 
             # Caracteres dentro da circunferência, nunca fora da borda.
             # São posicionados no intervalo entre a malha fina e o anel externo.
-            font = QFont("Yu Gothic UI", 17, QFont.Weight.DemiBold)
+            font = QFont("Yu Gothic UI", 15, QFont.Weight.DemiBold)
             painter.setFont(font)
             metrics = QFontMetricsF(font)
             word_color = self._color_with_alpha(self.secondary_color, 245)
@@ -334,7 +343,7 @@ class HologramEffects:
 
             for index, mark in enumerate(self._JP_MARKS):
                 angle = -pi / 2 + tau * index / len(self._JP_MARKS)
-                text_radius = 210.0
+                text_radius = 205.0
                 x = self.CENTER + cos(angle) * text_radius
                 y = self.CENTER + sin(angle) * text_radius
                 bounds = metrics.boundingRect(mark)
@@ -428,33 +437,34 @@ class HologramEffects:
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setOpacity(opacity)
 
+            # Núcleo apenas como aura periférica: não deve apagar a malha 3D.
             outer = QRadialGradient(QPointF(0, 0), 175.0)
-            outer.setColorAt(0.0, self._color_with_alpha(self.core_color, 100))
-            outer.setColorAt(0.38, self._color_with_alpha(self.secondary_color, 42))
-            outer.setColorAt(0.72, self._color_with_alpha(self.primary_color, 18))
+            outer.setColorAt(0.0, self._color_with_alpha(self.core_color, 24))
+            outer.setColorAt(0.38, self._color_with_alpha(self.secondary_color, 28))
+            outer.setColorAt(0.72, self._color_with_alpha(self.primary_color, 12))
             outer.setColorAt(1.0, self._color_with_alpha(self.core_color, 0))
             painter.setBrush(QBrush(outer))
             painter.drawEllipse(QPointF(0, 0), 175.0, 175.0)
 
             middle = QRadialGradient(QPointF(0, 0), 110.0)
-            middle.setColorAt(0.0, self._color_with_alpha(self.core_color, 230))
-            middle.setColorAt(0.25, self._color_with_alpha(self.secondary_color, 150))
-            middle.setColorAt(0.65, self._color_with_alpha(self.primary_color, 50))
+            middle.setColorAt(0.0, self._color_with_alpha(self.core_color, 32))
+            middle.setColorAt(0.25, self._color_with_alpha(self.secondary_color, 40))
+            middle.setColorAt(0.65, self._color_with_alpha(self.primary_color, 24))
             middle.setColorAt(1.0, self._color_with_alpha(self.core_color, 0))
             painter.setBrush(QBrush(middle))
             painter.drawEllipse(QPointF(0, 0), 110.0, 110.0)
 
             inner = QRadialGradient(QPointF(0, 0), 60.0)
-            inner.setColorAt(0.0, self._color_with_alpha(self.core_color, 255))
-            inner.setColorAt(0.25, self._color_with_alpha(self.core_color, 235))
-            inner.setColorAt(0.65, self._color_with_alpha(self.secondary_color, 75))
+            inner.setColorAt(0.0, self._color_with_alpha(self.core_color, 45))
+            inner.setColorAt(0.25, self._color_with_alpha(self.core_color, 38))
+            inner.setColorAt(0.65, self._color_with_alpha(self.secondary_color, 28))
             inner.setColorAt(1.0, self._color_with_alpha(self.primary_color, 0))
             painter.setBrush(QBrush(inner))
             painter.drawEllipse(QPointF(0, 0), 60.0, 60.0)
 
             center_halo = QRadialGradient(QPointF(0, 0), 30.0)
-            center_halo.setColorAt(0.0, self._color_with_alpha(self.core_color, 255))
-            center_halo.setColorAt(0.45, self._color_with_alpha(self.secondary_color, 180))
+            center_halo.setColorAt(0.0, self._color_with_alpha(self.core_color, 95))
+            center_halo.setColorAt(0.45, self._color_with_alpha(self.secondary_color, 65))
             center_halo.setColorAt(1.0, self._color_with_alpha(self.primary_color, 0))
             painter.setBrush(QBrush(center_halo))
             painter.drawEllipse(QPointF(0, 0), 30.0, 30.0)
