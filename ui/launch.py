@@ -173,8 +173,9 @@ class SvgWidget(QWidget):
                 # Camadas transparentes: feixes, partículas, borda japonesa e núcleo.
                 self.effects.paint_background(painter, rect)
                 self.effects.paint_particles(painter, rect)
-                self.d20.paint(painter, rect)
                 self.effects.paint_core(painter, rect)
+                # O icosaedro fica por último, à frente dos halos e perfeitamente legível.
+                self.d20.paint(painter, rect)
             finally:
                 painter.restore()
         finally:
