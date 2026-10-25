@@ -45,15 +45,15 @@ class HologramEffects:
     PARTICLE_DURATION = 5.0
 
     PALETTES: ClassVar[dict[str, dict[str, str]]] = {
-        # Estética de sistema holográfico: branco frio/ciano, com ouro em execução.
-        "idle": {"primary": "#76e8ff", "secondary": "#d8faff", "core": "#ffffff"},
-        "listening": {"primary": "#35ddff", "secondary": "#c9f8ff", "core": "#ffffff"},
-        "thinking": {"primary": "#b9e9f5", "secondary": "#f1fdff", "core": "#ffffff"},
-        "processing": {"primary": "#f0cf78", "secondary": "#f7f4e7", "core": "#ffffff"},
-        "speaking": {"primary": "#8cdfff", "secondary": "#e0f8ff", "core": "#ffffff"},
-        "completed": {"primary": "#5fbaff", "secondary": "#c4e9ff", "core": "#f0faff"},
-        "success": {"primary": "#89f2c6", "secondary": "#dcfff1", "core": "#ffffff"},
-        "error": {"primary": "#ff6277", "secondary": "#ffdce1", "core": "#ffffff"},
+        # Círculo mágico de Raphael: ouro vivo, luz branca e reflexos esmeralda.
+        "idle": {"primary": "#e8b84d", "secondary": "#fff0b3", "core": "#fffdf0"},
+        "listening": {"primary": "#ffe16a", "secondary": "#fff9d7", "core": "#ffffff"},
+        "thinking": {"primary": "#b9dba7", "secondary": "#e8f8cf", "core": "#fffdf0"},
+        "processing": {"primary": "#ffd14f", "secondary": "#fff4bd", "core": "#ffffff"},
+        "speaking": {"primary": "#e8c16b", "secondary": "#fff0c4", "core": "#ffffff"},
+        "completed": {"primary": "#d9b765", "secondary": "#f7e8af", "core": "#fff9e8"},
+        "success": {"primary": "#8cdbab", "secondary": "#d7ffe4", "core": "#ffffff"},
+        "error": {"primary": "#ff6570", "secondary": "#ffe1c8", "core": "#ffffff"},
     }
 
     _PARTICLES: ClassVar[tuple[Particle, ...]] = (
@@ -69,13 +69,18 @@ class HologramEffects:
         Particle("circle", -280, -200, 4.0, 4.5),
     )
 
-    # Tuplas: x1, y1, x2, y2, largura, opacidade-base.
+    # Raios estruturais discretos; os feixes solares são gerados no paint.
     _BEAMS: ClassVar[tuple[tuple[float, float, float, float, float, float], ...]] = (
-        # Guias de mira delicadas; deixam o icosaedro como foco visual.
-        (0, 400, 800, 400, 0.7, 0.10),
-        (400, 0, 400, 800, 0.7, 0.10),
-        (165, 165, 635, 635, 0.55, 0.07),
-        (165, 635, 635, 165, 0.55, 0.07),
+        (0, 400, 800, 400, 0.6, 0.08),
+        (400, 0, 400, 800, 0.6, 0.08),
+        (165, 165, 635, 635, 0.45, 0.06),
+        (165, 635, 635, 165, 0.45, 0.06),
+    )
+
+    # Inscrições circulares estilizadas: referência visual de Raphael, não texto funcional.
+    _SIGIL_TEXT: ClassVar[str] = (
+        "RAPHAEL  ·  智慧之王  ·  ANALYSIS  ·  WISDOM  ·  "
+        "RAPHAEL  ·  智慧之王  ·  ANALYSIS  ·  WISDOM  ·  "
     )
 
     # Three independently rotating rings of tiny rectangles around the nucleus:
@@ -256,6 +261,40 @@ class HologramEffects:
             return
         try:
             painter.setBrush(Qt.BrushStyle.NoBrush)
+
+            # Raios solares que partem do centro, como na imagem de referência.
+            # Variamos comprimento, espessura e intensidade para evitar uma estrela regular demais.
+            ray_count = 68
+            for index in range(ray_count):
+                angle = -pi / 2 + tau * index / ray_count
+                inner_radius = 48.0 if index % 5 else 27.0
+                outer_radius = 360.0 if index % 3 else 382.0
+                alpha = 78 if index % 4 == 0 else (43 if index % 2 == 0 else 25)
+                ray_color = self._color_with_alpha(
+                    self.secondary_color if index % 4 == 0 else self.primary_color,
+                    alpha,
+                )
+                ray_pen = QPen(ray_color, 1.15 if index % 4 == 0 else 0.65)
+                ray_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                painter.setPen(ray_pen)
+                painter.drawLine(
+                    QPointF(self.CENTER + cos(angle) * inner_radius,
+                            self.CENTER + sin(angle) * inner_radius),
+                    QPointF(self.CENTER + cos(angle) * outer_radius,
+                            self.CENTER + sin(angle) * outer_radius),
+                )
+
+                # Breves reflexos verde-esmeralda perto do perímetro.
+                if index % 6 == 1:
+                    accent_pen = QPen(QColor(83, 223, 165, 58), 1.1)
+                    painter.setPen(accent_pen)
+                    painter.drawLine(
+                        QPointF(self.CENTER + cos(angle) * 286.0,
+                                self.CENTER + sin(angle) * 286.0),
+                        QPointF(self.CENTER + cos(angle) * 380.0,
+                                self.CENTER + sin(angle) * 380.0),
+                    )
+
             for index, (x1, y1, x2, y2, width, base_opacity) in enumerate(self._BEAMS):
                 opacity = self._beam_opacity(index, base_opacity)
                 alpha = round(opacity * 255)
@@ -264,13 +303,24 @@ class HologramEffects:
                 painter.setPen(pen)
                 painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
 
-            # Trilha interna fina: contorno leve, sem preencher o centro.
-            fine_pen = QPen(self._color_with_alpha(self.secondary_color, 95), 0.8)
-            painter.setPen(fine_pen)
-            painter.drawEllipse(QPointF(self.CENTER, self.CENTER), 197.0, 197.0)
-            painter.drawEllipse(QPointF(self.CENTER, self.CENTER), 211.0, 211.0)
+            # Anel de luz central e órbitas finas, sem preenchimento opaco.
+            # O icosaedro será desenhado acima destas camadas.
+            for radius, width, alpha in (
+                (132.0, 7.0, 72),
+                (139.0, 2.2, 180),
+                (151.0, 0.9, 145),
+                (176.0, 0.7, 100),
+                (192.0, 0.8, 100),
+                (211.0, 0.8, 95),
+            ):
+                pen = QPen(self._color_with_alpha(
+                    self.secondary_color if radius < 145.0 else self.primary_color,
+                    alpha,
+                ), width)
+                painter.setPen(pen)
+                painter.drawEllipse(QPointF(self.CENTER, self.CENTER), radius, radius)
 
-            # Anel externo transparente, inspirado em círculos de sistema/anime.
+            # Anéis exteriores e textos permanecem sem preenchimento.
             outer_radius = 232.0
             outer_rect = QRectF(
                 self.CENTER - outer_radius,
@@ -279,19 +329,42 @@ class HologramEffects:
                 outer_radius * 2.0,
             )
 
-            # Halo muito fino: a transparência do desktop continua intacta.
-            glow_pen = QPen(self._color_with_alpha(self.primary_color, 32), 7.0)
+            # Reflexo esmeralda/âmbar periférico, sem criar um disco opaco.
+            glow_pen = QPen(self._color_with_alpha(self.primary_color, 36), 8.0)
             glow_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             painter.setPen(glow_pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawEllipse(outer_rect)
 
-            # Contorno técnico delicado — sem aro grosso contínuo.
-            border_pen = QPen(self._color_with_alpha(self.primary_color, 205), 1.8)
+            # Contorno principal dourado, fino e luminoso.
+            border_pen = QPen(self._color_with_alpha(self.primary_color, 215), 1.35)
             border_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             painter.setPen(border_pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawEllipse(outer_rect)
+
+            # Inscrição em órbita, distribuída e girada tangencialmente.
+            # Mantém a leitura como textura simbólica, sem ocupar o centro.
+            sigil_radius = 269.0
+            sigil_font = QFont("Georgia", 10, QFont.Weight.DemiBold)
+            painter.setFont(sigil_font)
+            sigil_metrics = QFontMetricsF(sigil_font)
+            sigil_text = self._SIGIL_TEXT
+            for index, glyph in enumerate(sigil_text):
+                angle = -pi / 2 + tau * index / len(sigil_text)
+                x = self.CENTER + cos(angle) * sigil_radius
+                y = self.CENTER + sin(angle) * sigil_radius
+                painter.save()
+                painter.translate(x, y)
+                painter.rotate(angle * 180.0 / pi + 90.0)
+                color = self._color_with_alpha(
+                    self.secondary_color if index % 7 in (0, 1) else self.primary_color,
+                    220 if index % 7 in (0, 1) else 175,
+                )
+                painter.setPen(QPen(color, 0.7))
+                bounds = sigil_metrics.boundingRect(glyph)
+                painter.drawText(QPointF(-bounds.width() / 2.0, bounds.height() / 3.0), glyph)
+                painter.restore()
 
             # Trilhos segmentados, alternando comprimentos como um instrumento
             # de análise. Os arcos giram junto com o restante da interface.
@@ -333,9 +406,8 @@ class HologramEffects:
                             self.CENTER + sin(angle) * outer_tick),
                 )
 
-            # Caracteres dentro da circunferência, nunca fora da borda.
-            # São posicionados no intervalo entre a malha fina e o anel externo.
-            font = QFont("Yu Gothic UI", 15, QFont.Weight.DemiBold)
+            # Caracteres japoneses internos: detalhe secundário de interface.
+            font = QFont("Yu Gothic UI", 13, QFont.Weight.DemiBold)
             painter.setFont(font)
             metrics = QFontMetricsF(font)
             word_color = self._color_with_alpha(self.secondary_color, 245)
@@ -343,7 +415,7 @@ class HologramEffects:
 
             for index, mark in enumerate(self._JP_MARKS):
                 angle = -pi / 2 + tau * index / len(self._JP_MARKS)
-                text_radius = 205.0
+                text_radius = 217.0
                 x = self.CENTER + cos(angle) * text_radius
                 y = self.CENTER + sin(angle) * text_radius
                 bounds = metrics.boundingRect(mark)
@@ -437,39 +509,42 @@ class HologramEffects:
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setOpacity(opacity)
 
-            # Núcleo apenas como aura periférica: não deve apagar a malha 3D.
-            outer = QRadialGradient(QPointF(0, 0), 175.0)
-            outer.setColorAt(0.0, self._color_with_alpha(self.core_color, 24))
-            outer.setColorAt(0.38, self._color_with_alpha(self.secondary_color, 28))
-            outer.setColorAt(0.72, self._color_with_alpha(self.primary_color, 12))
+            # Explosão de luz dourada; gradients usam alpha para manter a janela
+            # verdadeiramente translúcida e não cobrir o icosaedro.
+            outer = QRadialGradient(QPointF(0, 0), 190.0)
+            outer.setColorAt(0.0, self._color_with_alpha(self.core_color, 90))
+            outer.setColorAt(0.18, self._color_with_alpha(self.secondary_color, 62))
+            outer.setColorAt(0.48, self._color_with_alpha(self.primary_color, 34))
+            outer.setColorAt(0.78, self._color_with_alpha(self.primary_color, 13))
             outer.setColorAt(1.0, self._color_with_alpha(self.core_color, 0))
             painter.setBrush(QBrush(outer))
             painter.drawEllipse(QPointF(0, 0), 175.0, 175.0)
 
-            middle = QRadialGradient(QPointF(0, 0), 110.0)
-            middle.setColorAt(0.0, self._color_with_alpha(self.core_color, 32))
-            middle.setColorAt(0.25, self._color_with_alpha(self.secondary_color, 40))
-            middle.setColorAt(0.65, self._color_with_alpha(self.primary_color, 24))
+            middle = QRadialGradient(QPointF(0, 0), 126.0)
+            middle.setColorAt(0.0, self._color_with_alpha(self.core_color, 42))
+            middle.setColorAt(0.20, self._color_with_alpha(self.secondary_color, 46))
+            middle.setColorAt(0.48, self._color_with_alpha(self.primary_color, 30))
             middle.setColorAt(1.0, self._color_with_alpha(self.core_color, 0))
             painter.setBrush(QBrush(middle))
             painter.drawEllipse(QPointF(0, 0), 110.0, 110.0)
 
-            inner = QRadialGradient(QPointF(0, 0), 60.0)
-            inner.setColorAt(0.0, self._color_with_alpha(self.core_color, 45))
-            inner.setColorAt(0.25, self._color_with_alpha(self.core_color, 38))
-            inner.setColorAt(0.65, self._color_with_alpha(self.secondary_color, 28))
+            inner = QRadialGradient(QPointF(0, 0), 72.0)
+            inner.setColorAt(0.0, self._color_with_alpha(self.core_color, 130))
+            inner.setColorAt(0.28, self._color_with_alpha(self.core_color, 92))
+            inner.setColorAt(0.62, self._color_with_alpha(self.secondary_color, 48))
             inner.setColorAt(1.0, self._color_with_alpha(self.primary_color, 0))
             painter.setBrush(QBrush(inner))
             painter.drawEllipse(QPointF(0, 0), 60.0, 60.0)
 
-            center_halo = QRadialGradient(QPointF(0, 0), 30.0)
-            center_halo.setColorAt(0.0, self._color_with_alpha(self.core_color, 95))
-            center_halo.setColorAt(0.45, self._color_with_alpha(self.secondary_color, 65))
+            center_halo = QRadialGradient(QPointF(0, 0), 42.0)
+            center_halo.setColorAt(0.0, self._color_with_alpha(self.core_color, 235))
+            center_halo.setColorAt(0.24, self._color_with_alpha(self.core_color, 175))
+            center_halo.setColorAt(0.60, self._color_with_alpha(self.secondary_color, 82))
             center_halo.setColorAt(1.0, self._color_with_alpha(self.primary_color, 0))
             painter.setBrush(QBrush(center_halo))
             painter.drawEllipse(QPointF(0, 0), 30.0, 30.0)
-            painter.setBrush(self.core_color)
-            painter.drawEllipse(QPointF(0, 0), 18.0, 18.0)
+            painter.setBrush(self._color_with_alpha(self.core_color, 220))
+            painter.drawEllipse(QPointF(0, 0), 10.0, 10.0)
             painter.setOpacity(1.0)
         finally:
             painter.restore()
