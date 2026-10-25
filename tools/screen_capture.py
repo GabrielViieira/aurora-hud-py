@@ -39,7 +39,7 @@ def capture_monitors(max_width: int = 1440) -> list[dict]:
             image.save(
                 buffer,
                 format="JPEG",
-                quality=82,
+                quality=88,
                 optimize=True,
             )
 
