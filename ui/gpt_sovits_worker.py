@@ -6,6 +6,7 @@ Não inicia Gradio nem um servidor HTTP.
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import re
@@ -56,6 +57,9 @@ def _load_engine(args: argparse.Namespace):
         "-d", args.device,
         "-a", "127.0.0.1",
         "-p", "9880",
+        "-sm", "close",
+        "-mt", "wav",
+        "-st", "int16",
     ]
     os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
     try:
@@ -135,9 +139,34 @@ def _handle_request(infer, args: argparse.Namespace, request: dict[str, Any]) ->
             ))
             if not generated:
                 raise RuntimeError("GPT-SoVITS não retornou áudio.")
-            sample_rate, audio = generated[-1]
-            audio_array = np.asarray(audio)
-            # Diagnóstico em amplitude antes da etapa de reprodução do Windows.
+
+            sf_dtype = "int16"
+            returned = generated[-1]
+            if isinstance(returned, (bytes, bytearray, memoryview)):
+                # Na versão GPT-SoVITS-v2pro-20250604, api.get_tts_wav
+                # retorna os bytes do WAV completo (modo close + media_type wav).
+                audio_bytes = b"".join(bytes(part) for part in generated)
+                if len(audio_bytes) < 44 or audio_bytes[:4] != b"RIFF" or b"WAVE" not in audio_bytes[:12]:
+                    raise RuntimeError(
+                        "api.get_tts_wav não retornou um WAV PCM válido; "
+                        f"prefixo recebido: {audio_bytes[:20]!r}"
+                    )
+                output_path.write_bytes(audio_bytes)
+                audio_array, sample_rate = sf.read(
+                    io.BytesIO(audio_bytes), dtype=sf_dtype, always_2d=False
+                )
+            elif isinstance(returned, tuple) and len(returned) == 2:
+                # Compatibilidade com forks que expõem (sample_rate, samples).
+                sample_rate, audio = returned
+                audio_array = np.asarray(audio)
+                sf.write(str(output_path), audio_array, int(sample_rate), subtype="PCM_16")
+            else:
+                raise RuntimeError(
+                    "Formato de retorno de GPT-SoVITS não reconhecido: "
+                    f"{type(returned).__name__}"
+                )
+
+            audio_array = np.asarray(audio_array)
             audio_float = audio_array.astype(np.float64, copy=False)
             peak = float(np.max(np.abs(audio_float))) if audio_float.size else 0.0
             rms = float(np.sqrt(np.mean(np.square(audio_float)))) if audio_float.size else 0.0
@@ -146,7 +175,7 @@ def _handle_request(infer, args: argparse.Namespace, request: dict[str, Any]) ->
             if not np.isfinite(peak) or not np.isfinite(rms) or peak < (2.0 if audio_array.dtype.kind in "iu" else 1e-5):
                 raise RuntimeError(
                     f"GPT-SoVITS retornou áudio silencioso (pico={peak:.4g}, RMS={rms:.4g}); "
-                    "o WAV não será salvo como uma síntese válida."
+                    "o WAV não será considerado uma síntese válida."
                 )
             print(
                 f"[Aurora direct TTS] Sinal gerado: shape={audio_array.shape}, "
@@ -154,9 +183,8 @@ def _handle_request(infer, args: argparse.Namespace, request: dict[str, Any]) ->
                 f"duração={duration:.2f}s, taxa={int(sample_rate)} Hz.",
                 file=sys.stderr,
             )
-            sf.write(str(output_path), audio, int(sample_rate), subtype="PCM_16")
-        if not output_path.is_file() or output_path.stat().st_size < 44:
-            raise RuntimeError("O arquivo WAV de saída não foi criado corretamente.")
+            if not output_path.is_file() or output_path.stat().st_size < 44:
+                raise RuntimeError("O arquivo WAV de saída não foi criado corretamente.")
 
         # Guarda somente o WAV mais recente para teste independente da Aurora.
         debug_wav = Path(os.environ.get(
