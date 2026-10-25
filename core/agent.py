@@ -36,6 +36,31 @@ _MEMORY_REQUEST_RE = re.compile(
 )
 _DO_NOT_REMEMBER_RE = re.compile(r"(?i)\b(não (?:registre|guarde|salve|anote)|esqueça isso)\b")
 
+# A proteção permite até duas execuções idênticas por tarefa. A terceira é
+# bloqueada para impedir ciclos do LLM que insistem na mesma ação sem progresso.
+_MAX_IDENTICAL_ACTION_EXECUTIONS = 2
+_NON_MUTATING_DESKTOP_TOOLS = frozenset({"capturar_tela", "listar_aplicativos"})
+
+
+def _tool_call_signature(call: ToolCall) -> str:
+    """Chave estável para detectar repetição da mesma ferramenta e argumentos."""
+    args = json.dumps(call.arguments, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str)
+    return f"{call.name}:{args}"
+
+
+def _is_action_tool(name: str, spec: Any) -> bool:
+    """Detecta ações mutáveis, incluindo ferramentas desktop marcadas L0 por legado."""
+    try:
+        risk_level = int(spec.risk)
+    except (AttributeError, TypeError, ValueError):
+        risk_level = 0
+    if risk_level >= 1:
+        return True
+    return (
+        str(getattr(spec, "category", "")).casefold() == "desktop"
+        and name not in _NON_MUTATING_DESKTOP_TOOLS
+    )
+
 
 # AURORA_LOCAL_APP_ROUTER_V1
 def _local_app_intent(text: str) -> tuple[str, dict[str, str]] | None:
@@ -157,6 +182,8 @@ class AuroraAgent:
         model_used = ""
         tool_call_count = 0
         failures: dict[str, int] = {}
+        # Conta execuções reais por assinatura durante este turno, não apenas falhas.
+        action_call_counts: dict[str, int] = {}
         ctx = ToolContext(
             settings=self.settings,
             policy=self.policy,
@@ -242,8 +269,13 @@ class AuroraAgent:
                 desktop_batch_requires_serial = len(desktop_calls) > 1
                 for call in response.tool_calls:
                     tool_call_count += 1
-                    if (call.name in desktop_tool_names and desktop_batch_requires_serial
-                            and call.name != preferred_desktop_tool):
+                    signature = _tool_call_signature(call)
+                    deferred = (
+                        call.name in desktop_tool_names
+                        and desktop_batch_requires_serial
+                        and call.name != preferred_desktop_tool
+                    )
+                    if deferred:
                         result = ToolResult(
                             ok=True,
                             summary=("AÇÃO NÃO EXECUTADA: etapa adiada para manter o ciclo visual "
@@ -252,7 +284,29 @@ class AuroraAgent:
                         )
                         fatal = False
                     else:
-                        result, fatal = self._run_tool(call, task, ctx)
+                        guarded_action = False
+                        if self.registry.has(call.name):
+                            guarded_action = _is_action_tool(call.name, self.registry.get(call.name))
+                        attempts = action_call_counts.get(signature, 0)
+                        if guarded_action and attempts >= _MAX_IDENTICAL_ACTION_EXECUTIONS:
+                            reason = (
+                                "Proteção anti-loop: bloqueei a ferramenta " + call.name
+                                + " porque a mesma ação com os mesmos argumentos já foi executada "
+                                + str(attempts) + " vezes nesta tarefa. Não executei esta tentativa repetida. "
+                                "Reavalie o resultado anterior e escolha uma etapa diferente; não repita a ação sem evidência de progresso."
+                            )
+                            result = ToolResult.fail(
+                                reason, anti_loop=True, ferramenta=call.name, execucoes_anteriores=attempts
+                            )
+                            fatal = True
+                            self.audit.record(
+                                "tool.repeat_blocked", task_id=task.id, tool=call.name,
+                                signature=signature, previous_executions=attempts,
+                            )
+                        else:
+                            if guarded_action:
+                                action_call_counts[signature] = attempts + 1
+                            result, fatal = self._run_tool(call, task, ctx)
                     if call.name == "capturar_tela" and result.ok and not result.data.get("adiada"):
                         image_url = result.data.pop("data_url", "")
                         if isinstance(image_url, str) and image_url.startswith("data:image/"):
@@ -266,7 +320,7 @@ class AuroraAgent:
                             name=call.name,
                         )
                     )
-                    key = f"{call.name}:{json.dumps(call.arguments, sort_keys=True, ensure_ascii=False)}"
+                    key = signature
                     # Uma etapa adiada não é uma ação executada. Conte repetições
                     # idênticas para evitar consumir todas as iterações em loop.
                     if result.data.get("adiada"):
