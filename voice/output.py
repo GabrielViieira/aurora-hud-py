@@ -15,6 +15,7 @@ logger = get_logger(__name__)
 
 _MARKDOWN_RE = re.compile(r"[`*_#>\[\]\(\)]")
 _JA_RE = re.compile(r"[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]")
+_JA_KANA_RE = re.compile(r"[\u3040-\u309F\u30A0-\u30FF]")
 
 try:
     import httpx
@@ -31,16 +32,20 @@ _TRANSLATION_CACHE: dict[str, str] = {}
 def _translate_to_japanese(text: str) -> str:
     if not text or not text.strip():
         return text
-    if _JA_RE.search(text):
+    if _JA_KANA_RE.search(text):
         return text
     key = text.strip()
     if key in _TRANSLATION_CACHE:
-        return _TRANSLATION_CACHE[key]
+        cached = _TRANSLATION_CACHE[key]
+        if _JA_KANA_RE.search(cached):
+            return cached
+        _TRANSLATION_CACHE.pop(key, None)
     if not HTTPX_AVAILABLE:
-        return text
+        logger.warning("TTS japonês silenciado: pacote httpx não está disponível para traduzir.")
+        return ""
     try:
         payload = {
-            "model": "auto",
+            "model": os.environ.get("AURORA_TTS_TRANSLATION_MODEL", "auto").strip() or "auto",
             "messages": [
                 {
                     "role": "system",
@@ -61,12 +66,14 @@ def _translate_to_japanese(text: str) -> str:
             )
             if content:
                 translated = str(content).strip().strip('"').strip("'")
-                if translated:
+                if translated and _JA_KANA_RE.search(translated):
                     _TRANSLATION_CACHE[key] = translated
                     return translated
+            logger.warning("TTS japonês: o gateway não retornou uma tradução japonesa válida (HTTP %s).", resp.status_code)
     except Exception as exc:
-        logger.debug("falha ao traduzir para japonês: %s", exc)
-    return text
+        logger.warning("falha ao traduzir para japonês: %s", exc)
+    logger.warning("TTS japonês silenciado: tradução inválida; não será lido o texto original em português.")
+    return ""
 
 
 def text_for_speech(text: str, max_chars: int = 400) -> str:
@@ -106,6 +113,8 @@ class SpeechChannel:
         if not speech or not self.enabled:
             return False
         speech = _translate_to_japanese(speech)
+        if not speech or not _JA_KANA_RE.search(speech):
+            return False
         try:
             self._queue.put_nowait(speech)
             return True
