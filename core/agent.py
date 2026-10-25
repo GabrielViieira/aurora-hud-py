@@ -152,6 +152,9 @@ class AuroraAgent:
         self.session_id = ""
         self.cancel_event = threading.Event()
         self._last_context: ContextReport | None = None
+        # Compactação do histórico não deve bloquear a resposta ao usuário.
+        self._compaction_lock = threading.Lock()
+        self._compaction_pending: set[str] = set()
 
     # ------------------------------------------------------------------ sessão
     def new_session(self, title: str = "") -> str:
@@ -585,6 +588,7 @@ class AuroraAgent:
         self._maybe_compact()
 
     def _maybe_compact(self) -> None:
+        """Agenda resumo do histórico sem atrasar a entrega da resposta atual."""
         if not self.settings.memory.auto_remember:
             return
         session_id = self.session_id
@@ -593,6 +597,27 @@ class AuroraAgent:
         count = self.conversations.count_messages(session_id)
         if count == 0 or count % 20 != 0:
             return
+
+        with self._compaction_lock:
+            if session_id in self._compaction_pending:
+                return
+            self._compaction_pending.add(session_id)
+
+        worker = threading.Thread(
+            target=self._compact_session,
+            args=(session_id,),
+            daemon=True,
+            name="AuroraContextCompaction",
+        )
+        try:
+            worker.start()
+        except Exception:
+            with self._compaction_lock:
+                self._compaction_pending.discard(session_id)
+            logger.exception("não foi possível iniciar compactação em segundo plano")
+
+    def _compact_session(self, session_id: str) -> None:
+        """Resumo auxiliar em background; falhas não interrompem a conversa."""
         try:
             stored = self.conversations.recent(session_id, limit=40)
             older = stored[:-8]
@@ -613,6 +638,9 @@ class AuroraAgent:
             logger.warning("compactação ignorada: %s", exc)
         except Exception:
             logger.exception("falha ao compactar conversa")
+        finally:
+            with self._compaction_lock:
+                self._compaction_pending.discard(session_id)
 
     # ------------------------------------------------------------------ acesso
     @property
