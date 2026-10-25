@@ -133,22 +133,29 @@ def _handle_request(infer, args: argparse.Namespace, request: dict[str, Any]) ->
             # Usa a mesma família de parâmetros da integração anterior da Aurora.
             # inp_refs=[] evita os defaults problemáticos de algumas versões antigas.
             language = infer.i18n("日文")
-            generated = list(infer.get_tts_wav(
-                ref_wav_path=str(Path(args.reference).resolve()),
-                prompt_text=args.prompt_text,
-                prompt_language=language,
-                text=text,
-                text_language=language,
-                top_k=15,
-                top_p=0.8,
-                temperature=0.8,
-                speed=1.0,
-                inp_refs=[],
-                # O caminho direto não usa a aceleração CUDA Graph/Flash Attention.
-                # É mais conservador para GPUs como a GTX 1660 e evita sinal inválido.
-                use_cuda_graph=False,
-                use_flash_attention=False,
-            ))
+            import inspect
+
+            # A versão v2pro-20250604 aceita use_cuda_graph, mas pode não expor
+            # use_flash_attention. Só enviamos opções presentes na assinatura instalada.
+            inference_kwargs = {
+                "ref_wav_path": str(Path(args.reference).resolve()),
+                "prompt_text": args.prompt_text,
+                "prompt_language": language,
+                "text": text,
+                "text_language": language,
+                "top_k": 15,
+                "top_p": 0.8,
+                "temperature": 0.8,
+                "speed": 1.0,
+                "inp_refs": [],
+            }
+            supported_parameters = inspect.signature(infer.get_tts_wav).parameters
+            if "use_cuda_graph" in supported_parameters:
+                inference_kwargs["use_cuda_graph"] = False
+            if "use_flash_attention" in supported_parameters:
+                inference_kwargs["use_flash_attention"] = False
+
+            generated = list(infer.get_tts_wav(**inference_kwargs))
             if not generated:
                 raise RuntimeError("GPT-SoVITS não retornou áudio.")
             sample_rate, audio = generated[-1]
