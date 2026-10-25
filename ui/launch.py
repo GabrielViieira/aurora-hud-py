@@ -1192,10 +1192,12 @@ class SvgHologram(QMainWindow):
             if process is None or process.poll() is not None or process.stdin is None or messages is None:
                 raise RuntimeError("O worker direto não está disponível.")
 
+            # ASCII-only JSON transport avoids Windows console/code-page and
+            # lone-surrogate problems when sending Japanese through a text pipe.
             process.stdin.write(json.dumps({
                 "text": japanese_text,
                 "output_path": str(out_wav),
-            }, ensure_ascii=False) + "\n")
+            }, ensure_ascii=True) + "\n")
             process.stdin.flush()
 
             try:

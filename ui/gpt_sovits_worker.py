@@ -8,8 +8,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import traceback
+import unicodedata
 from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 from typing import Any
@@ -95,9 +97,30 @@ def _handle_request(infer, args: argparse.Namespace, request: dict[str, Any]) ->
         raise SystemExit(0)
 
     output_path = Path(str(request.get("output_path", ""))).resolve()
-    text = str(request.get("text", "")).strip()
+    raw_text = str(request.get("text", "")).strip()
+
+    # Defesa extra para texto Unicode vindo de processos Windows. A serialização
+    # do lado da Aurora usa ASCII-JSON, mas removemos surrogates isolados e U+FFFD
+    # para que o detector de idioma nunca receba caracteres corrompidos.
+    text = "".join(
+        char for char in raw_text
+        if char != "\ufffd" and not ("\ud800" <= char <= "\udfff")
+        and (char in "\n\r\t" or ord(char) >= 32)
+    )
+    text = unicodedata.normalize("NFC", text).strip()
     if not text:
-        emit({"ok": False, "error": "O texto para sintetizar está vazio."})
+        emit({"ok": False, "error": "O texto ficou vazio após a validação Unicode."})
+        return
+    if text != raw_text:
+        print(
+            f"[Aurora direct TTS] Removidos {len(raw_text) - len(text)} caracteres Unicode inválidos.",
+            file=sys.stderr,
+        )
+    if not re.search(r"[\u3040-\u309f\u30a0-\u30ff]", text):
+        emit({
+            "ok": False,
+            "error": "O texto recebido não contém hiragana/katakana válidos; a síntese foi cancelada.",
+        })
         return
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
