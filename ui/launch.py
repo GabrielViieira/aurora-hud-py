@@ -1513,6 +1513,10 @@ class SvgHologram(QMainWindow):
         is_raphael_model = Path(audio_path).name == "aurora_raphael_tts.wav"
         if not is_raphael_model and not _lower_wav_volume(audio_path, gain=0.4):
             print("[Aurora TTS] WAV mantido no volume original.")
+        import wave
+        wav_frames = 0
+        wav_duration = 0.0
+        wav_rate = 0
         try:
             with wave.open(audio_path, "rb") as check_wav:
                 wav_duration = check_wav.getnframes() / max(1, check_wav.getframerate())
