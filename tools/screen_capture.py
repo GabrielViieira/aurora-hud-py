@@ -8,7 +8,7 @@ from mss import MSS
 from PIL import Image
 
 
-def capture_monitors(max_width: int = 1440) -> list[dict]:
+def capture_monitors(max_width: int = 1920) -> list[dict]:
     """Captura cada monitor e devolve imagens JPEG em Base64.
 
     Não salva capturas em disco.
