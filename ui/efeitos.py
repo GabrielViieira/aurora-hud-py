@@ -45,15 +45,15 @@ class HologramEffects:
     PARTICLE_DURATION = 5.0
 
     PALETTES: ClassVar[dict[str, dict[str, str]]] = {
-        # Círculo mágico de Raphael: ouro vivo, luz branca e reflexos esmeralda.
-        "idle": {"primary": "#e8b84d", "secondary": "#fff0b3", "core": "#fffdf0"},
-        "listening": {"primary": "#ffe16a", "secondary": "#fff9d7", "core": "#ffffff"},
-        "thinking": {"primary": "#b9dba7", "secondary": "#e8f8cf", "core": "#fffdf0"},
-        "processing": {"primary": "#ffd14f", "secondary": "#fff4bd", "core": "#ffffff"},
-        "speaking": {"primary": "#e8c16b", "secondary": "#fff0c4", "core": "#ffffff"},
-        "completed": {"primary": "#d9b765", "secondary": "#f7e8af", "core": "#fff9e8"},
-        "success": {"primary": "#8cdbab", "secondary": "#d7ffe4", "core": "#ffffff"},
-        "error": {"primary": "#ff6570", "secondary": "#ffe1c8", "core": "#ffffff"},
+        # Azul-ciano é a identidade constante; dourado sinaliza fala da Aurora.
+        "idle": {"primary": "#38bfff", "secondary": "#8cecff", "core": "#ffffff"},
+        "listening": {"primary": "#38bfff", "secondary": "#8cecff", "core": "#ffffff"},
+        "thinking": {"primary": "#38bfff", "secondary": "#8cecff", "core": "#ffffff"},
+        "processing": {"primary": "#38bfff", "secondary": "#8cecff", "core": "#ffffff"},
+        "speaking": {"primary": "#e9b95b", "secondary": "#ffe4a0", "core": "#fff5d6"},
+        "completed": {"primary": "#38bfff", "secondary": "#8cecff", "core": "#ffffff"},
+        "success": {"primary": "#38bfff", "secondary": "#8cecff", "core": "#ffffff"},
+        "error": {"primary": "#38bfff", "secondary": "#8cecff", "core": "#ffffff"},
     }
 
     _PARTICLES: ClassVar[tuple[Particle, ...]] = (
@@ -284,9 +284,12 @@ class HologramEffects:
                             self.CENTER + sin(angle) * outer_radius),
                 )
 
-                # Breves reflexos verde-esmeralda perto do perímetro.
+                # Pequenos realces usam a cor do estado atual, sem uma
+                # terceira cor fixa: azul-ciano no uso normal, dourado ao falar.
                 if index % 6 == 1:
-                    accent_pen = QPen(QColor(83, 223, 165, 58), 1.1)
+                    accent_pen = QPen(
+                        self._color_with_alpha(self.secondary_color, 58), 1.1
+                    )
                     painter.setPen(accent_pen)
                     painter.drawLine(
                         QPointF(self.CENTER + cos(angle) * 286.0,
