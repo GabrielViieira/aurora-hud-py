@@ -155,6 +155,9 @@ GPT_SOVITS_INFERENCE = GPT_SOVITS_DIR / "GPT_SoVITS" / "inference_webui.py"
 GPT_SOVITS_DIRECT_LOG = Path(os.environ.get(
     "LOCALAPPDATA", str(Path.home() / "AppData" / "Local")
 )) / "Aurora" / "logs" / "gpt_sovits_direct.log"
+GPT_SOVITS_DEBUG_WAV = Path(os.environ.get(
+    "LOCALAPPDATA", str(Path.home() / "AppData" / "Local")
+)) / "Aurora" / "debug" / "raphael_latest.wav"
 
 VOICEVOX_URL = os.environ.get("AURORA_VOICEVOX_URL", "http://127.0.0.1:50021")
 VOICEVOX_SPEAKER = int(os.environ.get("AURORA_VOICEVOX_SPEAKER", "3"))
@@ -1505,12 +1508,27 @@ class SvgHologram(QMainWindow):
         if caption:
             self.show_caption(caption)
         self._set_speech_visual_state("speaking")
-        if not _lower_wav_volume(audio_path, gain=0.4):
+        # O GPT-SoVITS já entrega áudio normalizado pelo próprio motor.
+        # Não reduzir a voz do Raphael a 40% antes da reprodução.
+        is_raphael_model = Path(audio_path).name == "aurora_raphael_tts.wav"
+        if not is_raphael_model and not _lower_wav_volume(audio_path, gain=0.4):
             print("[Aurora TTS] WAV mantido no volume original.")
+        try:
+            with wave.open(audio_path, "rb") as check_wav:
+                wav_duration = check_wav.getnframes() / max(1, check_wav.getframerate())
+                wav_frames = check_wav.getnframes()
+                wav_rate = check_wav.getframerate()
+            print(
+                f"[Aurora TTS] Reproduzindo WAV: {wav_duration:.2f}s, "
+                f"{wav_rate} Hz, {Path(audio_path).stat().st_size} bytes."
+            )
+        except Exception as exc:
+            print(f"[Aurora TTS] Não consegui inspecionar WAV antes da reprodução: {exc}")
         def _play() -> None:
             try:
                 import winsound
                 winsound.PlaySound(audio_path, winsound.SND_FILENAME)
+                print(f"[Aurora TTS] Reprodução WAV concluída ({wav_frames} frames).")
             except Exception as exc:
                 print(f"[Aurora TTS] Falha ao reproduzir WAV pronto: {exc}")
                 # Tenta o TTS direto como último recurso, sem perder o balão.

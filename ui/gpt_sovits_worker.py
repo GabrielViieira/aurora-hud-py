@@ -11,6 +11,8 @@ import os
 import re
 import sys
 import traceback
+import shutil
+import numpy as np
 import unicodedata
 from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
@@ -146,10 +148,35 @@ def _handle_request(infer, args: argparse.Namespace, request: dict[str, Any]) ->
             if not generated:
                 raise RuntimeError("GPT-SoVITS não retornou áudio.")
             sample_rate, audio = generated[-1]
+            audio_array = np.asarray(audio)
+            # Diagnóstico em amplitude antes da etapa de reprodução do Windows.
+            audio_float = audio_array.astype(np.float64, copy=False)
+            peak = float(np.max(np.abs(audio_float))) if audio_float.size else 0.0
+            rms = float(np.sqrt(np.mean(np.square(audio_float)))) if audio_float.size else 0.0
+            frames = int(audio_array.shape[0]) if audio_array.ndim else int(audio_array.size)
+            duration = frames / max(1, int(sample_rate))
+            print(
+                f"[Aurora direct TTS] Sinal gerado: shape={audio_array.shape}, "
+                f"dtype={audio_array.dtype}, pico={peak:.1f}, RMS={rms:.1f}, "
+                f"duração={duration:.2f}s, taxa={int(sample_rate)} Hz.",
+                file=sys.stderr,
+            )
             sf.write(str(output_path), audio, int(sample_rate), subtype="PCM_16")
         if not output_path.is_file() or output_path.stat().st_size < 44:
             raise RuntimeError("O arquivo WAV de saída não foi criado corretamente.")
-        emit({"ok": True, "sample_rate": int(sample_rate)})
+
+        # Guarda somente o WAV mais recente para teste independente da Aurora.
+        debug_wav = Path(os.environ.get(
+            "LOCALAPPDATA", str(Path.home() / "AppData" / "Local")
+        )) / "Aurora" / "debug" / "raphael_latest.wav"
+        try:
+            debug_wav.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(output_path, debug_wav)
+            print(f"[Aurora direct TTS] WAV de diagnóstico salvo em: {debug_wav}", file=sys.stderr)
+        except OSError as exc:
+            print(f"[Aurora direct TTS] Não foi possível salvar WAV de diagnóstico: {exc}", file=sys.stderr)
+
+        emit({"ok": True, "sample_rate": int(sample_rate), "duration": duration, "peak": peak, "rms": rms})
     except SystemExit:
         raise
     except Exception as exc:
