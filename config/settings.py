@@ -94,6 +94,7 @@ class LLMSettings:
     utility_model: str = "auto"
     planner_model: str = "auto"
     coder_model: str = "auto"
+    vision_model: str = "auto"
     temperature: float = 0.3
     max_output_tokens: int = 1200
     timeout_s: float = 60.0
@@ -217,6 +218,7 @@ class Settings:
             utility_model=_get(merged, "AURORA_LLM_UTILITY_MODEL", "auto"),
             planner_model=_get(merged, "AURORA_LLM_PLANNER_MODEL", "auto"),
             coder_model=_get(merged, "AURORA_LLM_CODER_MODEL", "auto"),
+            vision_model=_get(merged, "AURORA_LLM_VISION_MODEL", "auto"),
             temperature=_get_float(merged, "AURORA_LLM_TEMPERATURE", 0.3),
             max_output_tokens=_get_int(merged, "AURORA_LLM_MAX_OUTPUT_TOKENS", 1200),
             timeout_s=_get_float(merged, "AURORA_LLM_TIMEOUT_S", 60.0),
