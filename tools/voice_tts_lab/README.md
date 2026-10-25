@@ -57,3 +57,43 @@ py tools\voice_tts_lab\build_raphael_dataset.py --applio-dir "D:\Applio" --pth "
 - Use apenas modelos e gravações cujo uso você tem autorização para fazer.
 
 Referência: https://github.com/RVC-Boss/GPT-SoVITS
+
+
+## Integração do TTS treinado na Aurora
+
+A interface `ui/launch.py` agora tenta primeiro a API local do GPT-SoVITS, usando os pesos treinados:
+
+- GPT: `GPT_weights_v2Pro/xxx-e15.ckpt`
+- SoVITS: `SoVITS_weights_v2Pro/xxx_e8_s816.pth`
+- Áudio de referência: `logs/xxx/5-wav32k/0001_raphael.wav`
+- Texto de referência: `こんにちは。ラファエルです。`
+
+Se a API não estiver ativa, a Aurora tenta iniciá-la automaticamente usando `runtime/python.exe` e `api.py`. Os modelos permanecem carregados durante a sessão; as falas seguintes enviam somente o texto para sintetizar. Se a integração falhar, a Aurora mantém os fallbacks RVC, Voicevox e SAPI.
+
+### Primeiro teste no Windows
+
+Antes de iniciar a Aurora, feche a instância secundária de **Inferência TTS WebUI** do GPT-SoVITS para liberar VRAM; não é necessário excluir pesos nem logs. Depois:
+
+```bat
+cd /d C:\Tools\OpenCode\aurora-hud\app\aurora
+git pull origin main
+py -m py_compile ui\launch.py
+py ui\launch.py
+```
+
+Na primeira fala, a Aurora inicia a API e carrega os modelos. Esse primeiro carregamento pode demorar; as falas seguintes reutilizam o servidor. O log da API fica em:
+
+`%LOCALAPPDATA%\Aurora\logs\gpt_sovits_api.log`
+
+### Configuração opcional
+
+As opções podem ser substituídas por variáveis de ambiente:
+
+- `AURORA_GPT_SOVITS_DIR`: pasta de instalação do GPT-SoVITS.
+- `AURORA_GPT_SOVITS_API_PORT`: porta da API (padrão 9880).
+- `AURORA_GPT_SOVITS_GPT_MODEL`: caminho do checkpoint GPT.
+- `AURORA_GPT_SOVITS_SOVITS_MODEL`: caminho do peso SoVITS.
+- `AURORA_GPT_SOVITS_REFERENCE`: WAV de referência.
+- `AURORA_GPT_SOVITS_ENABLED=0`: desativa o caminho GPT-SoVITS e usa os fallbacks.
+
+A integração é local; a tradução de respostas para japonês continua usando a configuração de tradução já existente na Aurora.
