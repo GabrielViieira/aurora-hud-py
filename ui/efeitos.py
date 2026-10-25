@@ -92,9 +92,8 @@ class HologramEffects:
         (113.0, 60, 1.8, 5.5),
     )
 
-    # Japanese character decoration on the larger outer ring. These are visual
-    # accents, not a sentence or instructions.
-    _JP_MARKS: ClassVar[tuple[str, ...]] = ("光", "知", "心", "空", "夢", "星", "響", "守")
+    # Marcas japonesas decorativas: オーロラ (Aurora), mais conceitos visuais.
+    _JP_MARKS: ClassVar[tuple[str, ...]] = ("オ", "ー", "ロ", "ラ", "光", "夢", "星", "心")
 
     def __init__(self) -> None:
         self.state = "idle"
@@ -103,6 +102,7 @@ class HologramEffects:
         self.beam_clock = 0.0    # independent line fade clock
         self.core_phase = 0.0
         self.ring_angles = [0.0, 0.7, 1.5]
+        self.global_rotation_angle = 0.0
         self.primary_color = QColor(self.PALETTES["idle"]["primary"])
         self.secondary_color = QColor(self.PALETTES["idle"]["secondary"])
         self.core_color = QColor(self.PALETTES["idle"]["core"])
@@ -184,6 +184,25 @@ class HologramEffects:
             self.beam_clock += dt * 2.8
 
         self.core_phase = (self.core_phase + dt * tau / pulse_period) % tau
+
+        # Toda a HUD gira durante interações, não só o icosaedro central.
+        # A rotação global compõe com os giros independentes dos anéis internos.
+        if self.state == "listening":
+            global_speed = 72.0
+        elif self.state == "thinking":
+            global_speed = 20.0
+        elif self.state == "processing":
+            global_speed = 42.0
+        elif self.state == "speaking":
+            global_speed = 15.0
+        elif self.state == "success":
+            global_speed = 72.0 if self.state_elapsed <= 0.72 else 8.0
+        elif self.state == "completed":
+            global_speed = 3.0
+        else:
+            global_speed = 0.0
+        self.global_rotation_angle = (self.global_rotation_angle + global_speed * dt) % 360.0
+
         ring_speeds = self._ring_speeds()
         for index, speed in enumerate(ring_speeds):
             self.ring_angles[index] = (self.ring_angles[index] + speed * dt) % tau
@@ -256,8 +275,8 @@ class HologramEffects:
             painter.setPen(fine_pen)
             painter.drawEllipse(QPointF(self.CENTER, self.CENTER), 202.0, 202.0)
 
-            # Anel externo: um círculo único, completamente fechado e espesso.
-            # Não há preenchimento: o interior permanece transparente.
+            # Anel externo: círculo sem preenchimento; apenas contorno e halo.
+            # A transparência interna deixa o icosaedro e o fundo visíveis.
             outer_radius = 232.0
             outer_rect = QRectF(
                 self.CENTER - outer_radius,
@@ -280,8 +299,33 @@ class HologramEffects:
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawEllipse(outer_rect)
 
-            # Símbolos japoneses ao redor do anel. A cor deles acompanha a
-            # paleta do estado através de secondary_color; o centro continua vazio.
+            # Marcas técnicas na própria borda: arcos curtos e ticks, sem disco
+            # de fundo. A rotação global da HUD faz o padrão girar nas interações.
+            arc_rect = outer_rect.adjusted(7.0, 7.0, -7.0, -7.0)
+            arc_pen = QPen(self._color_with_alpha(self.secondary_color, 230), 2.0)
+            arc_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(arc_pen)
+            for index in range(8):
+                start_angle = int((-90.0 + index * 45.0 + 4.0) * 16)
+                span_angle = int(24.0 * 16)
+                painter.drawArc(arc_rect, start_angle, span_angle)
+
+            tick_pen = QPen(self._color_with_alpha(self.secondary_color, 205), 1.4)
+            tick_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(tick_pen)
+            for index in range(48):
+                angle = -pi / 2 + tau * index / 48
+                outer_tick = 229.0
+                inner_tick = 221.0 if index % 4 == 0 else 224.0
+                painter.drawLine(
+                    QPointF(self.CENTER + cos(angle) * inner_tick,
+                            self.CENTER + sin(angle) * inner_tick),
+                    QPointF(self.CENTER + cos(angle) * outer_tick,
+                            self.CENTER + sin(angle) * outer_tick),
+                )
+
+            # Caracteres dentro da circunferência, nunca fora da borda.
+            # São posicionados no intervalo entre a malha fina e o anel externo.
             font = QFont("Yu Gothic UI", 17, QFont.Weight.DemiBold)
             painter.setFont(font)
             metrics = QFontMetricsF(font)
@@ -290,7 +334,7 @@ class HologramEffects:
 
             for index, mark in enumerate(self._JP_MARKS):
                 angle = -pi / 2 + tau * index / len(self._JP_MARKS)
-                text_radius = 255.0
+                text_radius = 210.0
                 x = self.CENTER + cos(angle) * text_radius
                 y = self.CENTER + sin(angle) * text_radius
                 bounds = metrics.boundingRect(mark)
