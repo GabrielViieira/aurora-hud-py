@@ -48,6 +48,20 @@ def _tool_call_signature(call: ToolCall) -> str:
     return f"{call.name}:{args}"
 
 
+def _messages_contain_image(messages: list[ChatMessage]) -> bool:
+    """Retorna True quando o contexto contém uma imagem que exige modelo visual."""
+    for message in messages:
+        content = message.content
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") in {"image", "image_url"}:
+                return True
+    return False
+
+
 def _is_action_tool(name: str, spec: Any) -> bool:
     """Detecta ações mutáveis, incluindo ferramentas desktop marcadas L0 por legado."""
     try:
@@ -239,7 +253,9 @@ class AuroraAgent:
                 request = LLMRequest(
                     messages=messages,
                     tools=tools,
-                    model=self.router.model_for("chat"),
+                    model=self.router.model_for(
+                        "vision" if _messages_contain_image(messages) else "chat"
+                    ),
                     temperature=self.settings.llm.temperature,
                     max_tokens=self.settings.llm.max_output_tokens,
                 )
