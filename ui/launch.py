@@ -86,6 +86,20 @@ _JA_RE = re.compile(r"[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]")
 _JA_KANA_RE = re.compile(r"[\u3040-\u309F\u30A0-\u30FF]")
 FREELLM_URL = os.environ.get("AURORA_FREELLM_URL", "http://localhost:3001")
 
+
+def _tts_gateway_root() -> str:
+    """Resolve o gateway da tradução com as mesmas configurações do runtime."""
+    explicit = os.environ.get("AURORA_FREELLM_URL", "").strip()
+    if explicit:
+        return explicit.rstrip("/").removesuffix("/v1")
+    try:
+        if Settings is not None:
+            configured = Settings.load().llm.base_url.rstrip("/")
+            return configured[:-3] if configured.endswith("/v1") else configured
+    except Exception as exc:
+        print(f"[Aurora TTS] Não consegui ler a URL do gateway da configuração: {exc}")
+    return FREELLM_URL.rstrip("/").removesuffix("/v1")
+
 APPLIO_DIR = Path(r"C:\Users\Administrator\Downloads\Applio-main")
 RAPHAEL_PTH = APPLIO_DIR / "logs" / "Raphael_Sensei.pth"
 if not RAPHAEL_PTH.exists():
@@ -761,7 +775,8 @@ class SvgHologram(QMainWindow):
                     "temperature": 0.1,
                     "max_tokens": 512,
                 }
-                resp = httpx.post(f"{FREELLM_URL}/v1/chat/completions", json=payload, timeout=15.0)
+                gateway_root = _tts_gateway_root()
+                resp = httpx.post(f"{gateway_root}/v1/chat/completions", json=payload, timeout=15.0)
                 if resp.status_code == 200:
                     data = resp.json()
                     content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
