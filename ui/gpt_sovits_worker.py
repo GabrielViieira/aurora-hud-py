@@ -144,6 +144,10 @@ def _handle_request(infer, args: argparse.Namespace, request: dict[str, Any]) ->
                 temperature=0.8,
                 speed=1.0,
                 inp_refs=[],
+                # O caminho direto não usa a aceleração CUDA Graph/Flash Attention.
+                # É mais conservador para GPUs como a GTX 1660 e evita sinal inválido.
+                use_cuda_graph=False,
+                use_flash_attention=False,
             ))
             if not generated:
                 raise RuntimeError("GPT-SoVITS não retornou áudio.")
@@ -155,6 +159,11 @@ def _handle_request(infer, args: argparse.Namespace, request: dict[str, Any]) ->
             rms = float(np.sqrt(np.mean(np.square(audio_float)))) if audio_float.size else 0.0
             frames = int(audio_array.shape[0]) if audio_array.ndim else int(audio_array.size)
             duration = frames / max(1, int(sample_rate))
+            if not np.isfinite(peak) or not np.isfinite(rms) or peak < (2.0 if audio_array.dtype.kind in "iu" else 1e-5):
+                raise RuntimeError(
+                    f"GPT-SoVITS retornou áudio silencioso (pico={peak:.4g}, RMS={rms:.4g}); "
+                    "o WAV não será salvo como uma síntese válida."
+                )
             print(
                 f"[Aurora direct TTS] Sinal gerado: shape={audio_array.shape}, "
                 f"dtype={audio_array.dtype}, pico={peak:.1f}, RMS={rms:.1f}, "
