@@ -1089,6 +1089,7 @@ class SvgHologram(QMainWindow):
                 "--sovits-model", str(GPT_SOVITS_SOVITS_MODEL),
                 "--reference", str(GPT_SOVITS_REFERENCE),
                 "--prompt-text", GPT_SOVITS_PROMPT_TEXT,
+                "--device", GPT_SOVITS_DEVICE,
             ]
             try:
                 GPT_SOVITS_DIRECT_LOG.parent.mkdir(parents=True, exist_ok=True)

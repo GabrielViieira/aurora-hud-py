@@ -184,6 +184,7 @@ def main() -> int:
     parser.add_argument("--sovits-model", required=True)
     parser.add_argument("--reference", required=True)
     parser.add_argument("--prompt-text", required=True)
+    parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
 
     try:
