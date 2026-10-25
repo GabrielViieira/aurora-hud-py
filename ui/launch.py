@@ -82,6 +82,8 @@ from PySide6.QtWidgets import (
 )
 
 _JA_RE = re.compile(r"[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]")
+# Para validar tradução, exija hiragana/katakana; kanji isolado também pode ser chinês.
+_JA_KANA_RE = re.compile(r"[\u3040-\u309F\u30A0-\u30FF]")
 FREELLM_URL = os.environ.get("AURORA_FREELLM_URL", "http://localhost:3001")
 
 APPLIO_DIR = Path(r"C:\Users\Administrator\Downloads\Applio-main")
@@ -689,51 +691,69 @@ class SvgHologram(QMainWindow):
             engine = pyttsx3.init()
             voices = engine.getProperty("voices")
             jp_voice = None
+            candidates = []
             for v in voices:
-                vid = str(getattr(v, "id", "")).lower()
-                vname = str(getattr(v, "name", "")).lower()
-                langs = [str(l).lower() for l in getattr(v, "languages", [])]
-                lang_str = " ".join(langs)
-                if jp_voice is None and (
+                vid = str(getattr(v, "id", "") or "").casefold()
+                vname = str(getattr(v, "name", "") or "").casefold()
+                language_parts = []
+                for raw_lang in getattr(v, "languages", []) or []:
+                    if isinstance(raw_lang, bytes):
+                        raw_lang = raw_lang.decode("utf-8", errors="ignore")
+                    language_parts.append(re.sub(r"[^a-zA-Z-]", "", str(raw_lang)).casefold())
+                lang_str = " ".join(language_parts)
+                # Evita o antigo teste '"ja" in id', que podia casar com identificadores
+                # não japoneses por coincidência. Preferimos cultura/nome explicitamente JA.
+                explicit_ja = (
                     "jpn" in vid
-                    or "ja" in vid
-                    or "japan" in vname
-                    or "haruka" in vname
-                    or "ichiro" in vname
-                    or "sayaka" in vname
-                    or "ayumi" in vname
+                    or "jajp" in vid.replace("-", "").replace("_", "")
                     or "ja-jp" in lang_str
-                ):
-                    jp_voice = v.id
-                    break
+                    or "japanese" in lang_str
+                    or "japanese" in vname
+                    or "japan" in vname
+                    or any(name in vname for name in ("haruka", "ichiro", "sayaka", "ayumi", "nanami"))
+                    or bool(re.search(r"(^|[\\\\/_.-])ja([\\\\/_.-]|$)", vid))
+                )
+                if explicit_ja:
+                    candidates.append((vname, str(getattr(v, "id", ""))))
+            jp_voice = candidates[0][1] if candidates else None
             self._tts_voice_ja = jp_voice
             if jp_voice:
                 engine.setProperty("voice", jp_voice)
+                print(f"[Aurora TTS] Voz japonesa selecionada: {candidates[0][0]} ({jp_voice})")
+            else:
+                available = [
+                    f"{getattr(v, 'name', '?')} [{getattr(v, 'id', '?')}]"
+                    for v in voices
+                ]
+                print("[Aurora TTS] AVISO: nenhuma voz japonesa foi identificada. "
+                      "A Aurora não falará em português como fallback. Vozes detectadas: "
+                      + "; ".join(available[:12]))
             engine.setProperty("rate", 165)
             engine.setProperty("volume", 0.5)
             self._tts_engine = engine
-            print(f"[Aurora TTS] Voz japonesa ativa: {jp_voice}")
         except Exception as exc:
             print(f"[Aurora TTS] Falha ao iniciar TTS: {exc}")
             self._tts_engine = None
 
     def _translate_to_japanese(self, text: str) -> str:
         if not text:
-            return text
-        if _JA_RE.search(text):
+            return ""
+        # Texto que já tem hiragana/katakana provavelmente já está em japonês.
+        if _JA_KANA_RE.search(text):
             return text
         key = text.strip()
         if key in self._translation_cache:
             cached = self._translation_cache[key]
-            if _JA_RE.search(cached):
+            if _JA_KANA_RE.search(cached):
                 return cached
         if not HTTPX_AVAILABLE:
-            return key
+            print("[Aurora TTS] Tradução japonesa indisponível: pacote httpx não instalado.")
+            return ""
 
         def _do_translate(prompt: str) -> str:
             try:
                 payload = {
-                    "model": "auto",
+                    "model": os.environ.get("AURORA_TTS_TRANSLATION_MODEL", "auto").strip() or "auto",
                     "messages": [
                         {"role": "system", "content": prompt},
                         {"role": "user", "content": key},
@@ -748,8 +768,11 @@ class SvgHologram(QMainWindow):
                     if content:
                         translated = content.strip().strip('"').strip("'").strip("「").strip("」")
                         return translated
+                    print("[Aurora TTS] O modelo de tradução retornou conteúdo vazio.")
+                else:
+                    print(f"[Aurora TTS] Tradução recusada pelo gateway (HTTP {resp.status_code}).")
             except Exception as exc:
-                print(f"[Aurora TTS] Falha na tradução: {exc}")
+                print(f"[Aurora TTS] Falha na tradução: {type(exc).__name__}: {exc}")
             return ""
 
         # Primeira tentativa
@@ -757,19 +780,22 @@ class SvgHologram(QMainWindow):
             "Você é um tradutor especializado em japonês falado. Traduza TODO o texto para japonês natural, coloquial e adequado para TTS. "
             "NUNCA responda em português. NUNCA use romaji. NUNCA explique. Retorne APENAS o texto em japonês."
         )
-        if translated and _JA_RE.search(translated):
+        if translated and _JA_KANA_RE.search(translated):
             self._translation_cache[key] = translated
             return translated
 
         # Segunda tentativa mais agressiva
         translated = _do_translate(
-            "Traduza o seguinte para japonês. Responda OBRIGATORIAMENTE em japonês. Saída: apenas japonês."
+            "Traduza para japonês falado. A resposta deve conter hiragana ou katakana, "
+            "não pode estar em português nem em romaji. Retorne apenas o texto japonês."
         )
-        if translated and _JA_RE.search(translated):
+        if translated and _JA_KANA_RE.search(translated):
             self._translation_cache[key] = translated
             return translated
 
-        return key
+        print("[Aurora TTS] AVISO: não consegui validar uma tradução em japonês; "
+              "áudio desta resposta será omitido para não falar português.")
+        return ""
 
     def _speak_with_voicevox_to_file(self, japanese_text: str, out_wav: Path) -> bool:
         if not self._voicevox_enabled or VoicevoxClient is None or asyncio is None:
@@ -891,15 +917,18 @@ class SvgHologram(QMainWindow):
                 try:
                     with self._tts_lock:
                         spoken_text = self._translate_to_japanese(text)
-                        if self._applio_available:
-                            audio_path = self._speak_with_applio(spoken_text)
-                        if not audio_path and self._voicevox_enabled:
-                            candidate = job_dir / "aurora_voicevox.wav"
-                            if self._speak_with_voicevox_to_file(spoken_text, candidate):
-                                audio_path = candidate
-                        if not audio_path:
-                            candidate = job_dir / "aurora_sapi.wav"
-                            audio_path = self._prepare_sapi_audio(spoken_text, candidate)
+                        if not spoken_text or not _JA_KANA_RE.search(spoken_text):
+                            audio_path = None
+                        else:
+                            if self._applio_available:
+                                audio_path = self._speak_with_applio(spoken_text)
+                            if not audio_path and self._voicevox_enabled:
+                                candidate = job_dir / "aurora_voicevox.wav"
+                                if self._speak_with_voicevox_to_file(spoken_text, candidate):
+                                    audio_path = candidate
+                            if not audio_path:
+                                candidate = job_dir / "aurora_sapi.wav"
+                                audio_path = self._prepare_sapi_audio(spoken_text, candidate)
                 except Exception as exc:
                     print(f"[Aurora TTS] Falha na preparação da fala: {exc}")
                     audio_path = None
