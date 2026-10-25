@@ -87,18 +87,10 @@ _JA_KANA_RE = re.compile(r"[\u3040-\u309F\u30A0-\u30FF]")
 FREELLM_URL = os.environ.get("AURORA_FREELLM_URL", "http://localhost:3001")
 
 
-def _tts_gateway_root() -> str:
-    """Resolve o gateway da tradução com as mesmas configurações do runtime."""
-    explicit = os.environ.get("AURORA_FREELLM_URL", "").strip()
-    if explicit:
-        return explicit.rstrip("/").removesuffix("/v1")
-    try:
-        if Settings is not None:
-            configured = Settings.load().llm.base_url.rstrip("/")
-            return configured[:-3] if configured.endswith("/v1") else configured
-    except Exception as exc:
-        print(f"[Aurora TTS] Não consegui ler a URL do gateway da configuração: {exc}")
-    return FREELLM_URL.rstrip("/").removesuffix("/v1")
+def _tts_gateway_config() -> tuple[str, dict[str, str]]:
+    """Resolve endpoint e autenticação usando a mesma configuração do runtime."""
+    from aurora.voice.translation_client import translation_request_config
+    return translation_request_config()
 
 APPLIO_DIR = Path(r"C:\Users\Administrator\Downloads\Applio-main")
 RAPHAEL_PTH = APPLIO_DIR / "logs" / "Raphael_Sensei.pth"
@@ -775,8 +767,10 @@ class SvgHologram(QMainWindow):
                     "temperature": 0.1,
                     "max_tokens": 512,
                 }
-                gateway_root = _tts_gateway_root()
-                resp = httpx.post(f"{gateway_root}/v1/chat/completions", json=payload, timeout=15.0)
+                gateway_url, headers = _tts_gateway_config()
+                resp = httpx.post(
+                    gateway_url, json=payload, headers=headers, timeout=15.0
+                )
                 if resp.status_code == 200:
                     data = resp.json()
                     content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
@@ -784,11 +778,20 @@ class SvgHologram(QMainWindow):
                         translated = content.strip().strip('"').strip("'").strip("「").strip("」")
                         return translated
                     print("[Aurora TTS] O modelo de tradução retornou conteúdo vazio.")
+                elif resp.status_code in (401, 403):
+                    self._tts_translation_auth_failed = True
+                    print(
+                        f"[Aurora TTS] Autenticação da tradução recusada (HTTP {resp.status_code}). "
+                        "O TTS agora usa a mesma chave configurada para o runtime; confira a chave/URL "
+                        "do gateway e reinicie a Aurora."
+                    )
                 else:
                     print(f"[Aurora TTS] Tradução recusada pelo gateway (HTTP {resp.status_code}).")
             except Exception as exc:
                 print(f"[Aurora TTS] Falha na tradução: {type(exc).__name__}: {exc}")
             return ""
+
+        self._tts_translation_auth_failed = False
 
         # Primeira tentativa
         translated = _do_translate(
@@ -798,6 +801,8 @@ class SvgHologram(QMainWindow):
         if translated and _JA_KANA_RE.search(translated):
             self._translation_cache[key] = translated
             return translated
+        if self._tts_translation_auth_failed:
+            return ""
 
         # Segunda tentativa mais agressiva
         translated = _do_translate(
