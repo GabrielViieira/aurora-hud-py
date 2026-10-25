@@ -143,6 +143,19 @@ GPT_SOVITS_API_LOG = Path(os.environ.get(
     "LOCALAPPDATA", str(Path.home() / "AppData" / "Local")
 )) / "Aurora" / "logs" / "gpt_sovits_api.log"
 
+# Motor de inferência GPT-SoVITS direto: sem servidor HTTP local.
+GPT_SOVITS_DIRECT_ENABLED = os.environ.get(
+    "AURORA_GPT_SOVITS_DIRECT_ENABLED", "1"
+).strip().lower() not in {"0", "false", "no", "off", "disabled"}
+GPT_SOVITS_API_FALLBACK_ENABLED = os.environ.get(
+    "AURORA_GPT_SOVITS_API_FALLBACK", "0"
+).strip().lower() in {"1", "true", "yes", "on", "enabled"}
+GPT_SOVITS_DIRECT_WORKER = Path(__file__).resolve().with_name("gpt_sovits_worker.py")
+GPT_SOVITS_INFERENCE = GPT_SOVITS_DIR / "GPT_SoVITS" / "inference_webui.py"
+GPT_SOVITS_DIRECT_LOG = Path(os.environ.get(
+    "LOCALAPPDATA", str(Path.home() / "AppData" / "Local")
+)) / "Aurora" / "logs" / "gpt_sovits_direct.log"
+
 VOICEVOX_URL = os.environ.get("AURORA_VOICEVOX_URL", "http://127.0.0.1:50021")
 VOICEVOX_SPEAKER = int(os.environ.get("AURORA_VOICEVOX_SPEAKER", "3"))
 
@@ -623,26 +636,40 @@ class SvgHologram(QMainWindow):
         self._translation_cache = {}
         self._applio_available = APPLIO_DIR.exists() and RAPHAEL_PTH.exists()
         self._voicevox_enabled = VOICEVOX_AVAILABLE
+        # Mantém a API antiga apenas como fallback opcional.
         self._gpt_sovits_process: Optional[subprocess.Popen] = None
         self._gpt_sovits_start_lock = threading.Lock()
         self._gpt_sovits_start_failed = False
         self._gpt_sovits_model_selected = False
+        self._gpt_sovits_api_fallback = GPT_SOVITS_API_FALLBACK_ENABLED
+
+        # Motor direto persistente: stdin/stdout local, sem endpoint HTTP.
+        self._gpt_sovits_direct_process: Optional[subprocess.Popen] = None
+        self._gpt_sovits_direct_messages: Optional[queue.Queue] = None
+        self._gpt_sovits_direct_ready = False
+        self._gpt_sovits_direct_start_failed = False
+        self._gpt_sovits_direct_start_lock = threading.Lock()
+
         self._gpt_sovits_enabled = (
             GPT_SOVITS_ENABLED
-            and HTTPX_AVAILABLE
-            and (GPT_SOVITS_DIR / "api.py").is_file()
+            and GPT_SOVITS_DIRECT_ENABLED
+            and GPT_SOVITS_DIRECT_WORKER.is_file()
+            and GPT_SOVITS_INFERENCE.is_file()
             and GPT_SOVITS_PYTHON.is_file()
             and GPT_SOVITS_GPT_MODEL.is_file()
             and GPT_SOVITS_SOVITS_MODEL.is_file()
             and GPT_SOVITS_REFERENCE.is_file()
         )
         if self._gpt_sovits_enabled:
-            print("[Aurora TTS] GPT-SoVITS Raphael configurado; API será iniciada sob demanda.")
-        elif GPT_SOVITS_ENABLED:
+            print("[Aurora TTS] GPT-SoVITS Raphael configurado; a inferência direta será iniciada sob demanda.")
+        elif GPT_SOVITS_ENABLED and GPT_SOVITS_DIRECT_ENABLED:
             print(
-                "[Aurora TTS] GPT-SoVITS não configurado (API/Python/modelos/referência ausentes); "
-                "será usado o TTS alternativo."
+                "[Aurora TTS] Motor GPT-SoVITS direto não configurado "
+                "(worker, inference_webui.py, Python, modelos ou referência ausentes); "
+                "serão usados os fallbacks."
             )
+        if self._gpt_sovits_api_fallback:
+            print("[Aurora TTS] Fallback HTTP local GPT-SoVITS habilitado por AURORA_GPT_SOVITS_API_FALLBACK=1.")
 
         model_path = Path(
             os.environ.get("AURORA_VOSK_MODEL", str(DEFAULT_VOSK_MODEL))
@@ -1018,8 +1045,247 @@ class SvgHologram(QMainWindow):
             )
             return False
 
+    def _read_gpt_sovits_direct_messages(self, process: subprocess.Popen, messages: queue.Queue) -> None:
+        """Lê respostas JSON do worker sem bloquear a thread da interface."""
+        try:
+            if process.stdout is not None:
+                for line in process.stdout:
+                    messages.put(line.rstrip("\r\n"))
+        except Exception as exc:
+            messages.put(json.dumps({"ok": False, "error": str(exc)}))
+        finally:
+            messages.put(None)
+
+    def _ensure_gpt_sovits_direct(self) -> bool:
+        """Inicia uma única instância persistente de inferência direta do GPT-SoVITS."""
+        if not self._gpt_sovits_enabled:
+            return False
+
+        process = self._gpt_sovits_direct_process
+        if process is not None and process.poll() is None and self._gpt_sovits_direct_ready:
+            return True
+        if self._gpt_sovits_direct_start_failed:
+            return False
+
+        with self._gpt_sovits_direct_start_lock:
+            process = self._gpt_sovits_direct_process
+            if process is not None and process.poll() is None and self._gpt_sovits_direct_ready:
+                return True
+            if self._gpt_sovits_direct_start_failed:
+                return False
+            if process is not None:
+                self._shutdown_gpt_sovits_direct()
+
+            messages: queue.Queue = queue.Queue()
+            command = [
+                str(GPT_SOVITS_PYTHON),
+                "-u",
+                str(GPT_SOVITS_DIRECT_WORKER),
+                "--root", str(GPT_SOVITS_DIR),
+                "--gpt-model", str(GPT_SOVITS_GPT_MODEL),
+                "--sovits-model", str(GPT_SOVITS_SOVITS_MODEL),
+                "--reference", str(GPT_SOVITS_REFERENCE),
+                "--prompt-text", GPT_SOVITS_PROMPT_TEXT,
+            ]
+            try:
+                GPT_SOVITS_DIRECT_LOG.parent.mkdir(parents=True, exist_ok=True)
+                with GPT_SOVITS_DIRECT_LOG.open("a", encoding="utf-8", errors="replace") as log_file:
+                    self._gpt_sovits_direct_process = subprocess.Popen(
+                        command,
+                        cwd=str(GPT_SOVITS_DIR),
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=log_file,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        bufsize=1,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    )
+            except Exception as exc:
+                self._gpt_sovits_direct_start_failed = True
+                print(f"[Aurora GPT-SoVITS] Não consegui iniciar o worker direto: {exc}")
+                return False
+
+            process = self._gpt_sovits_direct_process
+            self._gpt_sovits_direct_messages = messages
+            threading.Thread(
+                target=self._read_gpt_sovits_direct_messages,
+                args=(process, messages),
+                daemon=True,
+                name="AuroraGPTSoVITSDirectReader",
+            ).start()
+            print(
+                "[Aurora GPT-SoVITS] Inicializando inferência direta; o primeiro carregamento pode demorar. "
+                f"Log: {GPT_SOVITS_DIRECT_LOG}"
+            )
+
+            try:
+                startup_timeout = min(
+                    300.0,
+                    max(30.0, float(os.environ.get("AURORA_GPT_SOVITS_STARTUP_TIMEOUT", "240"))),
+                )
+            except ValueError:
+                startup_timeout = 240.0
+            deadline = time.monotonic() + startup_timeout
+
+            while time.monotonic() < deadline:
+                if process.poll() is not None and messages.empty():
+                    self._gpt_sovits_direct_start_failed = True
+                    print(
+                        "[Aurora GPT-SoVITS] O worker terminou durante a inicialização. "
+                        f"Consulte {GPT_SOVITS_DIRECT_LOG}"
+                    )
+                    self._shutdown_gpt_sovits_direct()
+                    return False
+                try:
+                    line = messages.get(timeout=min(0.5, max(0.05, deadline - time.monotonic())))
+                except queue.Empty:
+                    continue
+                if line is None:
+                    self._gpt_sovits_direct_start_failed = True
+                    print(f"[Aurora GPT-SoVITS] O worker encerrou sem sinal de pronto. Log: {GPT_SOVITS_DIRECT_LOG}")
+                    self._shutdown_gpt_sovits_direct()
+                    return False
+                try:
+                    response = json.loads(line)
+                except json.JSONDecodeError:
+                    print(f"[Aurora GPT-SoVITS] Resposta inválida do worker: {line[:300]}")
+                    continue
+                if response.get("ready"):
+                    self._gpt_sovits_direct_ready = True
+                    self._gpt_sovits_direct_start_failed = False
+                    print("[Aurora GPT-SoVITS] Motor direto pronto; os pesos ficam carregados entre as falas.")
+                    return True
+                if response.get("ok") is False:
+                    self._gpt_sovits_direct_start_failed = True
+                    print(
+                        "[Aurora GPT-SoVITS] Falha ao carregar o motor direto: "
+                        f"{response.get('error', 'erro sem detalhes')}. Log: {GPT_SOVITS_DIRECT_LOG}"
+                    )
+                    self._shutdown_gpt_sovits_direct()
+                    return False
+
+            self._gpt_sovits_direct_start_failed = True
+            print(
+                f"[Aurora GPT-SoVITS] Inicialização excedeu {startup_timeout:.0f}s. "
+                f"Consulte {GPT_SOVITS_DIRECT_LOG}"
+            )
+            self._shutdown_gpt_sovits_direct()
+            return False
+
+    def _speak_with_gpt_sovits_direct(self, japanese_text: str) -> Optional[Path]:
+        """Gera o WAV pelo GPT-SoVITS carregado localmente, sem servidor HTTP."""
+        if not self._gpt_sovits_enabled or not japanese_text.strip():
+            return None
+
+        work_dir = Path(tempfile.mkdtemp(prefix="aurora_gpt_sovits_direct_"))
+        out_wav = work_dir / "aurora_raphael_tts.wav"
+        started = time.perf_counter()
+        try:
+            if not self._ensure_gpt_sovits_direct():
+                shutil.rmtree(work_dir, ignore_errors=True)
+                return None
+
+            process = self._gpt_sovits_direct_process
+            messages = self._gpt_sovits_direct_messages
+            if process is None or process.poll() is not None or process.stdin is None or messages is None:
+                raise RuntimeError("O worker direto não está disponível.")
+
+            process.stdin.write(json.dumps({
+                "text": japanese_text,
+                "output_path": str(out_wav),
+            }, ensure_ascii=False) + "\n")
+            process.stdin.flush()
+
+            try:
+                request_timeout = min(
+                    300.0,
+                    max(30.0, float(os.environ.get("AURORA_GPT_SOVITS_REQUEST_TIMEOUT", "180"))),
+                )
+            except ValueError:
+                request_timeout = 180.0
+            deadline = time.monotonic() + request_timeout
+
+            while time.monotonic() < deadline:
+                try:
+                    line = messages.get(timeout=min(0.5, max(0.05, deadline - time.monotonic())))
+                except queue.Empty:
+                    if process.poll() is not None:
+                        self._shutdown_gpt_sovits_direct()
+                        raise RuntimeError("O worker direto encerrou durante a síntese.")
+                    continue
+                if line is None:
+                    self._shutdown_gpt_sovits_direct()
+                    raise RuntimeError("O worker direto fechou o canal de respostas.")
+                try:
+                    response = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise RuntimeError(f"Resposta inválida do worker: {line[:300]}") from exc
+                if response.get("ok"):
+                    if not out_wav.is_file() or out_wav.stat().st_size < 44:
+                        raise RuntimeError("O worker informou sucesso, mas não gerou um WAV válido.")
+                    with out_wav.open("rb") as audio_file:
+                        header = audio_file.read(12)
+                    if header[:4] != b"RIFF" or b"WAVE" not in header:
+                        raise RuntimeError("O worker gerou um arquivo que não é WAV.")
+                    elapsed_ms = (time.perf_counter() - started) * 1000
+                    print(f"[Aurora GPT-SoVITS] Áudio gerado por inferência direta em {elapsed_ms:.0f} ms.")
+                    return out_wav
+                raise RuntimeError(response.get("error", "falha sem detalhes na inferência direta"))
+
+            self._shutdown_gpt_sovits_direct()
+            raise TimeoutError(f"A inferência direta excedeu {request_timeout:.0f}s.")
+        except Exception as exc:
+            print(f"[Aurora GPT-SoVITS] Inferência direta falhou: {exc}")
+            shutil.rmtree(work_dir, ignore_errors=True)
+            return None
+
     def _speak_with_gpt_sovits(self, japanese_text: str) -> Optional[Path]:
-        """Sintetiza japonês diretamente com GPT-SoVITS, sem Edge TTS e sem conversão RVC."""
+        """Prioriza o motor direto; a API HTTP só é usada se o fallback for ativado."""
+        audio = self._speak_with_gpt_sovits_direct(japanese_text)
+        if audio is not None:
+            return audio
+        if self._gpt_sovits_api_fallback:
+            print("[Aurora GPT-SoVITS] Tentando fallback explícito pela API HTTP local.")
+            return self._speak_with_gpt_sovits_api(japanese_text)
+        return None
+
+    def _shutdown_gpt_sovits_direct(self) -> None:
+        """Encerra o worker direto que pertence a esta instância da Aurora."""
+        process = self._gpt_sovits_direct_process
+        self._gpt_sovits_direct_ready = False
+        if process is not None:
+            if process.poll() is None:
+                try:
+                    if process.stdin is not None:
+                        process.stdin.write(json.dumps({"cmd": "shutdown"}) + "\n")
+                        process.stdin.flush()
+                    process.wait(timeout=4)
+                except Exception:
+                    try:
+                        process.terminate()
+                        process.wait(timeout=3)
+                    except Exception:
+                        try:
+                            process.kill()
+                        except Exception:
+                            pass
+            try:
+                if process.stdin is not None:
+                    process.stdin.close()
+            except Exception:
+                pass
+            try:
+                if process.stdout is not None:
+                    process.stdout.close()
+            except Exception:
+                pass
+        self._gpt_sovits_direct_process = None
+        self._gpt_sovits_direct_messages = None
+
+    def _speak_with_gpt_sovits_api(self, japanese_text: str) -> Optional[Path]:
+        """Fallback opcional por API HTTP local (desativado por padrão)."""
         if not self._gpt_sovits_enabled or not japanese_text.strip():
             return None
         work_dir = Path(tempfile.mkdtemp(prefix="aurora_gpt_sovits_"))
@@ -1528,6 +1794,7 @@ class SvgHologram(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         self.animation_timer.stop()
         self.stop_listening()
+        self._shutdown_gpt_sovits_direct()
         self._shutdown_gpt_sovits_api()
         try:
             if self._runtime is not None:
