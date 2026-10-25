@@ -61,42 +61,42 @@ Referência: https://github.com/RVC-Boss/GPT-SoVITS
 
 ## Integração do TTS treinado na Aurora
 
-A interface \`ui/launch.py\` usa por padrão um **worker persistente de inferência direta** do GPT-SoVITS, sem Edge TTS, RVC ou servidor HTTP para a síntese normal.
+A interface `ui/launch.py` usa por padrão um **worker persistente de inferência direta** do GPT-SoVITS, sem Edge TTS, RVC ou servidor HTTP para a síntese normal.
 
 Modelos e referência locais:
 
-- GPT: \`GPT_weights_v2Pro/xxx-e15.ckpt\`
-- SoVITS: \`SoVITS_weights_v2Pro/xxx_e8_s816.pth\`
-- Áudio de referência: \`logs/xxx/5-wav32k/0001_raphael.wav\`
-- Texto de referência: \`こんにちは。ラファエルです。\`
+- GPT: `GPT_weights_v2Pro/xxx-e15.ckpt`
+- SoVITS: `SoVITS_weights_v2Pro/xxx_e8_s816.pth`
+- Áudio de referência: `logs/xxx/5-wav32k/0001_raphael.wav`
+- Texto de referência: `こんにちは。ラファエルです。`
 
-A Aurora inicia \`ui/gpt_sovits_worker.py\` com o Python do ambiente GPT-SoVITS. O worker importa a inferência Python do próprio GPT-SoVITS, mantém os modelos carregados entre as falas e troca mensagens JSON por stdin/stdout; não inicia Gradio nem abre uma porta HTTP. A tradução para japonês continua usando o gateway de tradução já configurado pela Aurora.
+A Aurora inicia `ui/gpt_sovits_worker.py` com o Python do ambiente GPT-SoVITS. O worker importa a inferência Python do próprio GPT-SoVITS, mantém os modelos carregados entre as falas e troca mensagens JSON por stdin/stdout; não inicia Gradio nem abre uma porta HTTP. A tradução para japonês continua usando o gateway de tradução já configurado pela Aurora.
 
 ### Primeiro teste no Windows
 
 Feche qualquer **Inferência TTS WebUI** do GPT-SoVITS antes do primeiro teste para liberar VRAM. Depois, no CMD:
 
-\`\`\`bat
-cd /d C:\\Tools\\OpenCode\\aurora-hud\\app\\aurora
+```bat
+cd /d C:\Tools\OpenCode\aurora-hud\app\aurora
 git pull origin main
-py -m py_compile ui\\launch.py ui\\gpt_sovits_worker.py
-py ui\\launch.py
-\`\`\`
+py -m py_compile ui\launch.py ui\gpt_sovits_worker.py
+py ui\launch.py
+```
 
 Na primeira fala, o worker importa o motor e carrega os modelos; esse início pode demorar. As falas seguintes reutilizam a mesma instância. O log fica em:
 
-\`%LOCALAPPDATA%\\Aurora\\logs\\gpt_sovits_direct.log\`
+`%LOCALAPPDATA%\Aurora\logs\gpt_sovits_direct.log`
 
-Se a inferência direta falhar, a Aurora usa os fallbacks já existentes (RVC, Voicevox e SAPI). A API HTTP local pode ser habilitada explicitamente como alternativa com \`AURORA_GPT_SOVITS_API_FALLBACK=1\`; ela fica desativada por padrão.
+Se a inferência direta falhar, a Aurora usa os fallbacks já existentes (RVC, Voicevox e SAPI). A API HTTP local pode ser habilitada explicitamente como alternativa com `AURORA_GPT_SOVITS_API_FALLBACK=1`; ela fica desativada por padrão.
 
 ### Configuração opcional
 
-- \`AURORA_GPT_SOVITS_DIR\`: pasta de instalação do GPT-SoVITS.
-- \`AURORA_GPT_SOVITS_GPT_MODEL\`: caminho do checkpoint GPT.
-- \`AURORA_GPT_SOVITS_SOVITS_MODEL\`: caminho do peso SoVITS.
-- \`AURORA_GPT_SOVITS_REFERENCE\`: WAV de referência.
-- \`AURORA_GPT_SOVITS_ENABLED=0\`: desativa a integração GPT-SoVITS e usa os fallbacks.
-- \`AURORA_GPT_SOVITS_DIRECT_ENABLED=0\`: desativa o motor direto e usa os fallbacks padrões.
-- \`AURORA_GPT_SOVITS_API_FALLBACK=1\`: permite a API HTTP local como fallback adicional.
+- `AURORA_GPT_SOVITS_DIR`: pasta de instalação do GPT-SoVITS.
+- `AURORA_GPT_SOVITS_GPT_MODEL`: caminho do checkpoint GPT.
+- `AURORA_GPT_SOVITS_SOVITS_MODEL`: caminho do peso SoVITS.
+- `AURORA_GPT_SOVITS_REFERENCE`: WAV de referência.
+- `AURORA_GPT_SOVITS_ENABLED=0`: desativa a integração GPT-SoVITS e usa os fallbacks.
+- `AURORA_GPT_SOVITS_DIRECT_ENABLED=0`: desativa o motor direto e usa os fallbacks padrões.
+- `AURORA_GPT_SOVITS_API_FALLBACK=1`: permite a API HTTP local como fallback adicional.
 
 Os modelos treinados não são modificados. A integração direta usa as mesmas dependências do ambiente GPT-SoVITS instalado, então precisa ser validada na máquina Windows que contém esses modelos.
