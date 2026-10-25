@@ -108,6 +108,41 @@ for cand in [
         RAPHAEL_INDEX = str(cand)
         break
 
+# GPT-SoVITS treinado localmente: a API mantém GPT/SoVITS carregados entre falas.
+GPT_SOVITS_DIR = Path(os.environ.get(
+    "AURORA_GPT_SOVITS_DIR",
+    r"C:\Users\Administrator\Downloads\GPT-SoVITS-v2pro-20250604",
+)).expanduser()
+GPT_SOVITS_API_PORT = int(os.environ.get("AURORA_GPT_SOVITS_API_PORT", "9880"))
+GPT_SOVITS_API_URL = os.environ.get(
+    "AURORA_GPT_SOVITS_API_URL", f"http://127.0.0.1:{GPT_SOVITS_API_PORT}"
+).rstrip("/")
+GPT_SOVITS_PYTHON = Path(os.environ.get(
+    "AURORA_GPT_SOVITS_PYTHON", str(GPT_SOVITS_DIR / "runtime" / "python.exe")
+)).expanduser()
+GPT_SOVITS_GPT_MODEL = Path(os.environ.get(
+    "AURORA_GPT_SOVITS_GPT_MODEL",
+    str(GPT_SOVITS_DIR / "GPT_weights_v2Pro" / "xxx-e15.ckpt"),
+)).expanduser()
+GPT_SOVITS_SOVITS_MODEL = Path(os.environ.get(
+    "AURORA_GPT_SOVITS_SOVITS_MODEL",
+    str(GPT_SOVITS_DIR / "SoVITS_weights_v2Pro" / "xxx_e8_s816.pth"),
+)).expanduser()
+GPT_SOVITS_REFERENCE = Path(os.environ.get(
+    "AURORA_GPT_SOVITS_REFERENCE",
+    str(GPT_SOVITS_DIR / "logs" / "xxx" / "5-wav32k" / "0001_raphael.wav"),
+)).expanduser()
+GPT_SOVITS_PROMPT_TEXT = os.environ.get(
+    "AURORA_GPT_SOVITS_PROMPT_TEXT", "こんにちは。ラファエルです。"
+)
+GPT_SOVITS_DEVICE = os.environ.get("AURORA_GPT_SOVITS_DEVICE", "cuda").strip() or "cuda"
+GPT_SOVITS_ENABLED = os.environ.get("AURORA_GPT_SOVITS_ENABLED", "1").strip().lower() not in {
+    "0", "false", "no", "off", "disabled"
+}
+GPT_SOVITS_API_LOG = Path(os.environ.get(
+    "LOCALAPPDATA", str(Path.home() / "AppData" / "Local")
+)) / "Aurora" / "logs" / "gpt_sovits_api.log"
+
 VOICEVOX_URL = os.environ.get("AURORA_VOICEVOX_URL", "http://127.0.0.1:50021")
 VOICEVOX_SPEAKER = int(os.environ.get("AURORA_VOICEVOX_SPEAKER", "3"))
 
@@ -588,6 +623,26 @@ class SvgHologram(QMainWindow):
         self._translation_cache = {}
         self._applio_available = APPLIO_DIR.exists() and RAPHAEL_PTH.exists()
         self._voicevox_enabled = VOICEVOX_AVAILABLE
+        self._gpt_sovits_process: Optional[subprocess.Popen] = None
+        self._gpt_sovits_start_lock = threading.Lock()
+        self._gpt_sovits_start_failed = False
+        self._gpt_sovits_model_selected = False
+        self._gpt_sovits_enabled = (
+            GPT_SOVITS_ENABLED
+            and HTTPX_AVAILABLE
+            and (GPT_SOVITS_DIR / "api.py").is_file()
+            and GPT_SOVITS_PYTHON.is_file()
+            and GPT_SOVITS_GPT_MODEL.is_file()
+            and GPT_SOVITS_SOVITS_MODEL.is_file()
+            and GPT_SOVITS_REFERENCE.is_file()
+        )
+        if self._gpt_sovits_enabled:
+            print("[Aurora TTS] GPT-SoVITS Raphael configurado; API será iniciada sob demanda.")
+        elif GPT_SOVITS_ENABLED:
+            print(
+                "[Aurora TTS] GPT-SoVITS não configurado (API/Python/modelos/referência ausentes); "
+                "será usado o TTS alternativo."
+            )
 
         model_path = Path(
             os.environ.get("AURORA_VOSK_MODEL", str(DEFAULT_VOSK_MODEL))
@@ -850,6 +905,178 @@ class SvgHologram(QMainWindow):
             print(f"[Aurora Voicevox] Erro: {exc}")
             return False
 
+    def _gpt_sovits_api_ready(self) -> bool:
+        if not HTTPX_AVAILABLE:
+            return False
+        try:
+            with httpx.Client(timeout=2.0, trust_env=False) as client:
+                response = client.get(f"{GPT_SOVITS_API_URL}/docs")
+            return response.status_code == 200
+        except Exception:
+            return False
+
+    def _ensure_gpt_sovits_api(self) -> bool:
+        """Inicia a API local uma vez e mantém GPT/SoVITS carregados para falas seguintes."""
+        if not self._gpt_sovits_enabled or not HTTPX_AVAILABLE:
+            return False
+
+        # Se a API já está ativa, configura nela os pesos treinados da Aurora.
+        if self._gpt_sovits_api_ready():
+            if self._gpt_sovits_model_selected or (
+                self._gpt_sovits_process is not None and self._gpt_sovits_process.poll() is None
+            ):
+                self._gpt_sovits_model_selected = True
+                return True
+            try:
+                with httpx.Client(timeout=180.0, trust_env=False) as client:
+                    response = client.post(
+                        f"{GPT_SOVITS_API_URL}/set_model",
+                        json={
+                            "gpt_model_path": str(GPT_SOVITS_GPT_MODEL),
+                            "sovits_model_path": str(GPT_SOVITS_SOVITS_MODEL),
+                        },
+                    )
+                response.raise_for_status()
+                payload = response.json()
+                if payload.get("code", 0) != 0:
+                    raise RuntimeError(str(payload))
+                self._gpt_sovits_model_selected = True
+                print("[Aurora GPT-SoVITS] API existente configurada com os pesos Raphael.")
+                return True
+            except Exception as exc:
+                print(f"[Aurora GPT-SoVITS] API existente não pôde carregar os pesos Raphael: {exc}")
+                return False
+
+        with self._gpt_sovits_start_lock:
+            if self._gpt_sovits_api_ready():
+                self._gpt_sovits_model_selected = True
+                return True
+            if self._gpt_sovits_start_failed:
+                return False
+            if not (GPT_SOVITS_DIR / "api.py").is_file():
+                print(f"[Aurora GPT-SoVITS] api.py não existe em {GPT_SOVITS_DIR}")
+                self._gpt_sovits_start_failed = True
+                return False
+
+            try:
+                GPT_SOVITS_API_LOG.parent.mkdir(parents=True, exist_ok=True)
+                command = [
+                    str(GPT_SOVITS_PYTHON), "-s", "api.py",
+                    "-s", str(GPT_SOVITS_SOVITS_MODEL),
+                    "-g", str(GPT_SOVITS_GPT_MODEL),
+                    "-dr", str(GPT_SOVITS_REFERENCE),
+                    "-dt", GPT_SOVITS_PROMPT_TEXT,
+                    "-dl", "ja",
+                    "-d", GPT_SOVITS_DEVICE,
+                    "-a", "127.0.0.1",
+                    "-p", str(GPT_SOVITS_API_PORT),
+                ]
+                with GPT_SOVITS_API_LOG.open("a", encoding="utf-8", errors="replace") as log_file:
+                    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                    self._gpt_sovits_process = subprocess.Popen(
+                        command,
+                        cwd=str(GPT_SOVITS_DIR),
+                        stdin=subprocess.DEVNULL,
+                        stdout=log_file,
+                        stderr=subprocess.STDOUT,
+                        creationflags=creationflags,
+                    )
+                print(
+                    "[Aurora GPT-SoVITS] Iniciando API local; o primeiro carregamento pode demorar. "
+                    f"Log: {GPT_SOVITS_API_LOG}"
+                )
+            except Exception as exc:
+                self._gpt_sovits_start_failed = True
+                print(f"[Aurora GPT-SoVITS] Não consegui iniciar a API: {exc}")
+                return False
+
+            timeout_s = min(
+                300.0,
+                max(30.0, float(os.environ.get("AURORA_GPT_SOVITS_STARTUP_TIMEOUT", "180"))),
+            )
+            deadline = time.monotonic() + timeout_s
+            while time.monotonic() < deadline:
+                if self._gpt_sovits_api_ready():
+                    self._gpt_sovits_model_selected = True
+                    print("[Aurora GPT-SoVITS] API pronta; os pesos ficam carregados entre as falas.")
+                    return True
+                if self._gpt_sovits_process is not None and self._gpt_sovits_process.poll() is not None:
+                    self._gpt_sovits_start_failed = True
+                    try:
+                        tail = GPT_SOVITS_API_LOG.read_text(encoding="utf-8", errors="replace")[-2500:]
+                    except OSError:
+                        tail = "(não foi possível ler o log)"
+                    print(f"[Aurora GPT-SoVITS] API encerrou na inicialização. Log recente:\n{tail}")
+                    return False
+                time.sleep(0.7)
+
+            # Não matamos o processo: pode estar terminando o carregamento dos pesos.
+            # Próxima fala volta a verificar a disponibilidade antes de usar o fallback.
+            print(
+                f"[Aurora GPT-SoVITS] API ainda não respondeu após {timeout_s:.0f}s. "
+                f"Confira {GPT_SOVITS_API_LOG}; usando fallback nesta fala."
+            )
+            return False
+
+    def _speak_with_gpt_sovits(self, japanese_text: str) -> Optional[Path]:
+        """Sintetiza japonês diretamente com GPT-SoVITS, sem Edge TTS e sem conversão RVC."""
+        if not self._gpt_sovits_enabled or not japanese_text.strip():
+            return None
+        work_dir = Path(tempfile.mkdtemp(prefix="aurora_gpt_sovits_"))
+        out_wav = work_dir / "aurora_raphael_tts.wav"
+        started = time.perf_counter()
+        try:
+            if not self._ensure_gpt_sovits_api():
+                shutil.rmtree(work_dir, ignore_errors=True)
+                return None
+
+            payload = {
+                "refer_wav_path": str(GPT_SOVITS_REFERENCE),
+                "prompt_text": GPT_SOVITS_PROMPT_TEXT,
+                "prompt_language": "ja",
+                "text": japanese_text,
+                "text_language": "ja",
+                "top_k": 15,
+                "top_p": 0.8,
+                "temperature": 0.8,
+                "speed": 1.0,
+            }
+            timeout_s = min(
+                240.0,
+                max(30.0, float(os.environ.get("AURORA_GPT_SOVITS_REQUEST_TIMEOUT", "120"))),
+            )
+            with httpx.Client(timeout=timeout_s, trust_env=False) as client:
+                response = client.post(f"{GPT_SOVITS_API_URL}/", json=payload)
+            if response.status_code != 200:
+                raise RuntimeError(f"HTTP {response.status_code}: {response.text[:700]}")
+            audio = response.content
+            if len(audio) < 44 or audio[:4] != b"RIFF" or b"WAVE" not in audio[:12]:
+                preview = audio[:300].decode("utf-8", errors="replace")
+                raise RuntimeError(f"API não retornou um WAV válido: {preview}")
+            out_wav.write_bytes(audio)
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            print(f"[Aurora GPT-SoVITS] WAV gerado em {elapsed_ms:.0f} ms.")
+            return out_wav
+        except Exception as exc:
+            print(f"[Aurora GPT-SoVITS] Síntese falhou; tentando fallback: {exc}")
+            shutil.rmtree(work_dir, ignore_errors=True)
+            return None
+
+    def _shutdown_gpt_sovits_api(self) -> None:
+        """Encerra apenas a API que esta instância da Aurora iniciou."""
+        process = self._gpt_sovits_process
+        if process is None or process.poll() is not None:
+            return
+        try:
+            process.terminate()
+            process.wait(timeout=5)
+            print("[Aurora GPT-SoVITS] API local encerrada.")
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
+
     def _speak_with_applio(self, japanese_text: str) -> Optional[Path]:
         """Gera o WAV via edge-tts + RVC, sem iniciar a reprodução."""
         if not self._applio_available:
@@ -951,7 +1178,8 @@ class SvgHologram(QMainWindow):
                         if not spoken_text or not _JA_KANA_RE.search(spoken_text):
                             audio_path = None
                         else:
-                            if self._applio_available:
+                            audio_path = self._speak_with_gpt_sovits(spoken_text)
+                            if not audio_path and self._applio_available:
                                 audio_path = self._speak_with_applio(spoken_text)
                             if not audio_path and self._voicevox_enabled:
                                 candidate = job_dir / "aurora_voicevox.wav"
@@ -1300,6 +1528,7 @@ class SvgHologram(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         self.animation_timer.stop()
         self.stop_listening()
+        self._shutdown_gpt_sovits_api()
         try:
             if self._runtime is not None:
                 self._runtime.close()
