@@ -13,14 +13,15 @@ class D20Animation:
     CENTER = 400.0
 
     PALETTES = {
-        "idle": "#e8b84d",
-        "listening": "#ffe16a",
-        "thinking": "#b9dba7",
-        "processing": "#fff0b3",
-        "speaking": "#e8c16b",
-        "completed": "#d9b765",
-        "success": "#8cdbab",
-        "error": "#ff6570",
+        # A cor do icosaedro acompanha a HUD: ciano normalmente, dourado ao falar.
+        "idle": "#38bfff",
+        "listening": "#38bfff",
+        "thinking": "#38bfff",
+        "processing": "#38bfff",
+        "speaking": "#e9b95b",
+        "completed": "#38bfff",
+        "success": "#38bfff",
+        "error": "#38bfff",
     }
 
     def __init__(self, *, scale: float = 165.0, rotation_speed: float = 0.72, tilt_x: float = 0.2) -> None:
