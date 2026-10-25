@@ -27,29 +27,11 @@ def emit(payload: dict[str, Any]) -> None:
     _protocol_stdout.flush()
 
 
-def _same_path(first: Any, second: Path) -> bool:
-    try:
-        return os.path.normcase(os.path.abspath(str(first))) == os.path.normcase(os.path.abspath(str(second)))
-    except (TypeError, ValueError):
-        return False
-
-
-def _restore_weight_file(path: Path, existed: bool, original: bytes | None) -> None:
-    """O import do WebUI atualiza weight.json; não alteramos a preferência do usuário."""
-    try:
-        if existed and original is not None:
-            path.write_bytes(original)
-        else:
-            path.unlink(missing_ok=True)
-    except OSError as exc:
-        print(f"[Aurora direct TTS] Não foi possível restaurar {path}: {exc}", file=sys.stderr)
-
-
 def _load_engine(args: argparse.Namespace):
     root = Path(args.root).resolve()
-    inference_dir = root / "GPT_SoVITS"
+    api_path = root / "api.py"
     required = [
-        (inference_dir / "inference_webui.py", "GPT_SoVITS/inference_webui.py"),
+        (api_path, "api.py do GPT-SoVITS"),
         (Path(args.gpt_model), "modelo GPT"),
         (Path(args.sovits_model), "modelo SoVITS"),
         (Path(args.reference), "WAV de referência"),
@@ -58,49 +40,44 @@ def _load_engine(args: argparse.Namespace):
         if not path.is_file():
             raise FileNotFoundError(f"{label} não encontrado: {path}")
 
-    # O import da inferência usa imports relativos a GPT_SoVITS e à raiz.
-    for import_path in (str(root), str(inference_dir)):
-        if import_path not in sys.path:
-            sys.path.insert(0, import_path)
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
 
-    # Correspondem às variáveis que a própria inferência-webui lê no início.
-    os.environ["gpt_path"] = str(Path(args.gpt_model).resolve())
-    os.environ["sovits_path"] = str(Path(args.sovits_model).resolve())
+    # Importa o módulo Python de inferência usado pela API oficial, sem executar
+    # uvicorn.run(). Os argumentos fazem api.py carregar os pesos corretos.
+    original_argv = sys.argv[:]
+    sys.argv = [
+        str(api_path),
+        "-s", str(Path(args.sovits_model).resolve()),
+        "-g", str(Path(args.gpt_model).resolve()),
+        "-dr", str(Path(args.reference).resolve()),
+        "-dt", args.prompt_text,
+        "-dl", "ja",
+        "-d", args.device,
+        "-a", "127.0.0.1",
+        "-p", "9880",
+    ]
     os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
-    os.environ.setdefault("is_half", "True")
-
-    weight_file = root / "weight.json"
-    existed = weight_file.is_file()
-    original = weight_file.read_bytes() if existed else None
     try:
         with redirect_stdout(sys.stderr), redirect_stderr(sys.stderr):
-            from GPT_SoVITS import inference_webui as infer
-
-            # Em GPT-SoVITS v2Pro, change_sovits_weights é um generator:
-            # só comparar o caminho ou chamar next() uma vez não garante que
-            # o state_dict terminou de carregar. Consumimos todos os yields.
-            target_sovits = str(Path(args.sovits_model).resolve())
-            language_label = infer.i18n("日文")
-            sovits_result = infer.change_sovits_weights(
-                target_sovits,
-                prompt_language=language_label,
-                text_language=language_label,
-            )
-            if hasattr(sovits_result, "__iter__") and not isinstance(sovits_result, (str, bytes, dict)):
-                for _ in sovits_result:
-                    pass
-
-            # A importação normalmente carregou o GPT indicado pelo ambiente.
-            # Recarregamos somente se o caminho efetivamente selecionado divergir.
-            target_gpt = Path(args.gpt_model).resolve()
-            loaded_gpt = getattr(infer, "gpt_path_global", None)
-            if not _same_path(loaded_gpt, target_gpt):
-                infer.change_gpt_weights(str(target_gpt))
+            import importlib
+            infer = importlib.import_module("api")
     finally:
-        # A WebUI escreve em weight.json ao trocar os modelos; não persistimos
-        # as escolhas da Aurora sobre a configuração pessoal da instalação.
-        _restore_weight_file(weight_file, existed, original)
+        sys.argv = original_argv
 
+    # A importação executa a inicialização dos pesos mas NÃO inicia Uvicorn,
+    # pois o bloco de servidor só roda quando api.py é executado como script.
+    speakers = getattr(infer, "speaker_list", {})
+    speaker = speakers.get("default") if isinstance(speakers, dict) else None
+    if speaker is None:
+        raise RuntimeError("api.py terminou de importar, mas não carregou o speaker default.")
+    if getattr(speaker, "gpt", None) is None or getattr(speaker, "sovits", None) is None:
+        raise RuntimeError("api.py não inicializou os modelos GPT e SoVITS.")
+    print(
+        "[Aurora direct TTS] Inferência carregada pelo api.py: "
+        f"GPT={args.gpt_model}, SoVITS={args.sovits_model}",
+        file=sys.stderr,
+    )
     return infer
 
 
@@ -141,32 +118,21 @@ def _handle_request(infer, args: argparse.Namespace, request: dict[str, Any]) ->
         with redirect_stdout(sys.stderr), redirect_stderr(sys.stderr):
             import soundfile as sf
 
-            # Usa a mesma família de parâmetros da integração anterior da Aurora.
-            # inp_refs=[] evita os defaults problemáticos de algumas versões antigas.
-            language = infer.i18n("日文")
-            import inspect
-
-            # A versão v2pro-20250604 aceita use_cuda_graph, mas pode não expor
-            # use_flash_attention. Só enviamos opções presentes na assinatura instalada.
-            inference_kwargs = {
-                "ref_wav_path": str(Path(args.reference).resolve()),
-                "prompt_text": args.prompt_text,
-                "prompt_language": language,
-                "text": text,
-                "text_language": language,
-                "top_k": 15,
-                "top_p": 0.8,
-                "temperature": 0.8,
-                "speed": 1.0,
-                "inp_refs": [],
-            }
-            supported_parameters = inspect.signature(infer.get_tts_wav).parameters
-            if "use_cuda_graph" in supported_parameters:
-                inference_kwargs["use_cuda_graph"] = False
-            if "use_flash_attention" in supported_parameters:
-                inference_kwargs["use_flash_attention"] = False
-
-            generated = list(infer.get_tts_wav(**inference_kwargs))
+            # Chama a função de inferência do api.py, não a da WebUI.
+            # O speaker default foi carregado no próprio módulo Python.
+            generated = list(infer.get_tts_wav(
+                ref_wav_path=str(Path(args.reference).resolve()),
+                prompt_text=args.prompt_text,
+                prompt_language="ja",
+                text=text,
+                text_language="ja",
+                top_k=15,
+                top_p=0.8,
+                temperature=0.8,
+                speed=1.0,
+                inp_refs=[],
+                spk="default",
+            ))
             if not generated:
                 raise RuntimeError("GPT-SoVITS não retornou áudio.")
             sample_rate, audio = generated[-1]

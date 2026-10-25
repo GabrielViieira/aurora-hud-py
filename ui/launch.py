@@ -151,7 +151,7 @@ GPT_SOVITS_API_FALLBACK_ENABLED = os.environ.get(
     "AURORA_GPT_SOVITS_API_FALLBACK", "0"
 ).strip().lower() in {"1", "true", "yes", "on", "enabled"}
 GPT_SOVITS_DIRECT_WORKER = Path(__file__).resolve().with_name("gpt_sovits_worker.py")
-GPT_SOVITS_INFERENCE = GPT_SOVITS_DIR / "GPT_SoVITS" / "inference_webui.py"
+GPT_SOVITS_INFERENCE = GPT_SOVITS_DIR / "api.py"
 GPT_SOVITS_DIRECT_LOG = Path(os.environ.get(
     "LOCALAPPDATA", str(Path.home() / "AppData" / "Local")
 )) / "Aurora" / "logs" / "gpt_sovits_direct.log"

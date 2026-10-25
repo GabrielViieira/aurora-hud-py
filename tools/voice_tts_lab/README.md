@@ -70,7 +70,7 @@ Modelos e referência locais:
 - Áudio de referência: `logs/xxx/5-wav32k/0001_raphael.wav`
 - Texto de referência: `こんにちは。ラファエルです。`
 
-A Aurora inicia `ui/gpt_sovits_worker.py` com o Python do ambiente GPT-SoVITS. O worker importa a inferência Python do próprio GPT-SoVITS, mantém os modelos carregados entre as falas e troca mensagens JSON por stdin/stdout; não inicia Gradio nem abre uma porta HTTP. A tradução para japonês continua usando o gateway de tradução já configurado pela Aurora.
+A Aurora inicia `ui/gpt_sovits_worker.py` com o Python do ambiente GPT-SoVITS. O worker importa o módulo Python `api.py` e chama sua função de inferência diretamente; mantém os modelos carregados entre as falas e troca mensagens JSON por stdin/stdout. Não chama `uvicorn.run()`, não inicia Gradio e não abre uma porta HTTP. A tradução para japonês continua usando o gateway de tradução já configurado pela Aurora.
 
 ### Primeiro teste no Windows
 
