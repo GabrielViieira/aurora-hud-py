@@ -56,7 +56,9 @@ def _translate_to_japanese(text: str) -> str:
             "temperature": 0.2,
             "max_tokens": 256,
         }
-        resp = httpx.post(f"{FREELLM_URL}/v1/chat/completions", json=payload, timeout=10.0)
+        from aurora.voice.translation_client import translation_request_config
+        endpoint, headers = translation_request_config()
+        resp = httpx.post(endpoint, json=payload, headers=headers, timeout=10.0)
         if resp.status_code == 200:
             data = resp.json()
             content = (
@@ -69,7 +71,13 @@ def _translate_to_japanese(text: str) -> str:
                 if translated and _JA_KANA_RE.search(translated):
                     _TRANSLATION_CACHE[key] = translated
                     return translated
-            logger.warning("TTS japonês: o gateway não retornou uma tradução japonesa válida (HTTP %s).", resp.status_code)
+            if resp.status_code in (401, 403):
+                logger.warning(
+                    "TTS japonês: autenticação recusada (HTTP %s); confira a chave e a URL do gateway.",
+                    resp.status_code,
+                )
+            else:
+                logger.warning("TTS japonês: o gateway não retornou uma tradução japonesa válida (HTTP %s).", resp.status_code)
     except Exception as exc:
         logger.warning("falha ao traduzir para japonês: %s", exc)
     logger.warning("TTS japonês silenciado: tradução inválida; não será lido o texto original em português.")
