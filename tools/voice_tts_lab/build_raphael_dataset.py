@@ -181,12 +181,12 @@ def convert_to_raphael(
     return True, output
 
 
-def write_manifest(records: Iterable[tuple[Path, str]], destination: Path) -> int:
+def write_manifest(records: Iterable[tuple[Path, str]], destination: Path, speaker_name: str) -> int:
     lines = []
     for wav_path, phrase in records:
         if wav_path.is_file() and wav_path.stat().st_size > 44:
             # GPT-SoVITS format: audio_path|speaker_name|language|text
-            lines.append(f"{wav_path.resolve()}|{SPEAKER_NAME}|ja|{phrase}")
+            lines.append(f"{wav_path.resolve()}|{speaker_name}|ja|{phrase}")
     destination.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
     return len(lines)
 
@@ -216,9 +216,6 @@ def main() -> int:
     parser.add_argument("--rvc-timeout", type=int, default=300)
     parser.add_argument("--force", action="store_true", help="Refaz áudios que já existem.")
     args = parser.parse_args()
-
-    global SPEAKER_NAME
-    SPEAKER_NAME = args.speaker
 
     applio_dir = args.applio_dir.expanduser().resolve()
     if not applio_dir.is_dir():
@@ -267,7 +264,7 @@ def main() -> int:
         if output_wav.is_file() and output_wav.stat().st_size > 44 and not args.force:
             print(f"[{number:03d}/{len(selected):03d}] existente; mantendo {output_wav.name}")
             completed.append((output_wav, phrase))
-            write_manifest(completed, manifest)
+            write_manifest(completed, manifest, args.speaker)
             continue
 
         print(f"[{number:03d}/{len(selected):03d}] Nanami: {phrase}")
@@ -290,10 +287,10 @@ def main() -> int:
             continue
 
         completed.append((output_wav, phrase))
-        write_manifest(completed, manifest)
+        write_manifest(completed, manifest, args.speaker)
         print(f"  [OK] {output_wav.name}")
 
-    valid_count = write_manifest(completed, manifest)
+    valid_count = write_manifest(completed, manifest, args.speaker)
     print("\n=== Resultado ===")
     print(f"Áudios convertidos válidos: {valid_count}")
     print(f"Falhas nesta execução: {failures}")
