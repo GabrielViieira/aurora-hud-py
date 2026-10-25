@@ -8,22 +8,30 @@ from mss import MSS
 from PIL import Image
 
 
-def capture_monitors(max_width: int = 1920) -> list[dict]:
-    """Captura cada monitor e devolve imagens JPEG em Base64.
+def capture_monitors(
+    max_width: int = 1920, monitor_index: int | None = None
+) -> list[dict]:
+    """Captura monitores em JPEG/Base64, opcionalmente apenas um.
 
-    Não salva capturas em disco.
-    O índice de monitor começa em 1; 0 representa a área
-    de trabalho virtual completa no MSS.
+    Não salva capturas em disco. O índice começa em 1; None captura todos
+    para manter compatibilidade com o uso de diagnóstico no fim deste arquivo.
     """
     if max_width < 320:
         raise ValueError("max_width deve ser pelo menos 320")
+
+    if monitor_index is not None and monitor_index < 1:
+        raise ValueError("monitor_index deve ser maior ou igual a 1")
 
     results = []
 
     with MSS() as sct:
         # monitores[0] é a área virtual combinada;
         # monitores[1:] são os monitores individuais.
-        for index, monitor in enumerate(sct.monitors[1:], start=1):
+        monitors = list(enumerate(sct.monitors[1:], start=1))
+        if monitor_index is not None:
+            monitors = [(index, monitor) for index, monitor in monitors
+                        if index == monitor_index]
+        for index, monitor in monitors:
             shot = sct.grab(monitor)
 
             image = Image.frombytes(
