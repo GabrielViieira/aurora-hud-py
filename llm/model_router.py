@@ -23,7 +23,7 @@ class ModelRouter:
             planner=llm.planner_model,
             coder=llm.coder_model,
             context=llm.context_window,
-            vision=getattr(llm, "vision_model", "auto"),
+            vision=getattr(llm, "vision_model", ""),
         )
         return cls(profiles)
 
