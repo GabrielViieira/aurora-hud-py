@@ -185,9 +185,28 @@ class AuroraAgent:
                 )
                 messages.append(assistant)
 
+                vision_attachments: list[tuple[str, str]] = []
+                desktop_tool_names = {"capturar_tela", "controlar_mouse", "controlar_teclado"}
+                desktop_calls = [call.name for call in response.tool_calls if call.name in desktop_tool_names]
+                preferred_desktop_tool = ("capturar_tela" if "capturar_tela" in desktop_calls else (desktop_calls[0] if desktop_calls else ""))
+                desktop_batch_requires_serial = len(desktop_calls) > 1
                 for call in response.tool_calls:
                     tool_call_count += 1
-                    result, fatal = self._run_tool(call, task, ctx)
+                    if (call.name in desktop_tool_names and desktop_batch_requires_serial
+                            and call.name != preferred_desktop_tool):
+                        result = ToolResult(
+                            ok=True,
+                            summary=("AÇÃO NÃO EXECUTADA: etapa adiada para manter o ciclo visual "
+                                     "capturar/analisar/agir/verificar em sequência. Execute-a em uma chamada posterior."),
+                            data={"adiada": True},
+                        )
+                        fatal = False
+                    else:
+                        result, fatal = self._run_tool(call, task, ctx)
+                    if call.name == "capturar_tela" and result.ok and not result.data.get("adiada"):
+                        image_url = result.data.pop("data_url", "")
+                        if isinstance(image_url, str) and image_url.startswith("data:image/"):
+                            vision_attachments.append((image_url, result.summary))
                     tools_used.append(call.name)
                     messages.append(
                         ChatMessage(
@@ -208,6 +227,16 @@ class AuroraAgent:
                         task.error = final_text
                         task.transition(TaskStatus.FAILED)
                         break
+                for image_url, caption in vision_attachments:
+                    messages.append(
+                        ChatMessage(
+                            role="user",
+                            content=[
+                                {"type": "text", "text": "Captura visual da área de trabalho para a tarefa atual. " + caption + " Analise a imagem antes de decidir o próximo passo."},
+                                {"type": "image_url", "image_url": {"url": image_url}},
+                            ],
+                        )
+                    )
                 if task.status in {TaskStatus.FAILED, TaskStatus.CANCELLED}:
                     break
 

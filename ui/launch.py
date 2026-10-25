@@ -10,6 +10,7 @@ import json
 import os
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -238,6 +239,71 @@ class VoiceListener:
                 model = Model(str(self.model_path))
                 recognizer = KaldiRecognizer(model, 16000)
 
+                # O Vosk continua detectando a wakeword; Whisper transcreve comandos
+                # em português, inglês ou com os dois idiomas na mesma frase.
+                whisper_model = None
+                stt_backend = os.environ.get("AURORA_STT_BACKEND", "whisper").strip().lower()
+                if stt_backend in {"whisper", "faster-whisper"}:
+                    try:
+                        from faster_whisper import WhisperModel
+
+                        whisper_size = os.environ.get("AURORA_WHISPER_MODEL", "small").strip() or "small"
+                        whisper_device = os.environ.get("AURORA_WHISPER_DEVICE", "cpu").strip().lower()
+                        default_compute = "int8" if whisper_device == "cpu" else "float16"
+                        whisper_compute = os.environ.get("AURORA_WHISPER_COMPUTE_TYPE", default_compute).strip()
+                        self.status_callback(
+                            f"Carregando reconhecimento multilíngue Whisper ({whisper_size}); "
+                            "a primeira inicialização pode baixar o modelo…"
+                        )
+                        whisper_model = WhisperModel(
+                            whisper_size,
+                            device=whisper_device,
+                            compute_type=whisper_compute,
+                        )
+                        self.status_callback(
+                            f"Whisper multilíngue ativo ({whisper_size}); aguardando 'Aurora'."
+                        )
+                    except Exception as exc:
+                        whisper_model = None
+                        self.status_callback(
+                            "Whisper indisponível; usando reconhecimento Vosk em português. "
+                            "Confira faster-whisper e o download do modelo."
+                        )
+                        print(f"[Aurora STT] Não foi possível iniciar Whisper: {exc}")
+
+                def transcribe_utterance(pcm_audio: bytes) -> str:
+                    # Transcreve um segmento de fala mantendo o idioma original.
+                    if whisper_model is None or not pcm_audio:
+                        return ""
+                    try:
+                        audio = np.frombuffer(pcm_audio, dtype=np.int16).astype(np.float32) / 32768.0
+                        if audio.size < 4000:  # menos de 250 ms tende a ser ruído/segmento incompleto
+                            return ""
+                        segments, info = whisper_model.transcribe(
+                            audio,
+                            task="transcribe",
+                            language=None,  # autodetecta: não forçar português nem inglês
+                            beam_size=5,
+                            condition_on_previous_text=False,
+                            initial_prompt=(
+                                "Fala em português brasileiro e English, podendo misturar os idiomas. "
+                                "Preserve palavras inglesas e nomes técnicos exatamente quando falados, "
+                                "por exemplo: browser, open, click, scroll, screenshot, search, "
+                                "Windows, VS Code, Python, PowerShell, GitHub e mouse. "
+                                "Transcreva o áudio, não traduza."
+                            ),
+                        )
+                        parts = [segment.text.strip() for segment in segments if segment.text.strip()]
+                        transcript = " ".join(parts).strip()
+                        if transcript:
+                            lang = getattr(info, "language", "?")
+                            probability = getattr(info, "language_probability", 0.0)
+                            print(f"[Aurora STT] Whisper ({lang}, {probability:.2f}): {transcript}")
+                        return transcript
+                    except Exception as exc:
+                        print(f"[Aurora STT] Falha no Whisper; usando texto Vosk: {exc}")
+                        return ""
+
                 # Descarta áudio velho de uma execução anterior.
                 while True:
                     try:
@@ -279,7 +345,7 @@ class VoiceListener:
                     if command and self.text_callback:
                         self.text_callback(command)
 
-                def handle_recognized(phrase: str) -> None:
+                def handle_recognized(phrase: str, utterance_pcm: bytes) -> None:
                     nonlocal active_until
                     phrase = (phrase or "").strip()
                     if not phrase:
@@ -298,15 +364,32 @@ class VoiceListener:
                                 self.activation_callback()
                             except Exception as exc:
                                 print(f"[Aurora voz] falha no callback de ativação: {exc}")
-                        command = phrase[match.end():].strip(" \t\r\n,.;:!?-–—")
+
+                        # Reouve o segmento inteiro. Isso permite entender, por
+                        # exemplo, "Aurora, open the browser" mesmo que o Vosk
+                        # em português erre as palavras inglesas.
+                        whispered = transcribe_utterance(utterance_pcm)
+                        if whispered:
+                            whisper_match = wakeword_pattern.search(whispered)
+                            if whisper_match:
+                                command = whispered[whisper_match.end():].strip(" \t\r\n,.;:!?-–—")
+                            else:
+                                command = whispered.strip(" \t\r\n,.;:!?-–—")
+                                if command.casefold() == self.wakeword:
+                                    command = ""
+                        else:
+                            command = phrase[match.end():].strip(" \t\r\n,.;:!?-–—")
+
+                        # Fallback para o texto Vosk caso Whisper não tenha reconhecido
+                        # a parte do comando, mas Vosk tenha reconhecido alguma.
+                        if not command:
+                            command = phrase[match.end():].strip(" \t\r\n,.;:!?-–—")
+
                         if command:
-                            # Ex.: "Aurora, abra o navegador".
                             active_until = 0.0
-                            self.status_callback("Palavra de ativação detectada; processando comando…")
+                            self.status_callback("Palavra de ativação detectada; processando comando bilíngue…")
                             dispatch_command(command)
                         else:
-                            # Ex.: usuário chamou "Aurora" e fará o pedido
-                            # em uma segunda frase, dentro do intervalo.
                             active_until = time.monotonic() + self.command_timeout_s
                             self.status_callback(
                                 f"Aurora ativada. Diga seu pedido em até {int(self.command_timeout_s)} segundos."
@@ -316,7 +399,8 @@ class VoiceListener:
                     if active_until and now <= active_until:
                         active_until = 0.0
                         self.status_callback("Pedido reconhecido; retornando à escuta por 'Aurora'.")
-                        dispatch_command(phrase)
+                        whispered = transcribe_utterance(utterance_pcm)
+                        dispatch_command(whispered or phrase)
 
                 def audio_callback(indata, frames, time_info, status) -> None:
                     del frames, time_info
@@ -351,6 +435,8 @@ class VoiceListener:
                 with sd.InputStream(**stream_kwargs) as stream:
                     self._stream = stream
                     self.status_callback("Escutando por 'Aurora' (microfone padrão, modo compartilhado quando disponível)…")
+                    utterance_audio = bytearray()
+                    max_utterance_bytes = 25 * 16000 * 2  # limite de 25 s, mono PCM 16-bit / 16 kHz
                     while not self._stop_event.is_set():
                         if active_until and time.monotonic() > active_until:
                             active_until = 0.0
@@ -360,12 +446,17 @@ class VoiceListener:
                             block = self._audio_queue.get(timeout=0.15)
                         except queue.Empty:
                             continue
+                        utterance_audio.extend(block)
+                        if len(utterance_audio) > max_utterance_bytes:
+                            del utterance_audio[:-max_utterance_bytes]
                         if recognizer.AcceptWaveform(block):
+                            captured_audio = bytes(utterance_audio)
+                            utterance_audio.clear()
                             try:
                                 result = json.loads(recognizer.Result())
                             except (json.JSONDecodeError, TypeError):
                                 continue
-                            handle_recognized(str(result.get("text") or ""))
+                            handle_recognized(str(result.get("text") or ""), captured_audio)
 
             except Exception as exc:
                 failed = True
@@ -400,6 +491,9 @@ class SvgHologram(QMainWindow):
     voice_status = Signal(str)
     show_caption_requested = Signal(str)
     speak_requested = Signal(str)
+    speech_ready = Signal(str, str, str, str, object)  # legenda, fala, WAV, estado, evento
+    speech_preparation_failed = Signal(str, str, str, object)
+    speech_playback_finished = Signal(str, str, object)
     visual_state_requested = Signal(str)
 
     def __init__(self, svg_path: Path, listen_on_start: bool = False) -> None:
@@ -459,11 +553,16 @@ class SvgHologram(QMainWindow):
         self.voice_status.connect(self.show_voice_status)
         self.show_caption_requested.connect(self.show_caption, Qt.ConnectionType.QueuedConnection)
         self.speak_requested.connect(self._speak_text, Qt.ConnectionType.QueuedConnection)
+        self.speech_ready.connect(self._play_prepared_speech, Qt.ConnectionType.QueuedConnection)
+        self.speech_preparation_failed.connect(self._speech_preparation_failed, Qt.ConnectionType.QueuedConnection)
+        self.speech_playback_finished.connect(self._finish_prepared_speech, Qt.ConnectionType.QueuedConnection)
         self.visual_state_requested.connect(self.set_visual_state, Qt.ConnectionType.QueuedConnection)
         self.set_visual_state("idle")
 
         self._tts_engine = None
         self._tts_lock = threading.Lock()
+        self._speech_sequence_lock = threading.Lock()
+        self._speech_active = False
         self._tts_voice_ja = None
         self._tts_voice_pt = None
         self._init_tts()
@@ -694,92 +793,233 @@ class SvgHologram(QMainWindow):
             print(f"[Aurora Voicevox] Erro: {exc}")
             return False
 
-    def _speak_with_applio(self, japanese_text: str) -> bool:
+    def _speak_with_applio(self, japanese_text: str) -> Optional[Path]:
+        """Gera o WAV via edge-tts + RVC, sem iniciar a reprodução."""
         if not self._applio_available:
-            return False
+            return None
+        work_dir = Path(tempfile.mkdtemp(prefix="aurora_rvc_"))
         try:
-            work_dir = Path(tempfile.mkdtemp(prefix="aurora_rvc_"))
             tts_wav = work_dir / "aurora_tts.wav"
             out_wav = work_dir / "aurora_rvc.wav"
             python_exe = str(APPLIO_DIR / "env" / "python.exe")
             if not os.path.exists(python_exe):
                 python_exe = sys.executable
 
-            # VOICEVOX temporariamente desativado - usando edge-tts (ja-JP-NanamiNeural)
             script = (
                 "import sys, os, asyncio;"
                 f"sys.path.insert(0, r'{APPLIO_DIR}');"
                 "from rvc.lib.tools import tts;"
-                "asyncio.run(tts.generate_tts(%r, 'ja-JP-NanamiNeural', 0, %r))" % (japanese_text, str(tts_wav))
+                "asyncio.run(tts.generate_tts(%r, 'ja-JP-NanamiNeural', 0, %r))"
+                % (japanese_text, str(tts_wav))
             )
-            proc = subprocess.run([python_exe, "-c", script], cwd=str(APPLIO_DIR), capture_output=True, timeout=60)
-            if proc.returncode != 0 or not tts_wav.exists():
-                print(proc.stderr.decode("utf-8", errors="replace")[:300])
-                return False
-            print("[Aurora TTS] Usando edge-tts (NanamiNeural) como base + Applio/RVC (Raphael_Sensei)")
+            proc = subprocess.run(
+                [python_exe, "-c", script], cwd=str(APPLIO_DIR),
+                capture_output=True, timeout=60,
+            )
+            if proc.returncode != 0 or not tts_wav.exists() or tts_wav.stat().st_size == 0:
+                print((proc.stderr or b"").decode("utf-8", errors="replace")[:300])
+                shutil.rmtree(work_dir, ignore_errors=True)
+                return None
 
             if RAPHAEL_INDEX:
-                cmd2 = [
-                    python_exe,
-                    "-c",
-                    (
-                        "import sys;"
-                        f"sys.path.insert(0, r'{APPLIO_DIR}');"
-                        "from core import run_infer_script;"
-                        f"run_infer_script(pitch=0,index_rate=0.75,volume_envelope=1.0,protect=0.33,f0_method='rmvpe',input_path=r'{tts_wav}',output_path=r'{out_wav}',pth_path=r'{RAPHAEL_PTH}',index_path=r'{RAPHAEL_INDEX}',f0_autotune=False,f0_autotune_strength=1.0,proposed_pitch=False,proposed_pitch_threshold=155.0,export_format='WAV',embedder_model='contentvec',formant_shifting=False,formant_qfrency=1.0,formant_timbre=1.0,sid=0,cleanup_mode='off',cleanup_strength=12)"
-                    ),
-                ]
+                index_path = str(RAPHAEL_INDEX)
             else:
-                cmd2 = [
-                    python_exe,
-                    "-c",
-                    (
-                        "import sys;"
-                        f"sys.path.insert(0, r'{APPLIO_DIR}');"
-                        "from core import run_infer_script;"
-                        f"run_infer_script(pitch=0,index_rate=0.75,volume_envelope=1.0,protect=0.33,f0_method='rmvpe',input_path=r'{tts_wav}',output_path=r'{out_wav}',pth_path=r'{RAPHAEL_PTH}',index_path='',f0_autotune=False,f0_autotune_strength=1.0,proposed_pitch=False,proposed_pitch_threshold=155.0,export_format='WAV',embedder_model='contentvec',formant_shifting=False,formant_qfrency=1.0,formant_timbre=1.0,sid=0,cleanup_mode='off',cleanup_strength=12)"
-                    ),
-                ]
-            proc2 = subprocess.run(cmd2, cwd=str(APPLIO_DIR), capture_output=True, timeout=300)
-            if proc2.returncode != 0 or not out_wav.exists():
-                print(proc2.stderr.decode("utf-8", errors="replace")[:400])
-                return False
+                index_path = ""
+            cmd2 = [
+                python_exe,
+                "-c",
+                (
+                    "import sys;"
+                    f"sys.path.insert(0, r'{APPLIO_DIR}');"
+                    "from core import run_infer_script;"
+                    f"run_infer_script(pitch=0,index_rate=0.75,volume_envelope=1.0,protect=0.33,f0_method='rmvpe',input_path=r'{tts_wav}',output_path=r'{out_wav}',pth_path=r'{RAPHAEL_PTH}',index_path=r'{index_path}',f0_autotune=False,f0_autotune_strength=1.0,proposed_pitch=False,proposed_pitch_threshold=155.0,export_format='WAV',embedder_model='contentvec',formant_shifting=False,formant_qfrency=1.0,formant_timbre=1.0,sid=0,cleanup_mode='off',cleanup_strength=12)"
+                ),
+            ]
+            proc2 = subprocess.run(
+                cmd2, cwd=str(APPLIO_DIR), capture_output=True, timeout=300,
+            )
+            if proc2.returncode != 0 or not out_wav.exists() or out_wav.stat().st_size == 0:
+                print((proc2.stderr or b"").decode("utf-8", errors="replace")[:400])
+                shutil.rmtree(work_dir, ignore_errors=True)
+                return None
+
+            print("[Aurora TTS] Áudio RVC preparado; aguardando início sincronizado.")
+            return out_wav
+        except Exception as exc:
+            print(f"[Aurora RVC] Erro ao preparar áudio: {exc}")
+            shutil.rmtree(work_dir, ignore_errors=True)
+            return None
+
+    def _prepare_sapi_audio(self, japanese_text: str, out_wav: Path) -> Optional[Path]:
+        """Pré-sintetiza WAV com pyttsx3/SAPI, sem reproduzi-lo."""
+        if not self._tts_engine or not self._tts_voice_ja:
+            return None
+        try:
+            engine = self._tts_engine
+            engine.setProperty("voice", self._tts_voice_ja)
+            engine.setProperty("rate", 165)
+            engine.save_to_file(japanese_text, str(out_wav))
+            engine.runAndWait()
+            if out_wav.is_file() and out_wav.stat().st_size > 44:
+                return out_wav
+        except Exception as exc:
+            print(f"[Aurora TTS] Não consegui pré-gerar WAV via SAPI: {exc}")
+        try:
+            out_wav.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
+
+    def _queue_speech(self, caption: str, text: str, final_state: str) -> None:
+        if not text or not text.strip():
+            return
+        threading.Thread(
+            target=self._prepare_speech_job,
+            args=(caption, text, final_state),
+            daemon=True,
+            name="AuroraSpeechPrepare",
+        ).start()
+
+    def _prepare_speech_job(self, caption: str, text: str, final_state: str) -> None:
+        """Prepara tradução/áudio primeiro; só então publica legenda e toca WAV."""
+        done = threading.Event()
+        audio_path: Optional[Path] = None
+        job_dir = Path(tempfile.mkdtemp(prefix="aurora_speech_"))
+        spoken_text = text
+        with self._speech_sequence_lock:
+            try:
+                try:
+                    with self._tts_lock:
+                        spoken_text = self._translate_to_japanese(text)
+                        if self._applio_available:
+                            audio_path = self._speak_with_applio(spoken_text)
+                        if not audio_path and self._voicevox_enabled:
+                            candidate = job_dir / "aurora_voicevox.wav"
+                            if self._speak_with_voicevox_to_file(spoken_text, candidate):
+                                audio_path = candidate
+                        if not audio_path:
+                            candidate = job_dir / "aurora_sapi.wav"
+                            audio_path = self._prepare_sapi_audio(spoken_text, candidate)
+                except Exception as exc:
+                    print(f"[Aurora TTS] Falha na preparação da fala: {exc}")
+                    audio_path = None
+
+                if audio_path and audio_path.is_file() and audio_path.stat().st_size > 44:
+                    self.speech_ready.emit(
+                        caption, spoken_text, str(audio_path), final_state, done
+                    )
+                else:
+                    self.speech_preparation_failed.emit(
+                        caption, spoken_text, final_state, done
+                    )
+
+                # Mantém a fila serializada até a reprodução terminar, para não
+                # sobrepor falas nem deixar um áudio antigo tocar depois do novo.
+                if not done.wait(timeout=900):
+                    print("[Aurora TTS] Timeout aguardando fim da reprodução.")
+            finally:
+                try:
+                    if audio_path:
+                        shutil.rmtree(Path(audio_path).parent, ignore_errors=True)
+                    shutil.rmtree(job_dir, ignore_errors=True)
+                except Exception:
+                    pass
+
+    def _set_speech_visual_state(self, state: str) -> None:
+        """Compatível com a UI que usa set_visual_state ou sinal Qt."""
+        try:
+            setter = getattr(self, "set_visual_state", None)
+            if callable(setter):
+                setter(state)
+            else:
+                signal = getattr(self, "visual_state_requested", None)
+                if signal is not None:
+                    signal.emit(state)
+        except Exception as exc:
+            print(f"[Aurora visual] Não consegui aplicar {state}: {exc}")
+
+    @Slot(str, str, str, str, object)
+    def _play_prepared_speech(
+        self, caption: str, spoken_text: str, audio_path: str,
+        final_state: str, done: object,
+    ) -> None:
+        """Exibe o balão e inicia o WAV já pronto, no mesmo instante lógico."""
+        self._speech_active = bool(caption)
+        if caption:
+            self.show_caption(caption)
+        self._set_speech_visual_state("speaking")
+
+        def _play() -> None:
             try:
                 import winsound
-                winsound.PlaySound(str(out_wav), winsound.SND_FILENAME)
-            except Exception:
-                pass
-            return True
+                winsound.PlaySound(audio_path, winsound.SND_FILENAME)
+            except Exception as exc:
+                print(f"[Aurora TTS] Falha ao reproduzir WAV pronto: {exc}")
+                # Tenta o TTS direto como último recurso, sem perder o balão.
+                self.speech_preparation_failed.emit(
+                    caption, spoken_text, final_state, done
+                )
+                return
+            self.speech_playback_finished.emit(final_state, caption, done)
+
+        try:
+            threading.Thread(target=_play, daemon=True, name="AuroraSpeechPlayback").start()
         except Exception as exc:
-            print(f"[Aurora RVC] Erro: {exc}")
-            return False
+            print(f"[Aurora TTS] Não consegui iniciar a reprodução: {exc}")
+            self.speech_preparation_failed.emit(caption, spoken_text, final_state, done)
+
+    @Slot(str, str, str, object)
+    def _speech_preparation_failed(
+        self, caption: str, spoken_text: str, final_state: str, done: object,
+    ) -> None:
+        """Fallback: mostra o balão e usa reprodução direta se gerar WAV falhar."""
+        self._speech_active = bool(caption)
+        if caption:
+            self.show_caption(caption)
+        self._set_speech_visual_state("speaking")
+
+        def _fallback() -> None:
+            try:
+                with self._tts_lock:
+                    if self._tts_engine and self._tts_voice_ja and spoken_text.strip():
+                        self._tts_engine.setProperty("voice", self._tts_voice_ja)
+                        self._tts_engine.setProperty("rate", 165)
+                        self._tts_engine.say(spoken_text)
+                        self._tts_engine.runAndWait()
+            except Exception as exc:
+                print(f"[Aurora TTS] Fallback de voz falhou: {exc}")
+            finally:
+                self.speech_playback_finished.emit(final_state, caption, done)
+
+        threading.Thread(target=_fallback, daemon=True, name="AuroraSpeechFallback").start()
+
+    @Slot(str, str, object)
+    def _finish_prepared_speech(self, final_state: str, caption: str, done: object) -> None:
+        if caption:
+            self._speech_active = False
+            if getattr(self, "caption_label", None) is not None and self.caption_label.isVisible():
+                words = len(caption.split())
+                hold_ms = max(2500, min(5000, 1700 + words * 100))
+                self.caption_hide_timer.start(hold_ms)
+        self._set_speech_visual_state(final_state)
+        try:
+            done.set()
+        except Exception:
+            pass
+
+    def speak_with_caption(
+        self, caption: str, speech_text: str, *, final_state: Optional[str] = None,
+    ) -> None:
+        """Publica balão e voz sincronizados após o áudio estar pronto."""
+        if final_state is None:
+            final_state = "error" if "エラーが発生しました" in speech_text else "completed"
+        self._queue_speech(caption, speech_text, final_state)
 
     def _speak_text(self, text: str) -> None:
         if not text:
             return
-        self.visual_state_requested.emit("speaking")
-        # Mensagens de erro voltam ao preset vermelho depois da fala; respostas
-        # comuns terminam no preset azul (completed).
         final_state = "error" if "エラーが発生しました" in text else "completed"
-
-        def _run():
-            try:
-                with self._tts_lock:
-                    to_speak = self._translate_to_japanese(text)
-                    if self._applio_available and self._speak_with_applio(to_speak):
-                        return
-                    if self._tts_engine and self._tts_voice_ja:
-                        engine = self._tts_engine
-                        engine.setProperty("voice", self._tts_voice_ja)
-                        engine.setProperty("rate", 165)
-                        engine.say(to_speak)
-                        engine.runAndWait()
-            except Exception as exc:
-                print(f"[Aurora TTS] Erro ao falar: {exc}")
-            finally:
-                self.visual_state_requested.emit(final_state)
-
-        threading.Thread(target=_run, daemon=True, name="AuroraTTS").start()
+        self._queue_speech("", text, final_state)
 
     def speak(self, text: str) -> None:
         if text:
@@ -878,7 +1118,8 @@ class SvgHologram(QMainWindow):
                 duration_ms = 1500 + words * 350
                 duration_ms = max(3000, min(duration_ms, 20000))
 
-            self.caption_hide_timer.start(duration_ms)
+            if not getattr(self, "_speech_active", False):
+                self.caption_hide_timer.start(duration_ms)
         except Exception as exc:
             print(f"[Aurora caption] falha ao exibir legenda: {exc}", flush=True)
 
@@ -925,15 +1166,12 @@ class SvgHologram(QMainWindow):
                     reply = self._agent.handle(message)
                     text = getattr(reply, "text", "") or ""
                     if text:
-                        self.show_caption_requested.emit(f"Aurora: {text}")
-                        self.speak(text)
+                        self.speak_with_caption(f"Aurora: {text}", text)
                     else:
                         self.visual_state_requested.emit("completed")
                 except Exception as exc:
                     err = f"Erro ao processar: {exc}"
-                    self.show_caption_requested.emit(err)
-                    self.visual_state_requested.emit("error")
-                    self.speak("エラーが発生しました。")
+                    self.speak_with_caption(err, "エラーが発生しました。", final_state="error")
             threading.Thread(target=_run, daemon=True, name="AuroraAgentCall").start()
             return
         self.visual_state_requested.emit("error")
@@ -958,15 +1196,12 @@ class SvgHologram(QMainWindow):
                     reply = self._agent.handle(t)
                     text_reply = getattr(reply, "text", "") or ""
                     if text_reply:
-                        self.show_caption_requested.emit(f"Aurora: {text_reply}")
-                        self.speak(text_reply)
+                        self.speak_with_caption(f"Aurora: {text_reply}", text_reply)
                     else:
                         self.visual_state_requested.emit("completed")
                 except Exception as exc:
                     err = f"Erro ao processar: {exc}"
-                    self.show_caption_requested.emit(err)
-                    self.visual_state_requested.emit("error")
-                    self.speak("エラーが発生しました。")
+                    self.speak_with_caption(err, "エラーが発生しました。", final_state="error")
             threading.Thread(target=_run, daemon=True, name="AuroraAgentCallVoice").start()
             return
         self.visual_state_requested.emit("error")

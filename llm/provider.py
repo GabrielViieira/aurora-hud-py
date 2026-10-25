@@ -75,7 +75,7 @@ class Usage:
 @dataclass
 class ChatMessage:
     role: str
-    content: str = ""
+    content: str | list[dict[str, Any]] = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
     tool_call_id: str = ""
     name: str = ""

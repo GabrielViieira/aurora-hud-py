@@ -261,9 +261,18 @@ class FreeLLMClient:
             routed_via=data.get("_routed_via") or {},
         )
         if usage.estimated:
-            usage.prompt_tokens = estimate_tokens(
-                "".join(str(message.get("content", "")) for message in payload["messages"])
-            )
+            prompt_parts: list[str] = []
+            for message in payload["messages"]:
+                content = message.get("content", "")
+                if isinstance(content, list):
+                    prompt_parts.extend(
+                        str(part.get("text", "[imagem]"))
+                        for part in content
+                        if isinstance(part, dict)
+                    )
+                else:
+                    prompt_parts.append(str(content))
+            usage.prompt_tokens = estimate_tokens(" ".join(prompt_parts))
             usage.completion_tokens = estimate_tokens(text)
             usage.total_tokens = usage.prompt_tokens + usage.completion_tokens
 

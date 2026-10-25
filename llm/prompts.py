@@ -32,6 +32,14 @@ SUMMARIZER_PROMPT = load_prompt("summarizer", "")
 
 def system_prompt(user_name: str = "", voice_enabled: bool = False) -> str:
     parts = [SYSTEM_AURORA]
+    parts.append(
+        "Entenda pedidos falados ou escritos em português do Brasil e English, inclusive "
+        "quando os idiomas forem misturados na mesma frase. Não trate termos ingleses, "
+        "nomes de aplicativos, itens de menu, atalhos ou termos técnicos como erros de português. "
+        "Preserve esses termos ao interpretar a intenção; não os traduza automaticamente. "
+        "Se a transcrição parecer incoerente ou ambígua, peça uma confirmação curta em vez de "
+        "adivinhar uma palavra parecida. Responda em português brasileiro por padrão, salvo pedido contrário."
+    )
     if TOOL_GUIDANCE:
         parts.append(TOOL_GUIDANCE)
     if user_name:

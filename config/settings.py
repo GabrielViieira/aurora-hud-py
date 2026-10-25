@@ -133,7 +133,7 @@ class VoiceSettings:
     language: str = "ja-JP"
     voice_name: str = ""
     rate: int = 0
-    volume: int = 100
+    volume: int = 50
     voicevox_url: str = "http://127.0.0.1:50021"
     voicevox_speaker: int = 3
     max_chars: int = 400
