@@ -14,8 +14,9 @@ from aurora.config.permissions import Risk
 from aurora.tools.base import ToolContext, ToolResult, ToolSpec
 
 _TOOL_DESCRIPTION_CAPTURE = (
-    "Captura a tela atual sem salvar a imagem no disco e entrega a imagem ao modelo visual. "
-    "Use antes de decidir onde clicar; após uma ação importante, capture novamente para verificar. "
+    "Captura a tela atual e envia a imagem ao modelo visual, junto com uma leitura local opcional "
+    "da janela ativa e dos controles acessíveis do Windows. Use os nomes/retângulos dos controles "
+    "quando disponíveis, confirme visualmente e faça nova captura após cada ação importante. "
     "Escolha um monitor pelo índice (1 é o monitor principal/primeiro listado)."
 )
 _TOOL_DESCRIPTION_MOUSE = (
@@ -74,12 +75,112 @@ def _check_point(pyautogui, x: Any, y: Any, label: str = "posição") -> tuple[i
     return x, y
 
 
+def _active_window_snapshot(limit: int = 50) -> dict[str, Any]:
+    """Lê nomes e retângulos de controles acessíveis da janela em primeiro plano.
+
+    É uma observação local sem OCR nem chamada de modelo. Falhas da árvore UIA
+    não impedem a captura da imagem.
+    """
+    if os.name != "nt":
+        return {"disponivel": False, "motivo": "UI Automation só está disponível no Windows."}
+    try:
+        import ctypes
+        from pywinauto import Desktop
+
+        hwnd = int(ctypes.windll.user32.GetForegroundWindow())
+        if not hwnd:
+            return {"disponivel": False, "motivo": "O Windows não informou uma janela em primeiro plano."}
+        window = Desktop(backend="uia").window(handle=hwnd)
+        if not window.exists(timeout=1):
+            return {"disponivel": False, "motivo": "A janela ativa não está acessível pela UI Automation."}
+
+        title = str(window.window_text() or "").strip()[:200]
+        rect = window.rectangle()
+        snapshot: dict[str, Any] = {
+            "disponivel": True,
+            "janela_ativa": title,
+            "retangulo_janela": {
+                "esquerda": int(rect.left), "topo": int(rect.top),
+                "direita": int(rect.right), "base": int(rect.bottom),
+            },
+            "elementos": [],
+            "total_elementos_lidos": 0,
+        }
+        useful_types = {
+            "Button", "Text", "Edit", "Hyperlink", "MenuItem", "TabItem",
+            "CheckBox", "RadioButton", "ComboBox", "ListItem", "TreeItem",
+            "DataItem", "Document", "Group",
+        }
+        priority_types = {
+            "Button": 0, "MenuItem": 0, "Hyperlink": 0, "Edit": 0,
+            "ComboBox": 1, "CheckBox": 1, "RadioButton": 1, "TabItem": 1,
+            "ListItem": 2, "TreeItem": 2, "DataItem": 2, "Text": 3,
+            "Document": 4, "Group": 5,
+        }
+        candidates: list[dict[str, Any]] = []
+        seen: set[tuple[Any, ...]] = set()
+        try:
+            controls = window.descendants()
+        except Exception:
+            controls = []
+        for control in controls[:500]:
+            try:
+                info = getattr(control, "element_info", None)
+                control_type = str(getattr(info, "control_type", "") or "")
+                if control_type not in useful_types:
+                    continue
+                name = str(control.window_text() or getattr(info, "name", "") or "").strip()
+                if not name:
+                    continue
+                name = re.sub(r"\s+", " ", name)[:180]
+                try:
+                    if not control.is_visible():
+                        continue
+                except Exception:
+                    pass
+                bounds = control.rectangle()
+                left, top, right, bottom = (
+                    int(bounds.left), int(bounds.top), int(bounds.right), int(bounds.bottom)
+                )
+                if right <= left or bottom <= top:
+                    continue
+                key = (control_type, name.casefold(), left, top, right, bottom)
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append({
+                    "_priority": priority_types.get(control_type, 9),
+                    "tipo": control_type,
+                    "nome": name,
+                    "esquerda": left, "topo": top, "direita": right, "base": bottom,
+                    "centro_x": (left + right) // 2,
+                    "centro_y": (top + bottom) // 2,
+                })
+            except Exception:
+                continue
+        candidates.sort(key=lambda item: (item["_priority"], item["topo"], item["esquerda"]))
+        snapshot["total_elementos_lidos"] = len(candidates)
+        snapshot["elementos"] = [
+            {key: value for key, value in item.items() if key != "_priority"}
+            for item in candidates[:max(1, min(int(limit), 80))]
+        ]
+        snapshot["nota_coordenadas"] = (
+            "Coordenadas dos controles estão em pixels absolutos da área de trabalho. "
+            "centro_x/centro_y indicam o centro do controle; use apenas se o nome corresponder ao alvo."
+        )
+        return snapshot
+    except ImportError:
+        return {"disponivel": False, "motivo": "pywinauto não está instalado; use a captura visual."}
+    except Exception as exc:
+        return {"disponivel": False, "motivo": f"Falha ao ler controles da janela ativa: {type(exc).__name__}: {exc}"}
+
+
 def capture_screen(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     """Captura um monitor e fornece data_url para o agente enviar como imagem ao LLM."""
     del ctx
     try:
         from aurora.tools.screen_capture import capture_monitors
-        max_width = int(args.get("largura_maxima", 1440))
+        max_width = int(args.get("largura_maxima", 1920))
         monitor_index = int(args.get("monitor", 1))
         if max_width < 320 or max_width > 2200:
             return ToolResult.fail("largura_maxima deve ficar entre 320 e 2200")
@@ -95,6 +196,7 @@ def capture_screen(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         data_url = str(selected.get("data_url", ""))
         if not data_url.startswith("data:image/"):
             return ToolResult.fail("captura não produziu uma imagem válida")
+        ui_snapshot = _active_window_snapshot()
         metadata = {
             "monitor": selected["monitor"],
             "origem_x": selected["left"],
@@ -104,12 +206,18 @@ def capture_screen(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
             "largura_capturada": selected["captured_size"][0],
             "altura_capturada": selected["captured_size"][1],
             "mime_type": selected.get("mime_type", "image/jpeg"),
+            "interface_acessivel": ui_snapshot,
         }
+        ui_count = len(ui_snapshot.get("elementos", []))
+        active_title = str(ui_snapshot.get("janela_ativa") or "janela não identificada")
         return ToolResult(
             ok=True,
             summary=(f"Tela capturada: monitor {monitor_index}, "
                      f"{metadata['largura_capturada']}x{metadata['altura_capturada']}. "
-                     "A imagem será enviada ao modelo para inspeção visual."),
+                     f"Janela em primeiro plano: {active_title}. "
+                     + (f"Leitura local encontrou {ui_count} controles acessíveis." if ui_snapshot.get("disponivel") else
+                        "Leitura local de controles indisponível; use a imagem e não invente nomes de elementos.")
+                     + " A imagem será enviada ao modelo para inspeção visual."),
             data={**metadata, "data_url": data_url},
         )
     except Exception as exc:
@@ -249,7 +357,7 @@ def build_tools() -> list[ToolSpec]:
                 "type": "object",
                 "properties": {
                     "monitor": {"type": "integer", "minimum": 1, "maximum": 16, "description": "Índice de monitor (padrão 1)."},
-                    "largura_maxima": {"type": "integer", "minimum": 320, "maximum": 2200, "description": "Largura máxima da imagem enviada ao modelo."},
+                    "largura_maxima": {"type": "integer", "minimum": 320, "maximum": 2200, "description": "Largura máxima da imagem enviada ao modelo; padrão 1920 para ler texto pequeno."},
                 },
                 "additionalProperties": False,
             },
