@@ -19,12 +19,16 @@ class ModelProfile:
     notes: str = ""
 
 
-def default_profiles(model: str, utility: str, planner: str, coder: str, context: int) -> dict[str, ModelProfile]:
+def default_profiles(
+    model: str, utility: str, planner: str, coder: str, context: int,
+    vision: str = "auto",
+) -> dict[str, ModelProfile]:
     return {
         "chat": ModelProfile("chat", model, context),
         "utility": ModelProfile("utility", utility, min(context, 16000), notes="resumos e títulos"),
         "planner": ModelProfile("planner", planner, context, notes="planejamento"),
         "coder": ModelProfile("coder", coder, context, notes="código"),
+        "vision": ModelProfile("vision", vision or model, context, notes="interpretação de imagens e telas"),
     }
 
 
