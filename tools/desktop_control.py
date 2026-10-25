@@ -39,7 +39,13 @@ def _pyautogui():
             "Controle de mouse/teclado não instalado. Rode: py -m pip install -r requirements-desktop.txt"
         ) from exc
     pyautogui.FAILSAFE = True
-    pyautogui.PAUSE = 0.12
+    # O padrão anterior de 120 ms era somado a cada chamada de PyAutoGUI.
+    # Mantém uma pausa curta e configurável para apps que precisam de mais tempo.
+    try:
+        action_pause = float(os.environ.get("AURORA_DESKTOP_ACTION_PAUSE", "0.03"))
+    except ValueError:
+        action_pause = 0.03
+    pyautogui.PAUSE = max(0.0, min(action_pause, 0.5))
     return pyautogui
 
 
@@ -83,6 +89,13 @@ def _active_window_snapshot(limit: int = 50) -> dict[str, Any]:
     """
     if os.name != "nt":
         return {"disponivel": False, "motivo": "UI Automation só está disponível no Windows."}
+
+    scan_mode = os.environ.get("AURORA_DESKTOP_UIA_MODE", "fast").strip().lower()
+    if scan_mode == "off":
+        return {"disponivel": False, "motivo": "Leitura UI Automation desativada por configuração; use a imagem."}
+    if scan_mode not in {"fast", "full"}:
+        scan_mode = "fast"
+
     try:
         import ctypes
         from pywinauto import Desktop
@@ -119,10 +132,41 @@ def _active_window_snapshot(limit: int = 50) -> dict[str, Any]:
         }
         candidates: list[dict[str, Any]] = []
         seen: set[tuple[Any, ...]] = set()
-        try:
-            controls = window.descendants()
-        except Exception:
+
+        if scan_mode == "full":
+            # Modo completo preserva a leitura ampla para apps complexos.
+            try:
+                controls = window.descendants()[:500]
+            except Exception:
+                controls = []
+        else:
+            # Varredura rápida: limita profundidade, número de nós e tempo total.
+            # Evita percorrer toda a árvore de acessibilidade de navegadores e IDEs.
+            from collections import deque
+
+            scan_started = time.perf_counter()
+            scan_budget_s = 0.35
+            max_scan_nodes = 240
+            max_scan_depth = 5
             controls = []
+            queue = deque([(window, 0)])
+            while queue and len(controls) < max_scan_nodes:
+                if time.perf_counter() - scan_started >= scan_budget_s:
+                    break
+                parent, depth = queue.popleft()
+                if depth >= max_scan_depth:
+                    continue
+                try:
+                    children = parent.children()
+                except Exception:
+                    continue
+                for child in children:
+                    controls.append(child)
+                    if depth + 1 < max_scan_depth and len(controls) < max_scan_nodes:
+                        queue.append((child, depth + 1))
+                    if len(controls) >= max_scan_nodes:
+                        break
+
         for control in controls[:500]:
             try:
                 info = getattr(control, "element_info", None)
@@ -184,20 +228,29 @@ def capture_screen(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         monitor_index = int(args.get("monitor", 1))
         if max_width < 320 or max_width > 2200:
             return ToolResult.fail("largura_maxima deve ficar entre 320 e 2200")
-        screens = capture_monitors(max_width=max_width)
+        if monitor_index < 1 or monitor_index > 16:
+            return ToolResult.fail("monitor deve ficar entre 1 e 16")
+
+        total_started = time.perf_counter()
+        capture_started = time.perf_counter()
+        # Captura apenas o monitor solicitado, evitando codificar telas que serão descartadas.
+        screens = capture_monitors(max_width=max_width, monitor_index=monitor_index)
+        capture_ms = round((time.perf_counter() - capture_started) * 1000)
         if not screens:
-            return ToolResult.fail("nenhum monitor disponível para captura")
-        selected = next((s for s in screens if int(s.get("monitor", -1)) == monitor_index), None)
-        if selected is None:
-            return ToolResult.fail(
-                f"monitor {monitor_index} não encontrado; monitores disponíveis: "
-                + ", ".join(str(s.get("monitor")) for s in screens)
-            )
+            return ToolResult.fail(f"monitor {monitor_index} não encontrado ou indisponível")
+        selected = screens[0]
         data_url = str(selected.get("data_url", ""))
         if not data_url.startswith("data:image/"):
             return ToolResult.fail("captura não produziu uma imagem válida")
+        uia_started = time.perf_counter()
         ui_snapshot = _active_window_snapshot()
+        uia_ms = round((time.perf_counter() - uia_started) * 1000)
+        total_ms = round((time.perf_counter() - total_started) * 1000)
         metadata = {
+            "tempo_captura_ms": capture_ms,
+            "tempo_uia_ms": uia_ms,
+            "tempo_total_ms": total_ms,
+            "modo_uia": os.environ.get("AURORA_DESKTOP_UIA_MODE", "fast").strip().lower() or "fast",
             "monitor": selected["monitor"],
             "origem_x": selected["left"],
             "origem_y": selected["top"],
@@ -213,7 +266,8 @@ def capture_screen(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         return ToolResult(
             ok=True,
             summary=(f"Tela capturada: monitor {monitor_index}, "
-                     f"{metadata['largura_capturada']}x{metadata['altura_capturada']}. "
+                     f"{metadata['largura_capturada']}x{metadata['altura_capturada']} "
+                     f"(captura {capture_ms} ms, UIA {uia_ms} ms). "
                      f"Janela em primeiro plano: {active_title}. "
                      + (f"Leitura local encontrou {ui_count} controles acessíveis." if ui_snapshot.get("disponivel") else
                         "Leitura local de controles indisponível; use a imagem e não invente nomes de elementos.")
