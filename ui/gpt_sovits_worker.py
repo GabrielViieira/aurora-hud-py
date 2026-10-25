@@ -76,18 +76,29 @@ def _load_engine(args: argparse.Namespace):
         with redirect_stdout(sys.stderr), redirect_stderr(sys.stderr):
             from GPT_SoVITS import inference_webui as infer
 
-            # A maioria das versões carrega os caminhos dados acima durante o import.
-            # Corrige a seleção somente se a versão instalada não tiver respeitado as variáveis.
-            loaded_sovits = getattr(infer, "sovits_path", None)
-            if not _same_path(loaded_sovits, Path(args.sovits_model)):
-                sovits_result = infer.change_sovits_weights(str(Path(args.sovits_model).resolve()))
-                if hasattr(sovits_result, "__next__"):
-                    next(sovits_result)
+            # Em GPT-SoVITS v2Pro, change_sovits_weights é um generator:
+            # só comparar o caminho ou chamar next() uma vez não garante que
+            # o state_dict terminou de carregar. Consumimos todos os yields.
+            target_sovits = str(Path(args.sovits_model).resolve())
+            language_label = infer.i18n("日文")
+            sovits_result = infer.change_sovits_weights(
+                target_sovits,
+                prompt_language=language_label,
+                text_language=language_label,
+            )
+            if hasattr(sovits_result, "__iter__") and not isinstance(sovits_result, (str, bytes, dict)):
+                for _ in sovits_result:
+                    pass
 
+            # A importação normalmente carregou o GPT indicado pelo ambiente.
+            # Recarregamos somente se o caminho efetivamente selecionado divergir.
+            target_gpt = Path(args.gpt_model).resolve()
             loaded_gpt = getattr(infer, "gpt_path_global", None)
-            if not _same_path(loaded_gpt, Path(args.gpt_model)):
-                infer.change_gpt_weights(str(Path(args.gpt_model).resolve()))
+            if not _same_path(loaded_gpt, target_gpt):
+                infer.change_gpt_weights(str(target_gpt))
     finally:
+        # A WebUI escreve em weight.json ao trocar os modelos; não persistimos
+        # as escolhas da Aurora sobre a configuração pessoal da instalação.
         _restore_weight_file(weight_file, existed, original)
 
     return infer
