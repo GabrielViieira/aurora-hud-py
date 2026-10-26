@@ -107,7 +107,7 @@ def _estimate_request_tokens(messages: list[ChatMessage], tools: list[dict[str, 
                     visible_text.append(str(part.get("text") or ""))
                 else:
                     visible_text.append(json.dumps(part, ensure_ascii=False, default=str))
-            content_tokens = estimate_tokens("\\n".join(visible_text)) + image_count
+            content_tokens = estimate_tokens("\n".join(visible_text)) + image_count
         else:
             content_tokens = estimate_tokens(str(content or ""))
         total += content_tokens + estimate_tokens(message.role) + 4
