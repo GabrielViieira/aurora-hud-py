@@ -166,12 +166,12 @@ BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_SVG = BASE_DIR / "aurora_full.svg"
 DEFAULT_VOSK_MODEL = BASE_DIR / "models" / "vosk-model-small-pt-0.3"
 
-# O Piper Plus fica ativo por padrão. Os motores anteriores continuam no código,
-# mas só iniciam se forem selecionados explicitamente por AURORA_TTS_BACKEND.
-AURORA_TTS_BACKEND = os.environ.get("AURORA_TTS_BACKEND", "piper").strip().casefold()
-if AURORA_TTS_BACKEND not in {"piper", "gpt_sovits", "nanami_rvc"}:
-    print(f"[Aurora TTS] Backend desconhecido {AURORA_TTS_BACKEND!r}; usando Piper Plus.")
-    AURORA_TTS_BACKEND = "piper"
+# Usa a voz japonesa Nanami via SAPI/pyttsx3 por padrão, sem conversão RVC.
+# Outros motores permanecem disponíveis por AURORA_TTS_BACKEND.
+AURORA_TTS_BACKEND = os.environ.get("AURORA_TTS_BACKEND", "nanami").strip().casefold()
+if AURORA_TTS_BACKEND not in {"piper", "gpt_sovits", "nanami", "nanami_rvc"}:
+    print(f"[Aurora TTS] Backend desconhecido {AURORA_TTS_BACKEND!r}; usando Nanami sem RVC.")
+    AURORA_TTS_BACKEND = "nanami"
 
 PIPER_MODEL_PATH = Path(os.environ.get(
     "AURORA_PIPER_MODEL",
@@ -691,6 +691,8 @@ class SvgHologram(QMainWindow):
             and GPT_SOVITS_REFERENCE.is_file()
         )
         print(f"[Aurora TTS] Backend principal: {AURORA_TTS_BACKEND}.")
+        if AURORA_TTS_BACKEND == "nanami":
+            print("[Aurora TTS] Usando a voz japonesa SAPI/pyttsx3 diretamente, sem RVC.")
         if AURORA_TTS_BACKEND == "piper":
             print("[Aurora TTS] GPT-SoVITS e Nanami + RVC estão temporariamente desativados.")
         if self._gpt_sovits_enabled:
@@ -851,6 +853,8 @@ class SvgHologram(QMainWindow):
                 )
                 if explicit_ja:
                     candidates.append((vname, str(getattr(v, "id", ""))))
+            # Se Nanami estiver instalada, prioriza essa voz sobre outras vozes JA.
+            candidates.sort(key=lambda candidate: 0 if "nanami" in candidate[0] else 1)
             jp_voice = candidates[0][1] if candidates else None
             self._tts_voice_ja = jp_voice
             if jp_voice:
@@ -1554,16 +1558,22 @@ class SvgHologram(QMainWindow):
                                 audio_path = self._speak_with_gpt_sovits(spoken_text)
                             elif AURORA_TTS_BACKEND == "nanami_rvc" and self._applio_available:
                                 audio_path = self._speak_with_applio(spoken_text)
+                            elif AURORA_TTS_BACKEND == "nanami":
+                                # Fala diretamente pela voz japonesa instalada; não passa pelo RVC.
+                                audio_path = self._prepare_sapi_audio(
+                                    spoken_text, job_dir / "aurora_nanami.wav"
+                                )
 
-                            # Falhas do backend selecionado não reativam GPT-SoVITS ou RVC
-                            # implicitamente; usam somente fallbacks locais/explicitamente ativos.
-                            if not audio_path and self._voicevox_enabled:
-                                candidate = job_dir / "aurora_voicevox.wav"
-                                if self._speak_with_voicevox_to_file(spoken_text, candidate):
-                                    audio_path = candidate
-                            if not audio_path:
-                                candidate = job_dir / "aurora_sapi.wav"
-                                audio_path = self._prepare_sapi_audio(spoken_text, candidate)
+                            # No modo Nanami direto, não troca silenciosamente para outra voz.
+                            # Os demais motores mantêm os fallbacks locais já existentes.
+                            if AURORA_TTS_BACKEND != "nanami":
+                                if not audio_path and self._voicevox_enabled:
+                                    candidate = job_dir / "aurora_voicevox.wav"
+                                    if self._speak_with_voicevox_to_file(spoken_text, candidate):
+                                        audio_path = candidate
+                                if not audio_path:
+                                    candidate = job_dir / "aurora_sapi.wav"
+                                    audio_path = self._prepare_sapi_audio(spoken_text, candidate)
                 except Exception as exc:
                     print(f"[Aurora TTS] Falha na preparação da fala: {exc}")
                     audio_path = None
