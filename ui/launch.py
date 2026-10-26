@@ -1,6 +1,6 @@
-#Launcher da interface holográfica nativa da Aurora (PySide6 + QPainter).
+# Launcher da interface holográfica nativa da Aurora (PySide6 + QPainter).
 
-#Interface HUD oficial da Aurora. Integra com o runtime da Aurora.
+# Interface HUD oficial da Aurora. Integra com o runtime da Aurora.
 
 
 from __future__ import annotations
@@ -88,7 +88,7 @@ FREELLM_URL = os.environ.get("AURORA_FREELLM_URL", "http://localhost:3001")
 
 
 def _tts_gateway_config() -> tuple[str, dict[str, str]]:
-    #Resolve endpoint e autenticação usando a mesma configuração do runtime.#
+    # Resolve endpoint e autenticação usando a mesma configuração do runtime.
     from aurora.voice.translation_client import translation_request_config
     return translation_request_config()
 
@@ -182,12 +182,12 @@ PIPER_CONFIG_PATH = Path(os.environ.get(
     str(BASE_DIR.parent / "voice" / "voice_JA" / "config.json"),
 )).expanduser()
 
-# Atenua somente a saída do Piper para metade da amplitude atual (aprox. -6 dB).
+# Atenua a saída do Piper para 30% da amplitude original (aprox. -10,5 dB).
 PIPER_OUTPUT_GAIN = 0.3
 
 
 class SvgWidget(QWidget):
-    #Widget transparente com animações nativas de QPainter.#
+    # Widget transparente com animações nativas de QPainter.
 
     drag_started = Signal(QPoint)
     drag_moved = Signal(QPoint)
@@ -214,7 +214,7 @@ class SvgWidget(QWidget):
         self._last_frame = time.perf_counter()
 
     def advance_animation(self) -> None:
-        #Avança as animações usando o tempo real entre quadros.#
+        # Avança as animações usando o tempo real entre quadros.
         now = time.perf_counter()
         dt = min(max(now - self._last_frame, 0.0), 0.1)
         self._last_frame = now
@@ -269,12 +269,12 @@ class SvgWidget(QWidget):
 
 
 class VoiceListener:
-    #Escuta o microfone padrão e só envia fala após a palavra "aurora".
+    # Escuta o microfone padrão e só envia fala após a palavra "aurora".
 
-    #Usa o dispositivo de entrada padrão do Windows. Quando o dispositivo usa
-    #WASAPI, solicita explicitamente modo compartilhado (exclusive=False).
-    #O Vosk processa o áudio localmente; texto fora da janela de ativação não é
-    #encaminhado ao agente.
+    # Usa o dispositivo de entrada padrão do Windows. Quando o dispositivo usa
+    # WASAPI, solicita explicitamente modo compartilhado (exclusive=False).
+    # O Vosk processa o áudio localmente; texto fora da janela de ativação não é
+    # encaminhado ao agente.
     #
 
     def __init__(
@@ -796,7 +796,7 @@ class SvgHologram(QMainWindow):
 
     @Slot(str)
     def set_visual_state(self, state: str) -> None:
-        #Aplica um preset visual ao núcleo e ao icosaedro.#
+        # Aplica um preset visual ao núcleo e ao icosaedro.
         if not hasattr(self, "svg_widget"):
             return
         try:
@@ -980,7 +980,7 @@ class SvgHologram(QMainWindow):
             return False
 
     def _ensure_gpt_sovits_api(self) -> bool:
-        #Inicia a API local uma vez e mantém GPT/SoVITS carregados para falas seguintes.#
+        # Inicia a API local uma vez e mantém GPT/SoVITS carregados para falas seguintes.
         if not self._gpt_sovits_enabled or not HTTPX_AVAILABLE:
             return False
 
@@ -1083,7 +1083,7 @@ class SvgHologram(QMainWindow):
             return False
 
     def _read_gpt_sovits_direct_messages(self, process: subprocess.Popen, messages: queue.Queue) -> None:
-        #Lê respostas JSON do worker sem bloquear a thread da interface.#
+        # Lê respostas JSON do worker sem bloquear a thread da interface.
         try:
             if process.stdout is not None:
                 for line in process.stdout:
@@ -1094,7 +1094,7 @@ class SvgHologram(QMainWindow):
             messages.put(None)
 
     def _ensure_gpt_sovits_direct(self) -> bool:
-        #Inicia uma única instância persistente de inferência direta do GPT-SoVITS.#
+        # Inicia uma única instância persistente de inferência direta do GPT-SoVITS.
         if not self._gpt_sovits_enabled:
             return False
 
@@ -1213,7 +1213,7 @@ class SvgHologram(QMainWindow):
             return False
 
     def _speak_with_gpt_sovits_direct(self, japanese_text: str) -> Optional[Path]:
-        #Gera o WAV pelo GPT-SoVITS carregado localmente, sem servidor HTTP.#
+        # Gera o WAV pelo GPT-SoVITS carregado localmente, sem servidor HTTP.
         if not self._gpt_sovits_enabled or not japanese_text.strip():
             return None
 
@@ -1282,7 +1282,7 @@ class SvgHologram(QMainWindow):
             return None
 
     def _speak_with_piper_plus(self, japanese_text: str, out_wav: Path) -> Optional[Path]:
-        #Gera WAV com a voz Piper Plus/ONNX configurada localmente (Mera por padrão).""
+        # Gera WAV com a voz Piper Plus/ONNX configurada localmente (Mera por padrão).
         if not japanese_text.strip():
             return None
         if not PIPER_MODEL_PATH.is_file():
@@ -1344,7 +1344,7 @@ class SvgHologram(QMainWindow):
             return None
 
     def _speak_with_gpt_sovits(self, japanese_text: str) -> Optional[Path]:
-        #Prioriza o motor direto; a API HTTP só é usada se o fallback for ativado.#
+        # Prioriza o motor direto; a API HTTP só é usada se o fallback for ativado.
         audio = self._speak_with_gpt_sovits_direct(japanese_text)
         if audio is not None:
             return audio
@@ -1354,7 +1354,7 @@ class SvgHologram(QMainWindow):
         return None
 
     def _shutdown_gpt_sovits_direct(self) -> None:
-        #Encerra o worker direto que pertence a esta instância da Aurora.#
+        # Encerra o worker direto que pertence a esta instância da Aurora.
         process = self._gpt_sovits_direct_process
         self._gpt_sovits_direct_ready = False
         if process is not None:
@@ -1387,7 +1387,7 @@ class SvgHologram(QMainWindow):
         self._gpt_sovits_direct_messages = None
 
     def _speak_with_gpt_sovits_api(self, japanese_text: str) -> Optional[Path]:
-        #Fallback opcional por API HTTP local (desativado por padrão).#
+        # Fallback opcional por API HTTP local (desativado por padrão).
         if not self._gpt_sovits_enabled or not japanese_text.strip():
             return None
         work_dir = Path(tempfile.mkdtemp(prefix="aurora_gpt_sovits_"))
@@ -1431,7 +1431,7 @@ class SvgHologram(QMainWindow):
             return None
 
     def _shutdown_gpt_sovits_api(self) -> None:
-        #Encerra apenas a API que esta instância da Aurora iniciou.#
+        # Encerra apenas a API que esta instância da Aurora iniciou.
         process = self._gpt_sovits_process
         if process is None or process.poll() is not None:
             return
@@ -1446,7 +1446,7 @@ class SvgHologram(QMainWindow):
                 pass
 
     def _speak_with_applio(self, japanese_text: str) -> Optional[Path]:
-        #Gera o WAV via edge-tts + RVC, sem iniciar a reprodução.#
+        # Gera o WAV via edge-tts + RVC, sem iniciar a reprodução.
         if not self._applio_available:
             return None
         work_dir = Path(tempfile.mkdtemp(prefix="aurora_rvc_"))
@@ -1503,7 +1503,7 @@ class SvgHologram(QMainWindow):
             return None
 
     def _prepare_sapi_audio(self, japanese_text: str, out_wav: Path) -> Optional[Path]:
-        #Pré-sintetiza WAV com pyttsx3/SAPI, sem reproduzi-lo.#
+        # Pré-sintetiza WAV com pyttsx3/SAPI, sem reproduzi-lo.
         if not self._tts_engine or not self._tts_voice_ja:
             return None
         try:
@@ -1533,7 +1533,7 @@ class SvgHologram(QMainWindow):
         ).start()
 
     def _prepare_speech_job(self, caption: str, text: str, final_state: str) -> None:
-        #Prepara tradução/áudio primeiro; só então publica legenda e toca WAV.
+        # Prepara tradução/áudio primeiro; só então publica legenda e toca WAV.
         done = threading.Event()
         audio_path: Optional[Path] = None
         job_dir = Path(tempfile.mkdtemp(prefix="aurora_speech_"))
@@ -1590,7 +1590,7 @@ class SvgHologram(QMainWindow):
                     pass
 
     def _set_speech_visual_state(self, state: str) -> None:
-        #Compatível com a UI que usa set_visual_state ou sinal Qt.#
+        # Compatível com a UI que usa set_visual_state ou sinal Qt.
         try:
             setter = getattr(self, "set_visual_state", None)
             if callable(setter):
@@ -1608,12 +1608,12 @@ class SvgHologram(QMainWindow):
         self, caption: str, spoken_text: str, audio_path: str,
         final_state: str, done: object,
     ) -> None:
-        #Exibe o balão e inicia o WAV já pronto, no mesmo instante lógico.
+        # Exibe o balão e inicia o WAV já pronto, no mesmo instante lógico.
         self._speech_active = bool(caption)
         if caption:
             self.show_caption(caption)
         self._set_speech_visual_state("speaking")
-        # A voz Mera/Piper é atenuada para metade da amplitude usada anteriormente.
+        # A voz Mera/Piper é atenuada para 30% da amplitude original.
         # O WAV é novo a cada turno, então o ganho não se acumula entre falas.
         audio_name = Path(audio_path).name
         if audio_name == "aurora_piper.wav":
@@ -1661,7 +1661,7 @@ class SvgHologram(QMainWindow):
     def _speech_preparation_failed(
         self, caption: str, spoken_text: str, final_state: str, done: object,
     ) -> None:
-        #Fallback: mostra o balão e usa reprodução direta se gerar WAV falhar.
+        # Fallback: mostra o balão e usa reprodução direta se gerar WAV falhar.
         self._speech_active = bool(caption)
         if caption:
             self.show_caption(caption)
@@ -1699,7 +1699,7 @@ class SvgHologram(QMainWindow):
     def speak_with_caption(
         self, caption: str, speech_text: str, *, final_state: Optional[str] = None,
     ) -> None:
-        #Publica balão e voz sincronizados após o áudio estar pronto.
+        # Publica balão e voz sincronizados após o áudio estar pronto.
         if final_state is None:
             final_state = "error" if "エラーが発生しました" in speech_text else "completed"
         self._queue_speech(caption, speech_text, final_state)
@@ -1936,7 +1936,7 @@ class SvgHologram(QMainWindow):
         super().closeEvent(event)
 
 def _lower_wav_volume(path: str, gain: float = 0.4) -> bool:
-    #Reduz o volume de WAV PCM de 16 bits sem alterar a duração.
+    # Reduz o volume de WAV PCM de 16 bits sem alterar a duração.
     import array
     import sys
     import wave
