@@ -45,6 +45,7 @@ class Runtime:
     conversations: ConversationStore
     tasks: TaskStore
     provider: FreeLLMClient | None
+    vision_provider: FreeLLMClient | None
     router: ModelRouter
     agent: AuroraAgent | None
     planner: Planner | None
@@ -57,6 +58,8 @@ class Runtime:
             self.speech.close()
         if self.provider:
             self.provider.close()
+        if self.vision_provider and self.vision_provider is not self.provider:
+            self.vision_provider.close()
         self.db.close()
 
 
@@ -111,6 +114,7 @@ def build_runtime(
     router = ModelRouter.from_settings(settings.llm)
 
     provider: FreeLLMClient | None = None
+    vision_provider: FreeLLMClient | None = None
     if provider_override is not None:
         provider = provider_override
     elif settings.has_api_key():
@@ -124,6 +128,22 @@ def build_runtime(
             )
         except ConfigError:
             provider = None
+
+    # O endpoint de visão é independente para manter chat/planner/summarizer
+    # no provedor existente e enviar imagens somente ao backend local configurado.
+    if provider_override is None and settings.llm.vision_base_url:
+        vision_provider = FreeLLMClient(
+            settings.llm.vision_base_url,
+            "ollama-local",
+            timeout_s=settings.llm.vision_timeout_s,
+            max_retries=settings.llm.vision_max_retries,
+            on_metrics=_metrics_recorder(metrics),
+        )
+        logger.info(
+            "Provedor local de visão configurado: %s (modelo=%s)",
+            settings.llm.vision_base_url,
+            settings.llm.vision_model or settings.llm.model,
+        )
 
     agent = None
     planner = None
@@ -144,6 +164,7 @@ def build_runtime(
             events=events,
             metrics=metrics,
             policy=policy,
+            vision_provider=vision_provider,
         )
         planner = Planner(
             provider,
@@ -190,6 +211,7 @@ def build_runtime(
         conversations=conversations,
         tasks=tasks,
         provider=provider,
+        vision_provider=vision_provider,
         router=router,
         agent=agent,
         planner=planner,
