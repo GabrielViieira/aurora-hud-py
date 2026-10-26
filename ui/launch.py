@@ -1966,6 +1966,7 @@ class SvgHologram(QMainWindow):
             self._speech_pending = False
         was_active = self._speech_active
         stop_event = self._active_speech_stop_event
+        done = self._active_speech_done
         self._speech_active = False
         self._active_speech_generation = None
         self._active_speech_stop_event = None
@@ -1974,6 +1975,7 @@ class SvgHologram(QMainWindow):
             stop_event.set()
         try:
             import winsound
+            # PlaySound(None, 0) é a forma documentada de parar o som atual.
             winsound.PlaySound(None, 0)
         except Exception:
             pass
@@ -1982,6 +1984,12 @@ class SvgHologram(QMainWindow):
                 self._tts_engine.stop()
         except Exception:
             pass
+        # Libera o preparador da fala agora, inclusive durante o encerramento do HUD.
+        if done is not None:
+            try:
+                done.set()
+            except Exception:
+                pass
         self.caption_hide_timer.stop()
         if self.caption_label.isVisible():
             self.caption_label.hide()
