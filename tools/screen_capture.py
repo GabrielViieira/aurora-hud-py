@@ -9,7 +9,7 @@ from PIL import Image
 
 
 def capture_monitors(
-    max_width: int = 1920, monitor_index: int | None = None
+    max_width: int = 960, monitor_index: int | None = None
 ) -> list[dict]:
     """Captura monitores em JPEG/Base64, opcionalmente apenas um.
 
