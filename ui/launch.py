@@ -97,6 +97,7 @@ def _classify_hud_control_command(text: str) -> str:
     cancel_patterns = (
         r"(?:cancele|cancelar|cancel|pare|parar|interrompa|interromper|stop)(?: (?:a|o|the))?(?: (?:tarefa|instrucao|comando|execucao|processo|isso|task|instruction|command))?(?: (?:atual|current))?(?: agora| now)?",
         r"(?:cancel|stop) (?:the )?(?:current )?(?:task|instruction|command)",
+        r"(?:pare|parar|interrompa|interromper|cancele|cancelar|stop|cancel)(?: (?:de|a|o|the))? (?:falar|fala|voz|audio|speaking|talking|voice|speech)(?: (?:agora|now))?",
     )
     if any(re.fullmatch(pattern, value) for pattern in cancel_patterns):
         return "cancel"
