@@ -53,7 +53,7 @@ def _load_engine(args: argparse.Namespace):
         "-g", str(Path(args.gpt_model).resolve()),
         "-dr", str(Path(args.reference).resolve()),
         "-dt", args.prompt_text,
-        "-dl", "ja",
+        "-dl", "日文",
         "-d", args.device,
         "-a", "127.0.0.1",
         "-p", "9880",
@@ -61,6 +61,7 @@ def _load_engine(args: argparse.Namespace):
         "-mt", "wav",
         "-st", "int16",
     ]
+    sys.argv.append("-hp" if args.device.lower().startswith("cuda") else "-fp")
     os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
     try:
         with redirect_stdout(sys.stderr), redirect_stderr(sys.stderr):
@@ -127,12 +128,12 @@ def _handle_request(infer, args: argparse.Namespace, request: dict[str, Any]) ->
             generated = list(infer.get_tts_wav(
                 ref_wav_path=str(Path(args.reference).resolve()),
                 prompt_text=args.prompt_text,
-                prompt_language="ja",
+                prompt_language="日文",
                 text=text,
-                text_language="ja",
+                text_language="日文",
                 top_k=15,
-                top_p=0.8,
-                temperature=0.8,
+                top_p=1.0,
+                temperature=1.0,
                 speed=1.0,
                 inp_refs=[],
                 spk="default",
