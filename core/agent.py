@@ -75,6 +75,26 @@ def _is_action_tool(name: str, spec: Any) -> bool:
         and name not in _NON_MUTATING_DESKTOP_TOOLS
     )
 
+def _should_auto_capture_after_action(
+    name: str, arguments: dict[str, Any], registry: ToolRegistry
+) -> bool:
+    """Diz se uma execução bem-sucedida deve ser seguida de captura visual automática."""
+    if name in _NON_MUTATING_DESKTOP_TOOLS:
+        return False
+    # Abrir uma URL inicia/navega no navegador, embora sua categoria seja "sistema".
+    if name == "abrir_url":
+        return True
+    # Mover o cursor não altera o estado útil da interface; evite capturas desnecessárias.
+    if name == "controlar_mouse" and str(arguments.get("acao", "")).strip().lower() == "mover":
+        return False
+    if not registry.has(name):
+        return False
+    try:
+        spec = registry.get(name)
+    except Exception:
+        return False
+    return str(getattr(spec, "category", "")).casefold() == "desktop"
+
 
 # AURORA_LOCAL_APP_ROUTER_V1
 def _local_app_intent(text: str) -> tuple[str, dict[str, str]] | None:
@@ -279,10 +299,14 @@ class AuroraAgent:
                 messages.append(assistant)
 
                 vision_attachments: list[tuple[str, str]] = []
-                desktop_tool_names = {"capturar_tela", "controlar_mouse", "controlar_teclado", "abrir_aplicativo", "restaurar_aplicativo"}
+                vision_warnings: list[str] = []
+                desktop_tool_names = {
+                    "capturar_tela", "controlar_mouse", "controlar_teclado",
+                    "abrir_aplicativo", "restaurar_aplicativo", "abrir_url",
+                }
                 desktop_calls = [call.name for call in response.tool_calls if call.name in desktop_tool_names]
                 preferred_desktop_tool = (
-                    next((name for name in ("abrir_aplicativo", "restaurar_aplicativo") if name in desktop_calls), "")
+                    next((name for name in ("abrir_aplicativo", "restaurar_aplicativo", "abrir_url") if name in desktop_calls), "")
                     or ("capturar_tela" if "capturar_tela" in desktop_calls else (desktop_calls[0] if desktop_calls else ""))
                 )
                 desktop_batch_requires_serial = len(desktop_calls) > 1
@@ -339,6 +363,46 @@ class AuroraAgent:
                             name=call.name,
                         )
                     )
+
+                    # Não dependa do LLM lembrar de pedir outro print: após cada ação
+                    # visual bem-sucedida, observe o estado real antes da próxima decisão.
+                    capture_enabled = (
+                        not self.settings.enabled_tools
+                        or "capturar_tela" in self.settings.enabled_tools
+                    )
+                    if (
+                        result.ok
+                        and not result.data.get("adiada")
+                        and call.name != "capturar_tela"
+                        and capture_enabled
+                        and self.registry.has("capturar_tela")
+                        and _should_auto_capture_after_action(call.name, call.arguments, self.registry)
+                    ):
+                        # Dá um intervalo curto para a janela responder. A captura pode
+                        # mostrar carregamento; o modelo poderá esperar/observar de novo.
+                        time.sleep(0.6 if call.name in {"abrir_aplicativo", "restaurar_aplicativo", "abrir_url"} else 0.2)
+                        capture_call = ToolCall(
+                            id=f"auto-capture-{call.id}",
+                            name="capturar_tela",
+                            arguments={"monitor": 1, "largura_maxima": 1920},
+                        )
+                        capture_result, _ = self._run_tool(capture_call, task, ctx)
+                        tool_call_count += 1
+                        tools_used.append("capturar_tela")
+                        image_url = capture_result.data.pop("data_url", "") if capture_result.ok else ""
+                        if isinstance(image_url, str) and image_url.startswith("data:image/"):
+                            vision_attachments.append((
+                                image_url,
+                                f"Captura automática após ação {call.name}. Examine a imagem para recalcular o próximo passo; "
+                                f"o sucesso da chamada não significa, por si só, que o objetivo final foi concluído. {capture_result.summary}",
+                            ))
+                        else:
+                            detail = capture_result.error or capture_result.summary or "a captura não retornou uma imagem válida"
+                            vision_warnings.append(
+                                f"A ação {call.name} foi executada, mas a captura visual automática falhou: {detail}. "
+                                "Não execute outro clique/digitação às cegas; tente capturar_tela como próxima etapa."
+                            )
+
                     key = signature
                     # Uma etapa adiada não é uma ação executada. Conte repetições
                     # idênticas para evitar consumir todas as iterações em loop.
@@ -371,6 +435,8 @@ class AuroraAgent:
                             ],
                         )
                     )
+                for warning in vision_warnings:
+                    messages.append(ChatMessage(role="user", content=warning))
                 if task.status in {TaskStatus.FAILED, TaskStatus.CANCELLED}:
                     break
 
