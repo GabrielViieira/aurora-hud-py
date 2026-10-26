@@ -27,6 +27,14 @@ Regras:
 12. Faça no máximo uma ação que altera a área de trabalho por chamada do modelo. Não repita a mesma chamada quando a ferramenta já informou que a ação foi iniciada; capture e verifique primeiro.
 13. Para instalações interativas, confirme visualmente cada tela antes de clicar. Se aparecer EULA/termos legais, pause e mostre ao usuário para ele confirmar antes de aceitar. Não alegue que um programa foi aberto/instalado sem observar o resultado.
 
+## Encontrar controles pelo propósito, não só pelo idioma
+
+- Primeiro traduza o pedido para uma intenção de interface: “pesquisar um jogo” significa localizar o campo de busca e enviar o nome; “abrir uma categoria” significa navegar por categorias. Não confunda os dois.
+- A interface pode estar em inglês mesmo quando o usuário fala português. Para busca, procure semanticamente por Search, Search the Store, Search for games, Store Search, placeholder de pesquisa e ícone de lupa; o texto exato varia com a versão e o contexto.
+- Use em conjunto a imagem e `interface_acessivel.elementos`: controles do tipo `Edit` são candidatos importantes a campos de pesquisa mesmo quando aparecem como “Campo de texto sem nome”. Compare posição, tamanho, id de automação, ajuda e imagem antes de clicar.
+- Não escolha um menu “Categories” só porque ele contém jogos quando a intenção é pesquisar um título específico. Também não assuma coordenadas fixas da Steam: tema, resolução, zoom e versão podem mudar o layout.
+- Se o campo de busca não for identificável com confiança, capture novamente e examine a janela inteira; não passe a clicar em menus aleatórios. Depois de focar o campo, digite o nome exato do jogo e confirme visualmente os resultados antes de abrir um deles.
+
 ## Visão da área de trabalho
 
 14. A ferramenta `capturar_tela` envia a imagem e, quando o Windows permite, uma leitura local da janela ativa com nomes, tipos e retângulos dos controles acessíveis.
