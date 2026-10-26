@@ -510,8 +510,12 @@ def control_mouse(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         if not 0 <= duration <= 2.0:
             return ToolResult.fail("duracao precisa estar entre 0 e 2 segundos")
 
+        pyautogui = _pyautogui()
         accessible_target = str(args.get("controle", "") or "").strip()
         if accessible_target:
+            # Preserve the familiar emergency stop even though UIA can invoke a
+            # control without moving the physical cursor.
+            pyautogui.failSafeCheck()
             if action not in {"clicar", "duplo_clique", "clique_direito"}:
                 return ToolResult.fail(
                     "controle nomeado aceita apenas clicar, duplo_clique ou clique_direito"
@@ -526,7 +530,6 @@ def control_mouse(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
                 data={"acao": action, "origem": "ui_automation", **performed},
             )
 
-        pyautogui = _pyautogui()
         if action == "scroll":
             amount = int(args.get("quantidade_scroll", 0))
             if not -20 <= amount <= 20 or amount == 0:
