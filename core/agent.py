@@ -466,20 +466,32 @@ class AuroraAgent:
 
         except ProviderError as exc:
             logger.warning("falha do provedor", extra={"aurora": {"kind": exc.kind}})
-            final_text = (
-                f"Não consegui falar com o provedor de IA: {exc.user_message()}."
-                + (f" Detalhe: {exc}" if len(str(exc)) < 300 else "")
-                + " Nenhuma ação foi executada com base em resposta inventada."
-            )
-            task.error = f"{exc.kind}: {exc}"
-            if task.status not in {TaskStatus.COMPLETED, TaskStatus.CANCELLED}:
-                task.transition(TaskStatus.FAILED)
+            if self.cancel_event.is_set():
+                final_text = "Tarefa cancelada a pedido do usuário."
+                task.error = "cancelada pelo usuário"
+                if task.status not in {TaskStatus.COMPLETED, TaskStatus.CANCELLED, TaskStatus.FAILED}:
+                    task.transition(TaskStatus.CANCELLED)
+            else:
+                final_text = (
+                    f"Não consegui falar com o provedor de IA: {exc.user_message()}."
+                    + (f" Detalhe: {exc}" if len(str(exc)) < 300 else "")
+                    + " Nenhuma ação foi executada com base em resposta inventada."
+                )
+                task.error = f"{exc.kind}: {exc}"
+                if task.status not in {TaskStatus.COMPLETED, TaskStatus.CANCELLED}:
+                    task.transition(TaskStatus.FAILED)
         except Exception as exc:  # nunca deixar o REPL em estado inconsistente
-            logger.exception("erro inesperado no turno")
-            final_text = f"Erro interno ao processar o pedido: {type(exc).__name__}: {exc}"
-            task.error = final_text
-            if task.status not in {TaskStatus.FAILED, TaskStatus.CANCELLED}:
-                task.transition(TaskStatus.FAILED)
+            if self.cancel_event.is_set():
+                final_text = "Tarefa cancelada a pedido do usuário."
+                task.error = "cancelada pelo usuário"
+                if task.status not in {TaskStatus.COMPLETED, TaskStatus.CANCELLED, TaskStatus.FAILED}:
+                    task.transition(TaskStatus.CANCELLED)
+            else:
+                logger.exception("erro inesperado no turno")
+                final_text = f"Erro interno ao processar o pedido: {type(exc).__name__}: {exc}"
+                task.error = final_text
+                if task.status not in {TaskStatus.FAILED, TaskStatus.CANCELLED}:
+                    task.transition(TaskStatus.FAILED)
 
         latency_ms = int((time.monotonic() - started) * 1000)
         if not final_text:
