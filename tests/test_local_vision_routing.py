@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import base64
 import sys
+import threading
+import time
 import types
 import unittest
 from io import BytesIO
@@ -25,7 +27,7 @@ sys.path.insert(0, str(_REPO_ROOT.parent))
 
 from aurora.config.settings import Settings
 from aurora.core.agent import AuroraAgent, _is_vision_token_limit_error
-from aurora.llm.provider import ChatMessage, LLMRequest, ProviderError
+from aurora.llm.provider import ChatMessage, LLMRequest, LLMResponse, ProviderError
 
 
 class LocalVisionRoutingTests(unittest.TestCase):
@@ -142,6 +144,54 @@ class LocalVisionRoutingTests(unittest.TestCase):
 
         # O payload da conversa principal continua intacto.
         self.assertEqual(request.messages[0].content[1]["image_url"]["url"], data_url)
+
+    def test_local_vision_retries_with_smaller_image_after_token_limit(self):
+        buffer = BytesIO()
+        Image.new("RGB", (960, 540), (12, 34, 56)).save(buffer, format="PNG")
+        data_url = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+
+        class TokenLimitedFirstCallProvider:
+            def __init__(self):
+                self.requests = []
+
+            def chat(self, request):
+                self.requests.append(request)
+                if len(self.requests) == 1:
+                    raise ProviderError(
+                        "HTTP 500: limit token atingido",
+                        kind="bad_request",
+                        status=500,
+                        body='{"error":"limit token atingido"}',
+                    )
+                return LLMResponse(text="Janela do aplicativo identificada.")
+
+        local = TokenLimitedFirstCallProvider()
+        agent = self._agent(vision_provider=local)
+        agent.cancel_event = threading.Event()
+        request = LLMRequest(
+            model="qwen2.5vl:3b",
+            messages=[
+                ChatMessage(
+                    role="user",
+                    content=[
+                        {"type": "text", "text": "Identifique a janela."},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                )
+            ],
+        )
+
+        response = agent._chat_with_cancel(request, deadline=time.monotonic() + 10)
+
+        self.assertEqual(response.text, "Janela do aplicativo identificada.")
+        self.assertEqual(len(local.requests), 2)
+        sizes = []
+        for submitted in local.requests:
+            url = submitted.messages[0].content[1]["image_url"]["url"]
+            raw = base64.b64decode(url.split(",", 1)[1])
+            with Image.open(BytesIO(raw)) as img:
+                sizes.append(img.size)
+        self.assertEqual(sizes, [(640, 360), (448, 252)])
 
     def test_local_vision_token_limit_error_is_detected(self):
         error = ProviderError(
