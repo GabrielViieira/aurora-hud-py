@@ -88,6 +88,18 @@ def _is_action_tool(name: str, spec: Any) -> bool:
         and name not in _NON_MUTATING_DESKTOP_TOOLS
     )
 
+def _should_use_accessibility_only_verification(name: str, arguments: dict[str, Any]) -> bool:
+    """Escolhe verificação pós-ação rápida quando pixels não são necessários para o próximo passo."""
+    action = str(arguments.get("acao", "")).strip().lower()
+    if name == "controlar_teclado" and action == "digitar":
+        return True
+    return (
+        name == "controlar_mouse"
+        and action in {"clicar", "duplo_clique", "clique_direito"}
+        and bool(str(arguments.get("controle", "") or "").strip())
+    )
+
+
 def _should_auto_capture_after_action(
     name: str, arguments: dict[str, Any], registry: ToolRegistry
 ) -> bool:
@@ -699,6 +711,7 @@ class AuroraAgent:
                         )
                         fatal = False
                     else:
+                        tool_started = time.perf_counter()
                         guarded_action = False
                         if self.registry.has(call.name):
                             guarded_action = _is_action_tool(call.name, self.registry.get(call.name))
@@ -722,9 +735,11 @@ class AuroraAgent:
                             if guarded_action:
                                 action_call_counts[signature] = attempts + 1
                             result, fatal = self._run_tool(call, task, ctx)
+                        tool_elapsed_ms = round((time.perf_counter() - tool_started) * 1000)
                     print(
                         f"[Aurora agente] Ferramenta concluída: {call.name}; "
-                        f"ok={result.ok}; resumo={str(result.summary)[:180]}"
+                        f"ok={result.ok}; duração={tool_elapsed_ms if not deferred else 0}ms; "
+                        f"resumo={str(result.summary)[:180]}"
                     )
                     if call.name == "capturar_tela" and result.ok and not result.data.get("adiada"):
                         image_url = result.data.pop("data_url", "")
@@ -762,30 +777,99 @@ class AuroraAgent:
                         and self.registry.has("capturar_tela")
                         and _should_auto_capture_after_action(call.name, call.arguments, self.registry)
                     ):
-                        # Dá um intervalo curto para a janela responder. A captura pode
-                        # mostrar carregamento; o modelo poderá esperar/observar de novo.
-                        time.sleep(0.6 if call.name in {"abrir_aplicativo", "restaurar_aplicativo", "abrir_url"} else 0.2)
+                        # Caminho rápido: para digitação e cliques por controle acessível,
+                        # tenta primeiro a UI Automation sem codificar uma imagem. A ferramenta
+                        # cai automaticamente para captura visual se UIA não retornar controles.
+                        fast_verification = _should_use_accessibility_only_verification(
+                            call.name, call.arguments
+                        )
+                        if call.name in {"abrir_aplicativo", "restaurar_aplicativo", "abrir_url"}:
+                            settle_seconds = 0.45
+                        elif fast_verification:
+                            settle_seconds = 0.04
+                        else:
+                            settle_seconds = 0.10
+                        time.sleep(settle_seconds)
+                        capture_args = {"monitor": 1, "largura_maxima": 960}
+                        if fast_verification:
+                            capture_args["somente_acessibilidade"] = True
                         capture_call = ToolCall(
                             id=f"auto-capture-{call.id}",
                             name="capturar_tela",
-                            arguments={"monitor": 1, "largura_maxima": 960},
+                            arguments=capture_args,
                         )
+                        verification_started = time.perf_counter()
                         capture_result, _ = self._run_tool(capture_call, task, ctx)
+                        verification_elapsed_ms = round((time.perf_counter() - verification_started) * 1000)
                         tool_call_count += 1
                         tools_used.append("capturar_tela")
                         image_url = capture_result.data.pop("data_url", "") if capture_result.ok else ""
+                        ui_snapshot = capture_result.data.get("interface_acessivel", {}) if capture_result.ok else {}
+                        ui_elements = ui_snapshot.get("elementos", []) if isinstance(ui_snapshot, dict) else []
                         if isinstance(image_url, str) and image_url.startswith("data:image/"):
                             vision_attachments.append((
                                 image_url,
                                 f"Captura automática após ação {call.name}. Examine a imagem para recalcular o próximo passo; "
                                 f"o sucesso da chamada não significa, por si só, que o objetivo final foi concluído. {capture_result.summary}",
                             ))
+                            verification_kind = "imagem"
+                        elif (
+                            capture_result.ok
+                            and isinstance(ui_snapshot, dict)
+                            and ui_snapshot.get("disponivel")
+                            and isinstance(ui_elements, list)
+                            and ui_elements
+                        ):
+                            # Observação textual estruturada: mantém a verificação, mas evita
+                            # pagar uma inferência de visão local em ações que UIA descreve.
+                            element_fields = (
+                                "tipo", "nome", "centro_x", "centro_y", "esquerda", "topo",
+                                "direita", "base", "id_automacao", "ajuda", "pontuacao_busca",
+                                "confianca_busca", "evidencias_busca",
+                            )
+                            compact_elements = [
+                                {key: item[key] for key in element_fields if key in item}
+                                for item in ui_elements[:25] if isinstance(item, dict)
+                            ]
+                            observation = {
+                                "janela_ativa": ui_snapshot.get("janela_ativa", ""),
+                                "retangulo_janela": ui_snapshot.get("retangulo_janela", {}),
+                                "total_elementos_lidos": ui_snapshot.get("total_elementos_lidos", len(ui_elements)),
+                                "elementos": compact_elements,
+                                "resumo_pesquisa": ui_snapshot.get("resumo_pesquisa", [])[:8],
+                                "nota_coordenadas": ui_snapshot.get("nota_coordenadas", ""),
+                                "area_trabalho_virtual": capture_result.data.get("area_trabalho_virtual"),
+                                "tempo_uia_ms": capture_result.data.get("tempo_uia_ms"),
+                                "tempo_total_ms": capture_result.data.get("tempo_total_ms"),
+                            }
+                            messages.append(ChatMessage(
+                                role="user",
+                                content=(
+                                    "Verificação rápida após a ação via UI Automation (sem imagem). "
+                                    "Use os controles e seus limites como evidência estruturada. "
+                                    "Se o resultado exigir interpretar ícones, layout ou conteúdo não acessível, "
+                                    "peça capturar_tela antes de agir novamente. Dados: "
+                                    + json.dumps(observation, ensure_ascii=False, default=str)
+                                ),
+                            ))
+                            verification_kind = f"UIA/{len(compact_elements)} controles"
+                            print(
+                                "[Aurora agente] Verificação rápida concluída via UI Automation; "
+                                "imagem e modelo visual local omitidos."
+                            )
                         else:
-                            detail = capture_result.error or capture_result.summary or "a captura não retornou uma imagem válida"
+                            detail = capture_result.error or capture_result.summary or "a captura não retornou evidência válida"
                             vision_warnings.append(
-                                f"A ação {call.name} foi executada, mas a captura visual automática falhou: {detail}. "
+                                f"A ação {call.name} foi executada, mas a verificação automática falhou: {detail}. "
                                 "Não execute outro clique/digitação às cegas; tente capturar_tela como próxima etapa."
                             )
+                            verification_kind = "falha"
+                        print(
+                            f"[Aurora agente] Verificação pós-ação: tipo={verification_kind}; "
+                            f"duração={verification_elapsed_ms}ms; "
+                            f"captura={capture_result.data.get('tempo_captura_ms', '?')}ms; "
+                            f"UIA={capture_result.data.get('tempo_uia_ms', '?')}ms."
+                        )
 
                     key = signature
                     # Uma etapa adiada não é uma ação executada. Conte repetições
