@@ -183,7 +183,7 @@ PIPER_CONFIG_PATH = Path(os.environ.get(
 )).expanduser()
 
 # Atenua somente a saída do Piper para metade da amplitude atual (aprox. -6 dB).
-PIPER_OUTPUT_GAIN = 0.5
+PIPER_OUTPUT_GAIN = 0.3
 
 
 class SvgWidget(QWidget):
