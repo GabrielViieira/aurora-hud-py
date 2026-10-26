@@ -1864,12 +1864,15 @@ class SvgHologram(QMainWindow):
                     if stop_event.wait(min(0.05, max(0.0, remaining))):
                         break
                 cancelled = stop_event.is_set() or not self._is_speech_generation_current(generation)
-                if cancelled:
+                if cancelled and not stop_event.is_set():
+                    # Geração substituída sem cancelamento explícito: pare a fala antiga
+                    # antes de liberar a fila. No cancelamento explícito, o chamador já
+                    # parou o áudio; não emita um segundo stop que possa cortar a fala nova.
                     try:
                         winsound.PlaySound(None, 0)
                     except Exception:
                         pass
-                else:
+                elif not cancelled:
                     print(f"[Aurora TTS] Reprodução WAV concluída ({wav_frames} frames).")
                 self.speech_playback_finished.emit(
                     "cancelled" if cancelled else final_state, caption, generation, done
