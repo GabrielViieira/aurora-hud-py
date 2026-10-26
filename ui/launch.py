@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 from pathlib import Path
 from typing import Optional, Callable
 
@@ -85,6 +86,30 @@ _JA_RE = re.compile(r"[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]")
 # Para validar tradução, exija hiragana/katakana; kanji isolado também pode ser chinês.
 _JA_KANA_RE = re.compile(r"[\u3040-\u309F\u30A0-\u30FF]")
 FREELLM_URL = os.environ.get("AURORA_FREELLM_URL", "http://localhost:3001")
+
+def _classify_hud_control_command(text: str) -> str:
+    """Reconhece comandos locais explícitos de cancelar tarefa ou encerrar a Aurora."""
+    value = unicodedata.normalize("NFKD", str(text or "").casefold())
+    value = "".join(ch for ch in value if not unicodedata.combining(ch))
+    value = re.sub(r"[^a-z0-9]+", " ", value).strip()
+    value = re.sub(r"^(?:(?:ei|hey) )?aurora(?:\s+|$)", "", value).strip()
+
+    cancel_patterns = (
+        r"(?:cancele|cancelar|cancel|pare|parar|interrompa|interromper|stop)(?: (?:a|o))?(?: (?:tarefa|instrucao|comando|execucao|processo|isso|atual))?(?: agora)?",
+        r"(?:cancel|stop) (?:the )?(?:current )?(?:task|instruction|command)",
+    )
+    if any(re.fullmatch(pattern, value) for pattern in cancel_patterns):
+        return "cancel"
+
+    close_patterns = (
+        r"(?:feche|fecha|fechar|encerre|encerra|encerrar|desligue|desliga|desligar|close|quit|exit) (?:a |o )?aurora",
+        r"(?:saia|sair|exit|quit) (?:da|de) aurora",
+        r"(?:feche|fecha|fechar|encerre|encerrar|close|quit|exit) (?:o |a )?(?:app|aplicativo) aurora",
+        r"(?:close|quit|exit) aurora",
+    )
+    if any(re.fullmatch(pattern, value) for pattern in close_patterns):
+        return "exit"
+    return ""
 
 
 def _tts_gateway_config() -> tuple[str, dict[str, str]]:
@@ -608,6 +633,7 @@ class SvgHologram(QMainWindow):
     speech_playback_finished = Signal(str, str, object)
     visual_state_requested = Signal(str)
     approval_requested = Signal(object)
+    agent_task_finished = Signal()
 
     def __init__(self, svg_path: Path, listen_on_start: bool = False) -> None:
         super().__init__()
@@ -637,8 +663,17 @@ class SvgHologram(QMainWindow):
         self._runtime = None
         self._agent = None
         self._speech = None
+        self._task_lock = threading.Lock()
+        self._task_active = False
+        self._active_task_thread: Optional[threading.Thread] = None
+        self._active_approval_dialog = None
+        self._exit_after_task = False
+        self._allow_close = False
         self.approval_requested.connect(
             self._show_approval_dialog, Qt.ConnectionType.QueuedConnection
+        )
+        self.agent_task_finished.connect(
+            self._on_agent_task_finished, Qt.ConnectionType.QueuedConnection
         )
         self._init_runtime()
 
@@ -820,6 +855,45 @@ class SvgHologram(QMainWindow):
         self.listen_shortcut = QShortcut(QKeySequence("F8"), self)
         self.listen_shortcut.activated.connect(self.toggle_listening)
 
+        # Escape cancela a tarefa em curso; Ctrl+Shift+Q pede para encerrar.
+        self.cancel_shortcut = QShortcut(QKeySequence("Escape"), self)
+        self.cancel_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self.cancel_shortcut.activated.connect(self.cancel_current_task)
+        self.exit_shortcut = QShortcut(QKeySequence("Ctrl+Shift+Q"), self)
+        self.exit_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self.exit_shortcut.activated.connect(self.close)
+
+        # Controles sempre visíveis no HUD, independentes do campo de texto.
+        self.control_strip = QWidget(self)
+        self.control_strip.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        control_layout = QHBoxLayout(self.control_strip)
+        control_layout.setContentsMargins(3, 3, 3, 3)
+        control_layout.setSpacing(4)
+        self.cancel_task_btn = QPushButton("■ Cancelar", self.control_strip)
+        self.cancel_task_btn.setToolTip("Cancelar a instrução atual (Escape)")
+        self.cancel_task_btn.setFixedSize(98, 28)
+        self.cancel_task_btn.setEnabled(False)
+        self.cancel_task_btn.clicked.connect(self.cancel_current_task)
+        self.close_aurora_btn = QPushButton("× Sair", self.control_strip)
+        self.close_aurora_btn.setToolTip("Encerrar a Aurora (Ctrl+Shift+Q)")
+        self.close_aurora_btn.setFixedSize(62, 28)
+        self.close_aurora_btn.clicked.connect(self.close)
+        control_style = (
+            "QPushButton { color: #9dffff; background-color: rgba(8, 28, 42, 225); "
+            "border: 1px solid rgba(0, 200, 255, 190); border-radius: 6px; "
+            "padding: 3px 6px; font-family: 'Consolas', 'Courier New', monospace; font-size: 8pt; }"
+            "QPushButton:hover { background-color: rgba(0, 100, 135, 235); }"
+            "QPushButton:disabled { color: rgba(157, 255, 255, 90); "
+            "border-color: rgba(0, 200, 255, 65); background-color: rgba(8, 28, 42, 100); }"
+        )
+        self.cancel_task_btn.setStyleSheet(control_style)
+        self.close_aurora_btn.setStyleSheet(control_style)
+        control_layout.addWidget(self.cancel_task_btn)
+        control_layout.addWidget(self.close_aurora_btn)
+        self.control_strip.setFixedSize(172, 34)
+        self.control_strip.move(self.width() - self.control_strip.width() - 8, 8)
+        self.control_strip.raise_()
+
         if listen_on_start:
             QTimer.singleShot(600, self.start_listening)
 
@@ -856,13 +930,21 @@ class SvgHologram(QMainWindow):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         dialog.setDefaultButton(QMessageBox.StandardButton.No)
+        cancel_task_button = dialog.addButton(
+            "Cancelar tarefa", QMessageBox.ButtonRole.DestructiveRole
+        )
         dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
         dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        self._active_approval_dialog = dialog
 
         # Fecha a caixa automaticamente para que uma autorização pendente não bloqueie o agente.
         QTimer.singleShot(90_000, dialog.reject)
         try:
-            ticket.approved = dialog.exec() == QMessageBox.StandardButton.Yes
+            clicked = dialog.exec()
+            ticket.approved = clicked == QMessageBox.StandardButton.Yes
+            if dialog.clickedButton() is cancel_task_button:
+                ticket.approved = False
+                self.cancel_current_task(show_feedback=True)
             print(
                 f"[Aurora aprovação] ferramenta={getattr(request, 'tool', '?')} "
                 f"decisão={'autorizada' if ticket.approved else 'negada'}.",
@@ -872,6 +954,7 @@ class SvgHologram(QMainWindow):
             ticket.approved = False
             print(f"[Aurora aprovação] Falha na caixa de confirmação: {exc}", flush=True)
         finally:
+            self._active_approval_dialog = None
             ticket.event.set()
 
     def _init_runtime(self) -> None:
@@ -1923,6 +2006,113 @@ class SvgHologram(QMainWindow):
             return
         self.hide_inline_input()
 
+    def _dispatch_local_control_command(self, text: str) -> bool:
+        command = _classify_hud_control_command(text)
+        if command == "cancel":
+            self.cancel_current_task()
+            return True
+        if command == "exit":
+            self.close()
+            return True
+        return False
+
+    def _start_agent_task(self, message: str) -> None:
+        if self._agent is None:
+            self.visual_state_requested.emit("error")
+            self.show_caption_requested.emit(
+                "Runtime da Aurora não conectado. Verifique FREELLMAPI_API_KEY."
+            )
+            return
+
+        with self._task_lock:
+            if self._task_active:
+                self.show_caption_requested.emit(
+                    "Já existe uma tarefa em andamento. Para interrompê-la, diga "
+                    "'Aurora, cancele a tarefa' ou pressione Escape."
+                )
+                return
+            self._task_active = True
+
+        self.cancel_task_btn.setText("■ Cancelar")
+        self.cancel_task_btn.setEnabled(True)
+        self.show_caption_requested.emit(f"Você: {message}")
+        self.visual_state_requested.emit("thinking")
+
+        def _run() -> None:
+            try:
+                reply = self._agent.handle(message)
+                reply_text = getattr(reply, "text", "") or ""
+                status = str(getattr(reply, "status", "") or "").upper()
+                if status.endswith("CANCELLED"):
+                    self.show_caption_requested.emit("Tarefa cancelada.")
+                    self.visual_state_requested.emit("idle")
+                elif reply_text:
+                    self.speak_with_caption(f"Aurora: {reply_text}", reply_text)
+                else:
+                    self.visual_state_requested.emit("completed")
+            except Exception as exc:
+                if self._agent is not None and self._agent.cancel_event.is_set():
+                    self.show_caption_requested.emit("Tarefa cancelada.")
+                    self.visual_state_requested.emit("idle")
+                else:
+                    err = f"Erro ao processar: {exc}"
+                    self.speak_with_caption(err, "エラーが発生しました。", final_state="error")
+            finally:
+                self.agent_task_finished.emit()
+
+        worker = threading.Thread(target=_run, daemon=True, name="AuroraAgentTask")
+        self._active_task_thread = worker
+        try:
+            worker.start()
+        except Exception as exc:
+            with self._task_lock:
+                self._task_active = False
+            self.cancel_task_btn.setEnabled(False)
+            self.show_caption_requested.emit(f"Não consegui iniciar a tarefa: {exc}")
+            self.visual_state_requested.emit("error")
+
+    def cancel_current_task(self, show_feedback: bool = True) -> None:
+        with self._task_lock:
+            active = self._task_active
+        if not active:
+            if show_feedback:
+                self.show_caption_requested.emit("Não há nenhuma tarefa em andamento para cancelar.")
+            return
+
+        if self._agent is not None:
+            self._agent.cancel()
+        dialog = self._active_approval_dialog
+        if dialog is not None:
+            try:
+                dialog.reject()
+            except Exception:
+                pass
+        self.cancel_task_btn.setText("Cancelando…")
+        self.cancel_task_btn.setEnabled(False)
+        if show_feedback:
+            self.show_caption_requested.emit(
+                "Pedido de cancelamento enviado. Vou impedir novas ações assim que a operação atual retornar."
+            )
+            self.visual_state_requested.emit("idle")
+
+    def _on_agent_task_finished(self) -> None:
+        with self._task_lock:
+            self._task_active = False
+        self._active_task_thread = None
+        self.cancel_task_btn.setText("■ Cancelar")
+        self.cancel_task_btn.setEnabled(False)
+        if self._exit_after_task:
+            self._allow_close = True
+            QTimer.singleShot(0, self.close)
+
+    def _on_escape_shortcut(self) -> None:
+        with self._task_lock:
+            active = self._task_active
+        if active:
+            self.cancel_current_task()
+        elif self.input_container.isVisible():
+            self.hide_inline_input()
+
     def _submit_inline_message(self) -> None:
         if not self.input_container.isVisible():
             return
@@ -1932,24 +2122,9 @@ class SvgHologram(QMainWindow):
             self.show_caption_requested.emit("Digite uma mensagem primeiro.")
             self.speak("メッセージを入力してください。")
             return
-        self.show_caption_requested.emit(f"Você: {message}")
-        self.visual_state_requested.emit("thinking")
-        if self._agent is not None:
-            def _run():
-                try:
-                    reply = self._agent.handle(message)
-                    text = getattr(reply, "text", "") or ""
-                    if text:
-                        self.speak_with_caption(f"Aurora: {text}", text)
-                    else:
-                        self.visual_state_requested.emit("completed")
-                except Exception as exc:
-                    err = f"Erro ao processar: {exc}"
-                    self.speak_with_caption(err, "エラーが発生しました。", final_state="error")
-            threading.Thread(target=_run, daemon=True, name="AuroraAgentCall").start()
+        if self._dispatch_local_control_command(message):
             return
-        self.visual_state_requested.emit("error")
-        self.show_caption_requested.emit("Runtime da Aurora não conectado. Verifique FREELLMAPI_API_KEY.")
+        self._start_agent_task(message)
 
     def show_recognized_text(self, text: str) -> None:
         # Executado na thread principal por conexão de Signal.
@@ -1958,28 +2133,13 @@ class SvgHologram(QMainWindow):
     def process_recognized_text(self, text: str) -> None:
         if not text:
             return
-        t = text.strip()
-        if not t:
+        message = text.strip()
+        if not message:
             return
-        # O reconhecimento só chega aqui depois da wakeword; inicia o estado de pensamento.
-        self.show_caption_requested.emit(f"Você: {t}")
-        self.visual_state_requested.emit("thinking")
-        if self._agent is not None:
-            def _run():
-                try:
-                    reply = self._agent.handle(t)
-                    text_reply = getattr(reply, "text", "") or ""
-                    if text_reply:
-                        self.speak_with_caption(f"Aurora: {text_reply}", text_reply)
-                    else:
-                        self.visual_state_requested.emit("completed")
-                except Exception as exc:
-                    err = f"Erro ao processar: {exc}"
-                    self.speak_with_caption(err, "エラーが発生しました。", final_state="error")
-            threading.Thread(target=_run, daemon=True, name="AuroraAgentCallVoice").start()
+        # Comandos de controle são resolvidos localmente, sem depender do LLM.
+        if self._dispatch_local_control_command(message):
             return
-        self.visual_state_requested.emit("error")
-        self.show_caption_requested.emit("Runtime da Aurora não conectado.")
+        self._start_agent_task(message)
 
     def show_voice_status(self, message: str) -> None:
         print(f"[Aurora voz] {message}")
@@ -2009,6 +2169,32 @@ class SvgHologram(QMainWindow):
             self.start_listening()
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        if not self._allow_close:
+            answer = QMessageBox.question(
+                self,
+                "Aurora — encerrar",
+                (
+                    "Há uma tarefa em andamento. Deseja solicitar o cancelamento e encerrar "
+                    "a Aurora assim que a operação atual retornar?"
+                    if self._task_active
+                    else "Deseja realmente encerrar a Aurora?"
+                ),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+            if self._task_active:
+                self._exit_after_task = True
+                self.cancel_current_task(show_feedback=False)
+                self.show_caption_requested.emit(
+                    "Cancelando a tarefa antes de encerrar a Aurora…"
+                )
+                event.ignore()
+                return
+            self._allow_close = True
+
         self.animation_timer.stop()
         self.stop_listening()
         self._shutdown_gpt_sovits_direct()
