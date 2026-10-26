@@ -75,10 +75,11 @@ def main() -> int:
 
     settings = _read_env_file()
     settings.update(os.environ)
-    base_url = settings.get(
-        "AURORA_LLM_VISION_BASE_URL", "http://127.0.0.1:11434/v1"
-    ).strip().rstrip("/")
-    model = settings.get("AURORA_LLM_VISION_MODEL", "qwen2.5vl:3b").strip()
+    base_url = (
+        settings.get("AURORA_LLM_VISION_BASE_URL", "").strip()
+        or "http://127.0.0.1:11434/v1"
+    ).rstrip("/")
+    model = settings.get("AURORA_LLM_VISION_MODEL", "").strip() or "qwen2.5vl:3b"
     if not base_url or not model:
         print("ERRO: configure AURORA_LLM_VISION_BASE_URL e AURORA_LLM_VISION_MODEL.")
         return 2
