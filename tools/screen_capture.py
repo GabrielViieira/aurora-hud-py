@@ -44,11 +44,13 @@ def capture_monitors(
             image.thumbnail((max_width, max_width * 2))
 
             buffer = BytesIO()
+            # Q82 mantém texto e ícones legíveis a 960 px, evitando o custo extra
+            # de otimização JPEG em cada captura interativa.
             image.save(
                 buffer,
                 format="JPEG",
-                quality=88,
-                optimize=True,
+                quality=82,
+                optimize=False,
             )
 
             encoded = base64.b64encode(
