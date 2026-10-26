@@ -49,7 +49,7 @@ class DesktopCaptureFastTests(unittest.TestCase):
 
         self.assertTrue(result.ok, result.error)
         active_snapshot.assert_not_called()
-        capture_monitors.assert_called_once_with(max_width=960, monitor_index=1)
+        capture_monitors.assert_called_once_with(max_width=640, monitor_index=1)
         self.assertEqual(result.data["tempo_uia_ms"], 0)
         self.assertEqual(result.data["modo_uia"], "omitida_captura_rapida")
         self.assertTrue(result.data["data_url"].startswith("data:image/"))
@@ -97,7 +97,7 @@ class DesktopCaptureFastTests(unittest.TestCase):
 
         self.assertTrue(result.ok, result.error)
         active_snapshot.assert_called_once()
-        capture_monitors.assert_called_once_with(max_width=960, monitor_index=1)
+        capture_monitors.assert_called_once_with(max_width=640, monitor_index=1)
         self.assertTrue(result.data["data_url"].startswith("data:image/"))
 
 
