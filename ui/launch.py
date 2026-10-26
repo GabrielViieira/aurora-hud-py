@@ -873,7 +873,7 @@ class SvgHologram(QMainWindow):
         self.cancel_task_btn.setToolTip("Cancelar a instrução atual (Escape)")
         self.cancel_task_btn.setFixedSize(98, 28)
         self.cancel_task_btn.setEnabled(False)
-        self.cancel_task_btn.clicked.connect(self.cancel_current_task)
+        self.cancel_task_btn.clicked.connect(lambda: self.cancel_current_task())
         self.close_aurora_btn = QPushButton("× Sair", self.control_strip)
         self.close_aurora_btn.setToolTip("Encerrar a Aurora (Ctrl+Shift+Q)")
         self.close_aurora_btn.setFixedSize(62, 28)
