@@ -70,21 +70,27 @@ class LocalVisionRoutingTests(unittest.TestCase):
 
         self.assertIs(agent._provider_for_request(request), local)
 
-    def test_local_vision_request_omits_tools(self):
+    def test_local_vision_request_omits_tools_and_keeps_image(self):
         local = object()
         agent = self._agent(vision_provider=local)
         tools = [{"type": "function", "function": {"name": "capturar_tela"}}]
+        image_message = ChatMessage(
+            role="user",
+            content=[
+                {"type": "text", "text": "Captura visual da tela. Analise a imagem."},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+            ],
+        )
         request = LLMRequest(
             model="qwen2.5vl:3b",
             tools=tools,
             messages=[
-                ChatMessage(
-                    role="user",
-                    content=[
-                        {"type": "text", "text": "Descreva esta tela."},
-                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
-                    ],
-                )
+                ChatMessage(role="system", content="Instruções longas " * 3000),
+                ChatMessage(role="user", content="Uma solicitação antiga."),
+                ChatMessage(role="assistant", content="Resposta antiga."),
+                ChatMessage(role="user", content="Descreva a janela que está aberta."),
+                ChatMessage(role="tool", content="Resultado de ferramenta muito longo." * 50),
+                image_message,
             ],
         )
 
@@ -93,9 +99,12 @@ class LocalVisionRoutingTests(unittest.TestCase):
         self.assertIsNot(prepared, request)
         self.assertEqual(prepared.tools, [])
         self.assertEqual(prepared.model, request.model)
-        self.assertIs(prepared.messages, request.messages)
-        # A cópia é alterada, mas a requisição original continua com as ferramentas.
+        self.assertEqual(len(prepared.messages), 2)
+        self.assertEqual(prepared.messages[0].content, "Descreva a janela que está aberta.")
+        self.assertIs(prepared.messages[1], image_message)
+        # A solicitação original não é modificada para o provedor principal.
         self.assertEqual(request.tools, tools)
+        self.assertEqual(len(request.messages), 6)
 
     def test_main_provider_keeps_tools_for_image_requests(self):
         local = object()
