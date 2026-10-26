@@ -135,7 +135,19 @@ class FreeLLMClient:
     def _http_error(self, status: int, body: bytes) -> ProviderError:
         text = body.decode("utf-8", errors="replace")
         kind = ErrorKind.UNKNOWN
-        if status in (401, 403):
+        detail_lower = text.casefold()
+        token_limit_error = (
+            ("token" in detail_lower or "context length" in detail_lower or "prompt length" in detail_lower)
+            and any(term in detail_lower for term in (
+                "limit", "maximum", "max_", "exceed", "too large", "too many",
+                "atingido", "limite", "ultrapass",
+            ))
+        )
+        # Um 500 por excesso de tokens não melhora com retries idênticos; o agente
+        # fará uma tentativa explícita com contexto e schemas compactados.
+        if status >= 500 and token_limit_error:
+            kind = ErrorKind.BAD_REQUEST
+        elif status in (401, 403):
             kind = ErrorKind.AUTH
         elif status == 404:
             kind = ErrorKind.NOT_FOUND
