@@ -666,6 +666,7 @@ class SvgHologram(QMainWindow):
         self._speech = None
         self._task_lock = threading.RLock()
         self._task_active = False
+        self._task_cancel_pending = False
         self._active_task_thread: Optional[threading.Thread] = None
         self._active_approval_dialog = None
         self._exit_after_task = False
@@ -2145,6 +2146,11 @@ class SvgHologram(QMainWindow):
             return
         with self._task_lock:
             task_active = self._task_active
+            cancel_pending = self._task_cancel_pending
+        if cancel_pending:
+            self.cancel_task_btn.setText("Cancelando…")
+            self.cancel_task_btn.setEnabled(False)
+            return
         speech_active = self._speech_pending or self._speech_active
         self.cancel_task_btn.setEnabled(task_active or speech_active)
         if task_active:
@@ -2182,6 +2188,7 @@ class SvgHologram(QMainWindow):
             if self._speech_pending or self._speech_active:
                 self._cancel_speech_output()
             self._agent.reset_cancel()
+            self._task_cancel_pending = False
             self._task_active = True
 
         self._update_cancel_button()
@@ -2217,6 +2224,7 @@ class SvgHologram(QMainWindow):
         except Exception as exc:
             with self._task_lock:
                 self._task_active = False
+                self._task_cancel_pending = False
             self._update_cancel_button()
             self.show_caption_requested.emit(f"Não consegui iniciar a tarefa: {exc}")
             self.visual_state_requested.emit("error")
@@ -2230,6 +2238,9 @@ class SvgHologram(QMainWindow):
                 self.show_caption_requested.emit("Não há tarefa nem fala em andamento para cancelar.")
             return
 
+        if task_active:
+            with self._task_lock:
+                self._task_cancel_pending = True
         if task_active and self._agent is not None:
             self._agent.cancel()
         if speech_active:
@@ -2263,6 +2274,7 @@ class SvgHologram(QMainWindow):
     def _on_agent_task_finished(self) -> None:
         with self._task_lock:
             self._task_active = False
+            self._task_cancel_pending = False
         self._active_task_thread = None
         self._update_cancel_button()
         if self._exit_after_task:
