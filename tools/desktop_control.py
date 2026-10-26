@@ -12,13 +12,15 @@ from typing import Any
 
 from aurora.config.permissions import Risk
 from aurora.tools.base import ToolContext, ToolResult, ToolSpec
+from aurora.tools.search_perception import rank_search_candidates
 
 _TOOL_DESCRIPTION_CAPTURE = (
-    "Captura a tela atual e envia a imagem ao modelo visual, junto com uma leitura local opcional "
-    "da janela ativa e dos controles acessíveis do Windows. Os controles incluem campos de texto "
-    "sem nome quando a UI Automation os expõe; confira tipo, rótulo, ajuda e id de automação. "
-    "Interprete a função do controle mesmo que o idioma da interface seja diferente do usuário. "
-    "Use os nomes/retângulos quando disponíveis, confirme visualmente e recapture após cada ação. "
+    "Captura a tela e envia a imagem ao modelo visual com uma leitura local opcional dos controles acessíveis. "
+    "Cada controle recebe pontuação heurística de relação com pesquisa, considerando rótulo, ajuda, id de automação, "
+    "tipo e geometria; botões sem nome próximos a campos horizontais também podem ser candidatos a lupa. "
+    "Use pontuação e evidências como pistas, não como certeza: confira a imagem, inclusive ícones de lupa que não "
+    "apareçam na árvore de acessibilidade. Prefira a combinação de semântica, formato, posição e imagem. "
+    "Interprete a função mesmo com a interface em outro idioma. Coordenadas são pixels absolutos. "
     "Escolha um monitor pelo índice (1 é o monitor principal/primeiro listado)."
 )
 _TOOL_DESCRIPTION_MOUSE = (
@@ -148,9 +150,9 @@ def _active_window_snapshot(limit: int = 50) -> dict[str, Any]:
             from collections import deque
 
             scan_started = time.perf_counter()
-            scan_budget_s = 0.35
-            max_scan_nodes = 240
-            max_scan_depth = 5
+            scan_budget_s = 0.65
+            max_scan_nodes = 400
+            max_scan_depth = 7
             controls = []
             queue = deque([(window, 0)])
             while queue and len(controls) < max_scan_nodes:
@@ -195,9 +197,13 @@ def _active_window_snapshot(limit: int = 50) -> dict[str, Any]:
                 except Exception:
                     pass
                 if not name:
-                    if control_type != "Edit":
+                    # Botões sem rótulo podem ser ícones (por exemplo, uma lupa).
+                    # Mantê-los permite usar geometria e proximidade para classificá-los.
+                    if control_type not in {"Edit", "Button"}:
                         continue
-                    name = help_text or "[Campo de texto sem nome]"
+                    name = help_text or (
+                        "[Campo de texto sem nome]" if control_type == "Edit" else "[Botão sem nome]"
+                    )
                 name = re.sub(r"\s+", " ", name)[:180]
                 try:
                     if not control.is_visible():
@@ -231,12 +237,26 @@ def _active_window_snapshot(limit: int = 50) -> dict[str, Any]:
                 candidates.append(candidate)
             except Exception:
                 continue
-        candidates.sort(key=lambda item: (item["_priority"], item["topo"], item["esquerda"]))
+        # Coloca os candidatos mais promissores no topo para que o modelo não perca
+        # um campo de pesquisa entre dezenas de botões e itens de navegação.
+        candidates = rank_search_candidates(candidates, int(rect.right) - int(rect.left))
         snapshot["total_elementos_lidos"] = len(candidates)
         snapshot["elementos"] = [
             {key: value for key, value in item.items() if key != "_priority"}
             for item in candidates[:max(1, min(int(limit), 80))]
         ]
+        snapshot["resumo_pesquisa"] = [
+            {
+                "tipo": item["tipo"],
+                "nome": item["nome"],
+                "pontuacao_busca": item["pontuacao_busca"],
+                "confianca_busca": item["confianca_busca"],
+                "evidencias_busca": item["evidencias_busca"],
+                "centro_x": item["centro_x"],
+                "centro_y": item["centro_y"],
+            }
+            for item in candidates if item["pontuacao_busca"] >= 25
+        ][:8]
         snapshot["nota_coordenadas"] = (
             "Coordenadas dos controles estão em pixels absolutos da área de trabalho. "
             "centro_x/centro_y indicam o centro do controle; use apenas se o nome corresponder ao alvo."
@@ -291,6 +311,7 @@ def capture_screen(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
             "interface_acessivel": ui_snapshot,
         }
         ui_count = len(ui_snapshot.get("elementos", []))
+        search_count = len(ui_snapshot.get("resumo_pesquisa", []))
         active_title = str(ui_snapshot.get("janela_ativa") or "janela não identificada")
         return ToolResult(
             ok=True,
@@ -300,6 +321,7 @@ def capture_screen(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
                      f"Janela em primeiro plano: {active_title}. "
                      + (f"Leitura local encontrou {ui_count} controles acessíveis." if ui_snapshot.get("disponivel") else
                         "Leitura local de controles indisponível; use a imagem e não invente nomes de elementos.")
+                     + (f" Classificador heurístico destacou {search_count} possível(is) candidato(s) a busca; confira a pontuação, as evidências e a imagem." if ui_snapshot.get("disponivel") else "")
                      + " A imagem será enviada ao modelo para inspeção visual."),
             data={**metadata, "data_url": data_url},
         )
