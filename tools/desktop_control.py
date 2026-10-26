@@ -15,18 +15,24 @@ from aurora.tools.base import ToolContext, ToolResult, ToolSpec
 from aurora.tools.search_perception import rank_search_candidates
 
 _TOOL_DESCRIPTION_CAPTURE = (
-    "Captura a tela e envia a imagem ao modelo visual com uma leitura local opcional dos controles acessíveis. "
-    "Cada controle recebe pontuação heurística de relação com pesquisa, considerando rótulo, ajuda, id de automação, "
-    "tipo e geometria; botões sem nome próximos a campos horizontais também podem ser candidatos a lupa. "
-    "Use pontuação e evidências como pistas, não como certeza: confira a imagem, inclusive ícones de lupa que não "
-    "apareçam na árvore de acessibilidade. Prefira a combinação de semântica, formato, posição e imagem. "
-    "Interprete a função mesmo com a interface em outro idioma. Coordenadas são pixels absolutos. "
-    "Escolha um monitor pelo índice (1 é o monitor principal/primeiro listado)."
+    "Captura um monitor e retorna a imagem, dimensões, origem da captura e geometria da área de trabalho virtual. "
+    "Controles em interface_acessivel usam coordenadas absolutas do desktop; centro_x/centro_y podem ser usados "
+    "diretamente quando o nome do controle corresponde ao alvo. Para estimar um ponto pela imagem reduzida, "
+    "converta o ponto (u, v) da imagem capturada para desktop: "
+    "x = origem_x + u * largura_original / largura_capturada; "
+    "y = origem_y + v * altura_original / altura_capturada. "
+    "Não trate pixels da imagem reduzida como coordenadas absolutas. Coordenadas negativas só são válidas "
+    "quando estiverem dentro dos limites da área de trabalho virtual, por exemplo em um monitor à esquerda/acima. "
+    "Escolha um monitor pelo índice (1 é o primeiro listado)."
 )
 _TOOL_DESCRIPTION_MOUSE = (
-    "Controla o mouse na área de trabalho atual. Use capturar_tela antes para saber a posição dos elementos; "
-    "depois faça uma ação de mouse por chamada e confira o resultado com nova captura. "
-    "Coordenadas são pixels absolutos da área de trabalho virtual."
+    "Controla o mouse na área de trabalho virtual. Faça capturar_tela antes e prefira centro_x/centro_y do controle "
+    "acessível quando houver correspondência clara. Esses valores já são coordenadas absolutas: não os redimensione. "
+    "Se estimar o ponto pela imagem, transforme-o usando origem_x/origem_y e as dimensões original/capturada "
+    "retornadas pela captura. Use x/y absolutos, não coordenadas relativas à janela ou à imagem. "
+    "Não invente coordenadas negativas: só as use quando estiverem dentro dos limites reais da área de trabalho "
+    "virtual (monitores à esquerda/acima podem legitimamente ter coordenadas negativas). "
+    "Execute uma ação por chamada e confira o resultado com nova captura."
 )
 _TOOL_DESCRIPTION_KEYBOARD = (
     "Digita texto, pressiona uma tecla ou envia um atalho ao aplicativo em primeiro plano. "
@@ -299,6 +305,16 @@ def capture_screen(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         ui_snapshot = _active_window_snapshot()
         uia_ms = round((time.perf_counter() - uia_started) * 1000)
         total_ms = round((time.perf_counter() - total_started) * 1000)
+        try:
+            virtual_left, virtual_top, virtual_width, virtual_height = _virtual_bounds(_pyautogui())
+            virtual_bounds = {
+                "left": virtual_left,
+                "top": virtual_top,
+                "width": virtual_width,
+                "height": virtual_height,
+            }
+        except Exception:
+            virtual_bounds = None
         metadata = {
             "tempo_captura_ms": capture_ms,
             "tempo_uia_ms": uia_ms,
@@ -311,6 +327,7 @@ def capture_screen(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
             "altura_original": selected["height"],
             "largura_capturada": selected["captured_size"][0],
             "altura_capturada": selected["captured_size"][1],
+            "area_trabalho_virtual": virtual_bounds,
             "mime_type": selected.get("mime_type", "image/jpeg"),
             "interface_acessivel": ui_snapshot,
         }
@@ -322,6 +339,10 @@ def capture_screen(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
             summary=(f"Tela capturada: monitor {monitor_index}, "
                      f"{metadata['largura_capturada']}x{metadata['altura_capturada']} "
                      f"(captura {capture_ms} ms, UIA {uia_ms} ms). "
+                     + (f"Origem desktop da captura=({selected['left']}, {selected['top']}); "
+                        f"tamanho original={selected['width']}x{selected['height']}; "
+                        f"área de trabalho virtual={virtual_bounds}. " if virtual_bounds else "")
+                     
                      f"Janela em primeiro plano: {active_title}. "
                      + (f"Leitura local encontrou {ui_count} controles acessíveis." if ui_snapshot.get("disponivel") else
                         "Leitura local de controles indisponível; use a imagem e não invente nomes de elementos.")
