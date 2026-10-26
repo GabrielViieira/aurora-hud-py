@@ -849,7 +849,7 @@ class SvgHologram(QMainWindow):
         except Exception:
             details = "Ação protegida solicitada."
         dialog.setInformativeText(
-            details + "\\n\\nEscolha Sim para autorizar esta ação ou Não para recusá-la. "
+            details + "\n\nEscolha Sim para autorizar esta ação ou Não para recusá-la. "
             "O pedido expira automaticamente em 90 segundos."
         )
         dialog.setStandardButtons(
