@@ -15,8 +15,10 @@ from aurora.tools.base import ToolContext, ToolResult, ToolSpec
 
 _TOOL_DESCRIPTION_CAPTURE = (
     "Captura a tela atual e envia a imagem ao modelo visual, junto com uma leitura local opcional "
-    "da janela ativa e dos controles acessíveis do Windows. Use os nomes/retângulos dos controles "
-    "quando disponíveis, confirme visualmente e faça nova captura após cada ação importante. "
+    "da janela ativa e dos controles acessíveis do Windows. Os controles incluem campos de texto "
+    "sem nome quando a UI Automation os expõe; confira tipo, rótulo, ajuda e id de automação. "
+    "Interprete a função do controle mesmo que o idioma da interface seja diferente do usuário. "
+    "Use os nomes/retângulos quando disponíveis, confirme visualmente e recapture após cada ação. "
     "Escolha um monitor pelo índice (1 é o monitor principal/primeiro listado)."
 )
 _TOOL_DESCRIPTION_MOUSE = (
@@ -125,7 +127,8 @@ def _active_window_snapshot(limit: int = 50) -> dict[str, Any]:
             "DataItem", "Document", "Group",
         }
         priority_types = {
-            "Button": 0, "MenuItem": 0, "Hyperlink": 0, "Edit": 0,
+            # Campos editáveis são especialmente importantes para buscas e formulários.
+            "Edit": -1, "Button": 0, "MenuItem": 0, "Hyperlink": 0,
             "ComboBox": 1, "CheckBox": 1, "RadioButton": 1, "TabItem": 1,
             "ListItem": 2, "TreeItem": 2, "DataItem": 2, "Text": 3,
             "Document": 4, "Group": 5,
@@ -174,8 +177,27 @@ def _active_window_snapshot(limit: int = 50) -> dict[str, Any]:
                 if control_type not in useful_types:
                     continue
                 name = str(control.window_text() or getattr(info, "name", "") or "").strip()
+                # Campos Edit sem nome acessível são comuns em interfaces Chromium/Electron.
+                # Ainda assim podem ser o campo de pesquisa; mantenha o tipo e a posição.
+                automation_id = ""
+                help_text = ""
+                class_name = ""
+                try:
+                    automation_id = str(getattr(info, "automation_id", "") or "").strip()[:120]
+                except Exception:
+                    pass
+                try:
+                    help_text = str(getattr(info, "help_text", "") or "").strip()[:180]
+                except Exception:
+                    pass
+                try:
+                    class_name = str(getattr(info, "class_name", "") or "").strip()[:120]
+                except Exception:
+                    pass
                 if not name:
-                    continue
+                    if control_type != "Edit":
+                        continue
+                    name = help_text or "[Campo de texto sem nome]"
                 name = re.sub(r"\s+", " ", name)[:180]
                 try:
                     if not control.is_visible():
@@ -192,14 +214,21 @@ def _active_window_snapshot(limit: int = 50) -> dict[str, Any]:
                 if key in seen:
                     continue
                 seen.add(key)
-                candidates.append({
+                candidate = {
                     "_priority": priority_types.get(control_type, 9),
                     "tipo": control_type,
                     "nome": name,
                     "esquerda": left, "topo": top, "direita": right, "base": bottom,
                     "centro_x": (left + right) // 2,
                     "centro_y": (top + bottom) // 2,
-                })
+                }
+                if automation_id:
+                    candidate["id_automacao"] = automation_id
+                if help_text:
+                    candidate["ajuda"] = help_text
+                if class_name:
+                    candidate["classe"] = class_name
+                candidates.append(candidate)
             except Exception:
                 continue
         candidates.sort(key=lambda item: (item["_priority"], item["topo"], item["esquerda"]))
