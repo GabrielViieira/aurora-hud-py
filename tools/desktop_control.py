@@ -26,13 +26,14 @@ _TOOL_DESCRIPTION_CAPTURE = (
     "Escolha um monitor pelo índice (1 é o primeiro listado)."
 )
 _TOOL_DESCRIPTION_MOUSE = (
-    "Controla o mouse na área de trabalho virtual. Faça capturar_tela antes e prefira centro_x/centro_y do controle "
-    "acessível quando houver correspondência clara. Esses valores já são coordenadas absolutas: não os redimensione. "
-    "Se estimar o ponto pela imagem, transforme-o usando origem_x/origem_y e as dimensões original/capturada "
-    "retornadas pela captura. Use x/y absolutos, não coordenadas relativas à janela ou à imagem. "
-    "Não invente coordenadas negativas: só as use quando estiverem dentro dos limites reais da área de trabalho "
-    "virtual (monitores à esquerda/acima podem legitimamente ter coordenadas negativas). "
-    "Execute uma ação por chamada e confira o resultado com nova captura."
+    "Controla o mouse na área de trabalho virtual. Faça capturar_tela antes. Se houver um controle acessível "
+    "com nome EXATO ou id_automacao único, prefira enviar esse valor em 'controle' para clicá-lo diretamente "
+    "via UI Automation (para clicar, duplo-clique ou clique direito); isso evita estimar pixels pela imagem. "
+    "Caso contrário, use centro_x/centro_y do controle acessível quando houver correspondência clara; esses "
+    "valores já são coordenadas absolutas e não devem ser redimensionados. Se estimar o ponto pela imagem, "
+    "transforme-o usando origem_x/origem_y e as dimensões original/capturada retornadas pela captura. Use x/y "
+    "absolutos, não coordenadas relativas à janela ou à imagem. Coordenadas negativas só valem dentro dos limites "
+    "reais da área de trabalho virtual. Execute uma ação por chamada e verifique o resultado."
 )
 _TOOL_DESCRIPTION_KEYBOARD = (
     "Digita texto, pressiona uma tecla ou envia um atalho ao aplicativo em primeiro plano. "
