@@ -122,6 +122,69 @@ class DesktopCaptureFastTests(unittest.TestCase):
         self.assertNotIn("A" * 200, content)
 
 
+class _FakeRect:
+    def __init__(self, left: int, top: int, right: int, bottom: int) -> None:
+        self.left, self.top, self.right, self.bottom = left, top, right, bottom
+
+
+class _FakeInfo:
+    def __init__(self, control_type: str, name: str = "") -> None:
+        self.control_type = control_type
+        self.name = name
+
+
+class _FakeControl:
+    def __init__(self, control_type: str, name: str = "", children=()) -> None:
+        self.element_info = _FakeInfo(control_type, name)
+        self._name = name
+        self._children = list(children)
+        self._rect = _FakeRect(0, 0, 100, 30)
+
+    def window_text(self) -> str:
+        return self._name
+
+    def rectangle(self):
+        return self._rect
+
+    def children(self):
+        return list(self._children)
+
+
+class _FakeWindow(_FakeControl):
+    def __init__(self, children=(), deep: dict[str, list] | None = None) -> None:
+        super().__init__("Window", "Steam", children)
+        self.deep = deep or {}
+
+    def descendants(self, control_type: str | None = None, **kwargs):
+        return list(self.deep.get(control_type, []))
+
+
+class FastScanCollectionTests(unittest.TestCase):
+    """O BFS raso não alcança campos de busca do Chromium; o FindAll dirigido sim."""
+
+    def test_fast_scan_reaches_deep_input_control(self):
+        combo = _FakeControl("ComboBox", "Search the store")
+        shallow = _FakeControl("Text", "Browse")
+        window = _FakeWindow(children=[shallow], deep={"ComboBox": [combo]})
+
+        controls = desktop_control._collect_scan_controls(window, "fast")
+
+        self.assertIn(combo, controls)
+        self.assertIn(shallow, controls)
+
+    def test_fast_scan_keeps_working_when_targeted_search_fails(self):
+        shallow = _FakeControl("Text", "Browse")
+        window = _FakeWindow(children=[shallow])
+
+        def boom(control_type=None, **kwargs):
+            raise RuntimeError("UIA indisponível")
+
+        window.descendants = boom
+        controls = desktop_control._collect_scan_controls(window, "fast")
+
+        self.assertIn(shallow, controls)
+
+
 class VerificationPolicyTests(unittest.TestCase):
     """A verificação pós-ação deve preferir acessibilidade antes de gastar uma inferência visual."""
 

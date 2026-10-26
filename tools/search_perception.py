@@ -23,6 +23,8 @@ _NAVIGATION_TERMS = (
     "discover", "news", "menu", "sort", "navigation", "navegacao",
     "recomendacoes", "categorias", "biblioteca", "inicio", "configuracoes",
 )
+# Chromium/Electron expõem o campo de busca como ComboBox, não como Edit.
+_INPUT_TYPES = {"Edit", "ComboBox"}
 
 
 def _normalize(value: object) -> str:
@@ -52,7 +54,7 @@ def _score_candidate(candidate: dict[str, Any], window_width: int) -> tuple[int,
     if _has_term(name, _SEARCH_TERMS):
         # Rótulo em um campo editável é evidência mais forte que o mesmo texto
         # em um Text estático (que pode apenas rotular um campo próximo).
-        if control_type == "Edit":
+        if control_type in _INPUT_TYPES:
             score += 52
         elif control_type == "Button":
             score += 35
@@ -85,7 +87,7 @@ def _score_candidate(candidate: dict[str, Any], window_width: int) -> tuple[int,
     aspect_ratio = width / max(1, height)
     width_ratio = width / max(1, window_width)
 
-    if control_type == "Edit":
+    if control_type in _INPUT_TYPES:
         score += 10
         evidence.append("controle é um campo editável")
         if width >= 180:
@@ -194,7 +196,7 @@ def rank_search_candidates(
         else:
             confidence = "muito baixa"
         item["confianca_busca"] = confidence
-        if score >= 30 and item.get("tipo") == "Edit":
+        if score >= 30 and item.get("tipo") in _INPUT_TYPES:
             item["papel_sugerido"] = "possível campo de busca"
         elif score >= 30 and item.get("tipo") == "Button":
             item["papel_sugerido"] = "possível botão de busca"

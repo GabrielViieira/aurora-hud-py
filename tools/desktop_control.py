@@ -99,6 +99,61 @@ def _check_point(pyautogui, x: Any, y: Any, label: str = "posição") -> tuple[i
     return x, y
 
 
+_INPUT_CONTROL_TYPES = ("Edit", "ComboBox")
+
+
+def _collect_scan_controls(window: Any, scan_mode: str) -> list[Any]:
+    """Reúne os controles candidatos de uma janela para a leitura de acessibilidade.
+
+    No modo rápido combina duas leituras: uma varredura em largura rasa (dá
+    contexto: textos, botões, links) e um FindAll dirigido aos tipos de entrada.
+    Interfaces Chromium/Electron — Steam, Discord, VS Code — aninham o campo de
+    busca além do limite de profundidade, e ele desaparecia do resultado.
+    """
+    if scan_mode == "full":
+        # Modo completo preserva a leitura ampla para apps complexos.
+        try:
+            return list(window.descendants()[:500])
+        except Exception:
+            return []
+
+    # Varredura rápida: limita profundidade, número de nós e tempo total.
+    # Evita percorrer toda a árvore de acessibilidade de navegadores e IDEs.
+    from collections import deque
+
+    scan_started = time.perf_counter()
+    scan_budget_s = 0.35
+    max_scan_nodes = 160
+    max_scan_depth = 5
+    controls: list[Any] = []
+    queue = deque([(window, 0)])
+    while queue and len(controls) < max_scan_nodes:
+        if time.perf_counter() - scan_started >= scan_budget_s:
+            break
+        parent, depth = queue.popleft()
+        if depth >= max_scan_depth:
+            continue
+        try:
+            children = parent.children()
+        except Exception:
+            continue
+        for child in children:
+            controls.append(child)
+            if depth + 1 < max_scan_depth and len(controls) < max_scan_nodes:
+                queue.append((child, depth + 1))
+            if len(controls) >= max_scan_nodes:
+                break
+
+    # FindAll dirigido: ~150ms por tipo, enxerga qualquer profundidade. Só roda
+    # nos tipos de entrada, que são onde a busca costuma se esconder.
+    for control_type in _INPUT_CONTROL_TYPES:
+        try:
+            controls.extend(window.descendants(control_type=control_type))
+        except Exception:
+            continue
+    return controls
+
+
 def _active_window_snapshot(limit: int = 35) -> dict[str, Any]:
     """Lê nomes e retângulos de controles acessíveis da janela em primeiro plano.
 
@@ -153,39 +208,7 @@ def _active_window_snapshot(limit: int = 35) -> dict[str, Any]:
         candidates: list[dict[str, Any]] = []
         seen: set[tuple[Any, ...]] = set()
 
-        if scan_mode == "full":
-            # Modo completo preserva a leitura ampla para apps complexos.
-            try:
-                controls = window.descendants()[:500]
-            except Exception:
-                controls = []
-        else:
-            # Varredura rápida: limita profundidade, número de nós e tempo total.
-            # Evita percorrer toda a árvore de acessibilidade de navegadores e IDEs.
-            from collections import deque
-
-            scan_started = time.perf_counter()
-            scan_budget_s = 0.35
-            max_scan_nodes = 160
-            max_scan_depth = 5
-            controls = []
-            queue = deque([(window, 0)])
-            while queue and len(controls) < max_scan_nodes:
-                if time.perf_counter() - scan_started >= scan_budget_s:
-                    break
-                parent, depth = queue.popleft()
-                if depth >= max_scan_depth:
-                    continue
-                try:
-                    children = parent.children()
-                except Exception:
-                    continue
-                for child in children:
-                    controls.append(child)
-                    if depth + 1 < max_scan_depth and len(controls) < max_scan_nodes:
-                        queue.append((child, depth + 1))
-                    if len(controls) >= max_scan_nodes:
-                        break
+        controls = _collect_scan_controls(window, scan_mode)
 
         max_controls = 160 if scan_mode == "fast" else 500
         # Limite também o processamento dos elementos: consultas COM individuais

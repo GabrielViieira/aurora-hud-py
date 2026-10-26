@@ -84,6 +84,23 @@ class SearchPerceptionTests(unittest.TestCase):
         self.assertIn("rótulo contém termo de pesquisa", result[0]["evidencias_busca"])
         self.assertGreaterEqual(result[0]["pontuacao_busca"], 70)
 
+    def test_steam_combo_box_named_search_the_store_is_high_confidence(self):
+        # Geometria real da barra de busca do Steam (janela 1920x1040):
+        # o Chromium expõe o campo como ComboBox, não como Edit.
+        field = element("ComboBox", "Search the store", 954, 98, 1396, 132)
+        result = rank_search_candidates([field], window_width=1920)
+
+        self.assertGreaterEqual(result[0]["pontuacao_busca"], 70)
+        self.assertEqual(result[0]["confianca_busca"], "alta")
+        self.assertEqual(result[0]["papel_sugerido"], "possível campo de busca")
+
+    def test_wide_unnamed_combo_box_is_a_candidate(self):
+        field = element("ComboBox", "", 100, 20, 600, 54)
+        result = rank_search_candidates([field], window_width=1000)
+
+        self.assertGreaterEqual(result[0]["pontuacao_busca"], 30)
+        self.assertEqual(result[0]["papel_sugerido"], "possível campo de busca")
+
     def test_categories_is_not_a_search_candidate(self):
         categories = element("TabItem", "Categories", 20, 40, 130, 72)
         result = rank_search_candidates([categories], window_width=1000)
