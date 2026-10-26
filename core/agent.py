@@ -104,7 +104,7 @@ def _local_memory_intent(text: str) -> tuple[bool, str] | None:
 
     patterns = (
         r"^(?:por favor\s+)?(?:guarde|guardar|guarda)\s+"
-        r"(?:(?:na mem[oó]ria|para lembrar)\s+)?"
+        r"(?:(?:na mem[oó]ria|para lembrar)(?:\s*[:,-])?\s+)?"
         r"(?:(?:a|uma|esta|essa|seguinte)\s+)?"
         r"(?:(?:instru[cç][aã]o|regra|prefer[eê]ncia|nota|fato)\s*)?"
         r"(?::|,|-)?\s*(.*)$",
@@ -247,6 +247,11 @@ class AuroraAgent:
                 )
                 task.transition(TaskStatus.COMPLETED)
                 memory_status = "needs_details"
+            elif len(instruction) > 1500:
+                final_text = "A instrução é muito longa para uma memória única. Resuma-a para até 1500 caracteres e tente novamente."
+                task.error = "instrução excede 1500 caracteres"
+                task.transition(TaskStatus.FAILED)
+                memory_status = "too_long"
             else:
                 try:
                     memory_id = self.memory.remember(
