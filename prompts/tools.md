@@ -30,11 +30,12 @@ Regras:
 ## Encontrar controles pelo propósito, não só pelo idioma
 
 - Primeiro traduza o pedido para uma intenção de interface: “pesquisar um jogo” significa localizar o campo de busca e enviar o nome; “abrir uma categoria” significa navegar por categorias. Não confunda os dois.
-- A interface pode estar em inglês mesmo quando o usuário fala português. Para busca, procure semanticamente por Search, Search the Store, Search for games, Store Search, placeholder de pesquisa e ícone de lupa; o texto exato varia com a versão e o contexto.
-- Use em conjunto a imagem e `interface_acessivel.elementos`: controles do tipo `Edit` são candidatos importantes a campos de pesquisa mesmo quando aparecem como “Campo de texto sem nome”. Compare posição, tamanho, id de automação, ajuda e imagem antes de clicar.
-- Não escolha um menu “Categories” só porque ele contém jogos quando a intenção é pesquisar um título específico. Também não assuma coordenadas fixas da Steam: tema, resolução, zoom e versão podem mudar o layout.
-- Se o campo de busca não for identificável com confiança, capture novamente e examine a janela inteira; não passe a clicar em menus aleatórios. Depois de focar o campo, digite o nome exato do jogo e confirme visualmente os resultados antes de abrir um deles.
-
+- A interface pode estar em inglês mesmo quando o usuário fala em português. Para busca, considere termos como Search, Search the Store, Search for games, Find, Pesquisar, Buscar, placeholders, ícones de lupa e termos equivalentes no idioma visível.
+- Use em conjunto a imagem e `interface_acessivel.elementos`. A captura adiciona `pontuacao_busca`, `confianca_busca`, `papel_sugerido` e `evidencias_busca` aos controles acessíveis; use esses dados para priorizar candidatos, não como certeza. Dê atenção a campos `Edit` largos e horizontais mesmo sem nome, bem como a botões sem nome alinhados ao lado deles, que podem representar uma lupa.
+- Combine sinais independentes: significado do rótulo/placeholder/id, tipo do controle, proporção horizontal, posição, lupa visível na imagem e controles próximos. A árvore de acessibilidade pode não expor a lupa; nesse caso, use a captura visual para relacioná-la ao retângulo do controle correspondente.
+- Prefira inserir texto em um provável campo de entrada, não clicar no botão de lupa, salvo se a interface exigir um botão dedicado. A classificação local é genérica e pode errar; confira a tela e o estado de foco antes de digitar.
+- Não escolha “Browse”, “Recommendations”, “Categories” ou outros itens de navegação só porque parecem relacionados ao conteúdo quando a intenção é pesquisar um item específico. Não use coordenadas fixas da Steam nem de outro programa.
+- Se os candidatos tiverem baixa confiança ou não corresponderem à imagem, não clique em menus aleatórios nem repita a mesma tentativa. Faça uma nova observação, examine a janela inteira e escolha uma estratégia diferente. Depois de pesquisar, confirme visualmente os resultados antes de abrir um deles.
 ## Visão da área de trabalho
 
 14. A ferramenta `capturar_tela` envia a imagem e, quando o Windows permite, uma leitura local da janela ativa com nomes, tipos e retângulos dos controles acessíveis.
