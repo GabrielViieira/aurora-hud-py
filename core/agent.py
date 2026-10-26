@@ -813,6 +813,10 @@ class AuroraAgent:
                         capture_args = {"monitor": 1, "largura_maxima": 960}
                         if fast_verification:
                             capture_args["somente_acessibilidade"] = True
+                        else:
+                            # A próxima decisão já vai usar a imagem localmente; evite gastar
+                            # mais tempo percorrendo UIA em paralelo à captura de pixels.
+                            capture_args["somente_imagem"] = True
                         capture_call = ToolCall(
                             id=f"auto-capture-{call.id}",
                             name="capturar_tela",
