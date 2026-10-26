@@ -376,5 +376,256 @@ class VerificationPolicyTests(unittest.TestCase):
         self.assertEqual(launch, 0.45)
 
 
+def _search_candidate(tipo: str, nome: str, score: int, *, magnifier: bool = False, **extra) -> dict:
+    evidence = ["campo é um campo editável"] if tipo in {"Edit", "ComboBox"} else []
+    if magnifier:
+        evidence.append(
+            "há uma lupa (ícone ou botão de busca) dentro ou ao lado do campo; "
+            "é o padrão típico de barra de pesquisa"
+        )
+    return {
+        "tipo": tipo,
+        "nome": nome,
+        "pontuacao_busca": score,
+        "confianca_busca": "alta" if score >= 70 else "média" if score >= 50 else "baixa",
+        "evidencias_busca": evidence,
+        "centro_x": 100,
+        "centro_y": 100,
+        **extra,
+    }
+
+
+class SearchFieldChoiceTests(unittest.TestCase):
+    def test_named_steam_field_wins(self):
+        candidates = [
+            _search_candidate("ComboBox", "Search the store", 97, magnifier=True),
+            _search_candidate("Button", "Search", 56),
+        ]
+
+        chosen, reason = desktop_control._choose_search_field(candidates)
+
+        self.assertEqual(chosen["nome"], "Search the store")
+        self.assertIn("97", reason)
+
+    def test_unnamed_field_with_magnifier_is_chosen_alone(self):
+        candidates = [_search_candidate("ComboBox", "[Campo de texto sem nome]", 45, magnifier=True)]
+
+        chosen, _ = desktop_control._choose_search_field(candidates)
+
+        self.assertIsNotNone(chosen)
+
+    def test_weak_unnamed_field_without_magnifier_is_refused(self):
+        candidates = [_search_candidate("Edit", "[Campo de texto sem nome]", 41)]
+
+        chosen, reason = desktop_control._choose_search_field(candidates)
+
+        self.assertIsNone(chosen)
+        self.assertIn("sem lupa", reason)
+
+    def test_close_scores_are_refused_as_ambiguous(self):
+        candidates = [
+            _search_candidate("Edit", "Buscar produtos", 80, magnifier=True),
+            _search_candidate("Edit", "Mensagem", 70, magnifier=True),
+        ]
+
+        chosen, reason = desktop_control._choose_search_field(candidates)
+
+        self.assertIsNone(chosen)
+        self.assertIn("não escolho sozinho", reason)
+
+    def test_clear_winner_beats_a_distant_second(self):
+        candidates = [
+            _search_candidate("Edit", "Pesquisar no site", 88, magnifier=True),
+            _search_candidate("Edit", "Comentário", 40),
+        ]
+
+        chosen, _ = desktop_control._choose_search_field(candidates)
+
+        self.assertEqual(chosen["nome"], "Pesquisar no site")
+
+    def test_weak_second_field_does_not_block_a_magnifier_candidate(self):
+        # Um campo de texto comum (sem lupa, 41) não deve impedir a busca legítima (45 + lupa).
+        candidates = [
+            _search_candidate("ComboBox", "[Campo de texto sem nome]", 45, magnifier=True),
+            _search_candidate("Edit", "Comentário", 41),
+        ]
+
+        chosen, _ = desktop_control._choose_search_field(candidates)
+
+        self.assertEqual(chosen["pontuacao_busca"], 45)
+
+    def test_no_input_field_is_refused(self):
+        chosen, reason = desktop_control._choose_search_field(
+            [_search_candidate("Button", "Search", 56)]
+        )
+
+        self.assertIsNone(chosen)
+        self.assertIn("não há campo de entrada", reason)
+
+
+class SearchToolTests(unittest.TestCase):
+    def _ctx(self):
+        return object()
+
+    def test_empty_text_is_rejected(self):
+        result = desktop_control.pesquisar(self._ctx(), {"texto": "   "})
+
+        self.assertFalse(result.ok)
+
+    def test_refuses_and_lists_candidates_when_unsure(self):
+        snapshot = {
+            "disponivel": True,
+            "resumo_pesquisa": [
+                _search_candidate("Edit", "Comentário", 40),
+                _search_candidate("Button", "Search", 56),
+            ],
+        }
+        with patch.object(desktop_control, "_active_window_snapshot", return_value=snapshot):
+            result = desktop_control.pesquisar(self._ctx(), {"texto": "counter strike"})
+
+        self.assertFalse(result.ok)
+        self.assertIn("não identifiquei", result.summary)
+        self.assertIn("Comentário", result.summary)
+
+    def test_reports_missing_accessibility_without_guessing(self):
+        snapshot = {"disponivel": False, "motivo": "UI Automation desligada"}
+        with patch.object(desktop_control, "_active_window_snapshot", return_value=snapshot):
+            result = desktop_control.pesquisar(self._ctx(), {"texto": "counter strike"})
+
+        self.assertFalse(result.ok)
+        self.assertIn("UI Automation desligada", result.summary)
+
+    def test_mentions_minimized_window_when_no_control_is_read(self):
+        snapshot = {"disponivel": True, "resumo_pesquisa": [], "elementos": [], "total_elementos_lidos": 0}
+        with patch.object(desktop_control, "_active_window_snapshot", return_value=snapshot):
+            result = desktop_control.pesquisar(self._ctx(), {"texto": "counter strike"})
+
+        self.assertFalse(result.ok)
+        self.assertIn("minimizada", result.summary)
+
+    def test_does_not_submit_when_typing_was_not_confirmed(self):
+        calls: list[str] = []
+
+        class _FakePyAutoGui:
+            def press(self, key):
+                calls.append(f"press:{key}")
+
+        snapshot = {
+            "disponivel": True,
+            "resumo_pesquisa": [_search_candidate("ComboBox", "Search the store", 97, magnifier=True)],
+        }
+        clicked = {"controle": "Search the store", "tipo": "ComboBox", "id_automacao": "",
+                   "metodo": "uia_invoke", "centro_x": 1, "centro_y": 1}
+        with (
+            patch.object(desktop_control, "_active_window_snapshot", return_value=snapshot),
+            patch.object(desktop_control, "_active_uia_window", return_value="janela"),
+            patch.object(desktop_control, "_control_for_candidate", return_value="controle"),
+            patch.object(desktop_control, "_click_control", return_value=clicked),
+            patch.object(desktop_control, "_send_text"),
+            patch.object(desktop_control, "_focused_field_state",
+                         return_value={"nome": "Search the store", "tipo": "ComboBox", "valor": ""}),
+            patch.object(desktop_control, "_pyautogui", return_value=_FakePyAutoGui()),
+        ):
+            result = desktop_control.pesquisar(self._ctx(), {"texto": "counter strike"})
+
+        self.assertFalse(result.ok)
+        self.assertEqual(calls, [])
+        self.assertIn("NÃO enviada", result.summary)
+
+    def test_focus_on_document_is_reported_as_failure_without_submitting(self):
+        calls: list[str] = []
+
+        class _FakePyAutoGui:
+            def press(self, key):
+                calls.append(f"press:{key}")
+
+        snapshot = {
+            "disponivel": True,
+            "resumo_pesquisa": [_search_candidate("ComboBox", "Search the store", 97, magnifier=True)],
+        }
+        clicked = {"controle": "Search the store", "tipo": "ComboBox", "id_automacao": "",
+                   "metodo": "click_input", "centro_x": 1, "centro_y": 1}
+        with (
+            patch.object(desktop_control, "_active_window_snapshot", return_value=snapshot),
+            patch.object(desktop_control, "_active_uia_window", return_value="janela"),
+            patch.object(desktop_control, "_control_for_candidate", return_value="controle"),
+            patch.object(desktop_control, "_click_control", return_value=clicked),
+            patch.object(desktop_control, "_send_text"),
+            patch.object(desktop_control, "_focused_field_state",
+                         return_value={"nome": "Welcome to Steam", "tipo": "Document", "valor": "https://store"}),
+            patch.object(desktop_control, "_pyautogui", return_value=_FakePyAutoGui()),
+        ):
+            result = desktop_control.pesquisar(self._ctx(), {"texto": "counter strike"})
+
+        self.assertFalse(result.ok)
+        self.assertEqual(calls, [])
+        self.assertIn("não no campo de pesquisa", result.summary)
+
+    def test_empty_key_disables_submission(self):
+        calls: list[str] = []
+
+        class _FakePyAutoGui:
+            def press(self, key):
+                calls.append(f"press:{key}")
+
+        snapshot = {
+            "disponivel": True,
+            "resumo_pesquisa": [_search_candidate("ComboBox", "Search the store", 97, magnifier=True)],
+        }
+        clicked = {"controle": "Search the store", "tipo": "ComboBox", "id_automacao": "",
+                   "metodo": "click_input", "centro_x": 1, "centro_y": 1}
+        with (
+            patch.object(desktop_control, "_active_window_snapshot", return_value=snapshot),
+            patch.object(desktop_control, "_active_uia_window", return_value="janela"),
+            patch.object(desktop_control, "_control_for_candidate", return_value="controle"),
+            patch.object(desktop_control, "_click_control", return_value=clicked),
+            patch.object(desktop_control, "_send_text"),
+            patch.object(desktop_control, "_focused_field_state",
+                         return_value={"nome": "Search the store", "tipo": "ComboBox", "valor": "counter strike"}),
+            patch.object(desktop_control, "_pyautogui", return_value=_FakePyAutoGui()),
+        ):
+            result = desktop_control.pesquisar(self._ctx(), {"texto": "counter strike", "tecla": ""})
+
+        self.assertTrue(result.ok)
+        self.assertEqual(calls, [])
+        self.assertIsNone(result.data["tecla_enviada"])
+
+    def test_types_confirms_and_submits_in_one_call(self):
+        calls: list[str] = []
+
+        class _FakePyAutoGui:
+            def press(self, key):
+                calls.append(f"press:{key}")
+
+        snapshot = {
+            "disponivel": True,
+            "resumo_pesquisa": [_search_candidate("ComboBox", "Search the store", 97, magnifier=True)],
+        }
+        typed = {
+            "controle": "Search the store",
+            "id_automacao": "",
+            "tipo": "ComboBox",
+            "metodo": "click_input",
+            "centro_x": 100,
+            "centro_y": 100,
+        }
+        state = {"nome": "Search the store", "tipo": "ComboBox", "valor": "counter strike"}
+        with (
+            patch.object(desktop_control, "_active_window_snapshot", return_value=snapshot),
+            patch.object(desktop_control, "_active_uia_window", return_value="janela"),
+            patch.object(desktop_control, "_control_for_candidate", return_value="controle"),
+            patch.object(desktop_control, "_click_control", return_value=typed) as click,
+            patch.object(desktop_control, "_send_text", side_effect=lambda *a, **k: calls.append("send")),
+            patch.object(desktop_control, "_focused_field_state", return_value=state),
+            patch.object(desktop_control, "_pyautogui", return_value=_FakePyAutoGui()),
+        ):
+            result = desktop_control.pesquisar(self._ctx(), {"texto": "counter strike"})
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.data["confirmado"])
+        self.assertEqual(calls, ["send", "press:enter"])
+        self.assertTrue(click.called)
+
+
 if __name__ == "__main__":
     unittest.main()

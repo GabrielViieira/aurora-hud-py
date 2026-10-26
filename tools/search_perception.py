@@ -70,7 +70,10 @@ def _score_candidate(candidate: dict[str, Any], window_width: int) -> tuple[int,
         score += 34
         evidence.append("id de automação indica pesquisa")
     if _has_term(class_name, _SEARCH_TERMS):
-        score += 12
+        # Em campo editável, uma classe como "searchboxInput" é evidência forte:
+        # é o que sobra quando o Chromium não expõe nome, placeholder nem a lupa
+        # (caso real: caixa de busca do Google).
+        score += 20 if control_type in _INPUT_TYPES else 12
         evidence.append("classe contém termo de pesquisa")
 
     filter_fields = (name, help_text, automation_id)

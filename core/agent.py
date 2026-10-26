@@ -44,6 +44,8 @@ _DO_NOT_REMEMBER_RE = re.compile(r"(?i)\b(não (?:registre|guarde|salve|anote)|e
 # bloqueada para impedir ciclos do LLM que insistem na mesma ação sem progresso.
 _MAX_IDENTICAL_ACTION_EXECUTIONS = 2
 _NON_MUTATING_DESKTOP_TOOLS = frozenset({"capturar_tela", "listar_aplicativos"})
+# Ferramentas que já confirmam o próprio efeito e não precisam de captura automática.
+_SELF_VERIFYING_DESKTOP_TOOLS = frozenset({"pesquisar"})
 
 # Um provedor pode reiniciar seu timeout de socket conforme recebe bytes.
 # Impomos também um prazo de parede por chamada para que o HUD não fique
@@ -383,6 +385,9 @@ def _should_auto_capture_after_action(
 ) -> bool:
     """Diz se uma execução bem-sucedida deve ser seguida de captura visual automática."""
     if name in _NON_MUTATING_DESKTOP_TOOLS:
+        return False
+    # "pesquisar" já devolve o valor lido no campo; uma captura extra só custaria tempo.
+    if name in _SELF_VERIFYING_DESKTOP_TOOLS:
         return False
     # Abrir uma URL inicia/navega no navegador, embora sua categoria seja "sistema".
     if name == "abrir_url":
@@ -1142,7 +1147,7 @@ class AuroraAgent:
                 vision_attachments: list[tuple[str, str]] = []
                 vision_warnings: list[str] = []
                 desktop_tool_names = {
-                    "capturar_tela", "controlar_mouse", "controlar_teclado",
+                    "capturar_tela", "controlar_mouse", "controlar_teclado", "pesquisar",
                     "abrir_aplicativo", "restaurar_aplicativo", "abrir_url",
                 }
                 desktop_calls = [call.name for call in response.tool_calls if call.name in desktop_tool_names]

@@ -120,6 +120,21 @@ class SearchPerceptionTests(unittest.TestCase):
 
         self.assertTrue(any("lupa" in clue for clue in by_type["ComboBox"]["evidencias_busca"]))
 
+    def test_search_class_on_unnamed_input_is_enough_evidence(self):
+        # Caso real do Google: o campo não tem nome, placeholder nem lupa exposta;
+        # só a classe "searchboxInputFontClass" indica o que ele é.
+        field = element(
+            "Edit", "", 387, 30, 1004, 50,
+            classe="searchboxInputFontClass gb_Le aJh afOp8c",
+        )
+        plain = element("Edit", "", 308, 908, 860, 932, classe="ITIRGe")
+        result = rank_search_candidates([plain, field], window_width=1920)
+        by_rect = {item["esquerda"]: item for item in result}
+
+        self.assertGreaterEqual(by_rect[387]["pontuacao_busca"], 50)
+        self.assertEqual(by_rect[387]["papel_sugerido"], "possível campo de busca")
+        self.assertLess(by_rect[308]["pontuacao_busca"], 50)
+
     def test_categories_is_not_a_search_candidate(self):
         categories = element("TabItem", "Categories", 20, 40, 130, 72)
         result = rank_search_candidates([categories], window_width=1000)

@@ -46,6 +46,15 @@ _TOOL_DESCRIPTION_MOUSE = (
     "absolutos, não coordenadas relativas à janela ou à imagem. Coordenadas negativas só valem dentro dos limites "
     "reais da área de trabalho virtual. Execute uma ação por chamada e verifique o resultado."
 )
+_TOOL_DESCRIPTION_SEARCH = (
+    "Pesquisa em qualquer aplicativo numa única chamada: encontra a barra de pesquisa pela anatomia "
+    "(campo de uma linha largo + rótulo/placeholder com search/pesquisar/busca/find + lupa dentro ou ao lado), "
+    "foca o campo, digita o texto, confirma o que realmente entrou e pressiona Enter. "
+    "Não depende do nome do aplicativo. Se a evidência for fraca ou houver empate entre campos, "
+    "recusa em vez de chutar e devolve os candidatos com pontuação para você escolher com controlar_mouse. "
+    "Prefira esta ferramenta a clicar e digitar manualmente sempre que o pedido for 'pesquise/procure X'."
+)
+
 _TOOL_DESCRIPTION_KEYBOARD = (
     "Digita texto, pressiona uma tecla ou envia um atalho ao aplicativo em primeiro plano. "
     "Use capturar_tela para confirmar qual janela está ativa e verificar o resultado. "
@@ -156,12 +165,16 @@ def _collect_scan_controls(window: Any, scan_mode: str) -> list[Any]:
 
     # FindAll dirigido: ~150ms por tipo, enxerga qualquer profundidade. Só roda
     # nos tipos de entrada, que são onde a busca costuma se esconder.
+    directed: list[Any] = []
     for control_type in _INPUT_CONTROL_TYPES:
         try:
-            controls.extend(window.descendants(control_type=control_type))
+            directed.extend(window.descendants(control_type=control_type))
         except Exception:
             continue
-    return controls
+    # Campos de entrada vêm PRIMEIRO: são poucos, são o alvo principal e, no fim
+    # da lista, eram cortados pelo orçamento de processamento antes de serem lidos
+    # (o ComboBox do Steam ficava invisível para o classificador de busca).
+    return directed + controls
 
 
 def _active_window_snapshot(limit: int = 35) -> dict[str, Any]:
@@ -555,58 +568,37 @@ def _match_accessible_controls(window: Any, target: str) -> dict[tuple[Any, ...]
     return found
 
 
-def _perform_accessible_mouse_action(
-    target: str, action: str, window: Any | None = None
+def _click_control(
+    control: Any, action: str, window: Any | None = None, target: str = ""
 ) -> dict[str, Any]:
-    """Atinge um controle UIA por nome/AutomationId, sem inferir coordenadas da imagem."""
-    if not str(target or "").strip():
-        raise ValueError("controle precisa conter um nome ou id de automação exato.")
-    if window is None:
-        window = _active_uia_window()
-
-    found = _match_accessible_controls(window, target)
-
-    if not found:
-        raise ValueError(
-            f"nenhum controle visível corresponde exatamente a {target!r}; "
-            "use o nome/id retornado por capturar_tela ou use coordenadas verificadas."
-        )
-    if len(found) != 1:
-        raise ValueError(
-            f"o controle {target!r} corresponde a {len(found)} elementos; "
-            "use o id de automação para distinguir o alvo."
-        )
-
-    control = next(iter(found.values()))
+    """Executa a ação de mouse num controle já resolvido, focando antes de clicar."""
+    label = target or _control_details(control)["nome"] or "controle"
     try:
         if not control.is_visible():
-            raise ValueError(f"controle {target!r} não está visível.")
+            raise ValueError(f"controle {label!r} não está visível.")
         if not control.is_enabled():
-            raise ValueError(f"controle {target!r} está desabilitado.")
+            raise ValueError(f"controle {label!r} está desabilitado.")
     except AttributeError:
         pass
 
     # Ativar a janela antes de clicar: numa janela inativa o primeiro clique costuma
     # apenas trazê-la para frente, sem focar o campo, e o texto digitado se perde.
-    try:
-        window.set_focus()
-    except Exception:
-        pass
+    if window is not None:
+        try:
+            window.set_focus()
+        except Exception:
+            pass
     try:
         control.set_focus()
     except Exception:
         pass
-    try:
-        if not control.is_visible():
-            raise ValueError(f"controle {target!r} não está visível.")
-        if not control.is_enabled():
-            raise ValueError(f"controle {target!r} está desabilitado.")
-    except AttributeError:
-        pass
 
     method = "click_input"
     if action == "clicar":
-        invoke = getattr(control, "invoke", None)
+        control_type = _control_details(control)["tipo"]
+        # Em campos de texto, InvokePattern não coloca o cursor: o texto digitado
+        # depois se perde. Para Edit/ComboBox o clique real é obrigatório.
+        invoke = None if control_type in _INPUT_CONTROL_TYPES else getattr(control, "invoke", None)
         if callable(invoke):
             try:
                 invoke()
@@ -634,13 +626,38 @@ def _perform_accessible_mouse_action(
     bounds = control.rectangle()
     details = _control_details(control)
     return {
-        "controle": details["nome"][:180] or target,
+        "controle": details["nome"][:180] or label,
         "id_automacao": details["auto_id"][:120],
         "tipo": details["tipo"],
         "metodo": method,
         "centro_x": (int(bounds.left) + int(bounds.right)) // 2,
         "centro_y": (int(bounds.top) + int(bounds.bottom)) // 2,
     }
+
+
+def _perform_accessible_mouse_action(
+    target: str, action: str, window: Any | None = None
+) -> dict[str, Any]:
+    """Atinge um controle UIA por nome/AutomationId, sem inferir coordenadas da imagem."""
+    if not str(target or "").strip():
+        raise ValueError("controle precisa conter um nome ou id de automação exato.")
+    if window is None:
+        window = _active_uia_window()
+
+    found = _match_accessible_controls(window, target)
+
+    if not found:
+        raise ValueError(
+            f"nenhum controle visível corresponde exatamente a {target!r}; "
+            "use o nome/id retornado por capturar_tela ou use coordenadas verificadas."
+        )
+    if len(found) != 1:
+        raise ValueError(
+            f"o controle {target!r} corresponde a {len(found)} elementos; "
+            "use o id de automação para distinguir o alvo."
+        )
+
+    return _click_control(next(iter(found.values())), action, window=window, target=target)
 
 
 def control_mouse(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
@@ -743,7 +760,7 @@ def _typing_confirmation(typed: str, state: dict[str, str] | None) -> tuple[bool
     wanted = re.sub(r"\s+", " ", str(typed or "")).strip().casefold()
     if not wanted:
         return None, f"{name!r}: nada a confirmar."
-    if control_type not in {"Edit", "ComboBox"}:
+    if control_type not in _INPUT_CONTROL_TYPES:
         # Chromium às vezes devolve o documento inteiro como elemento focado mesmo
         # com um campo ativo; afirmar "não entrou" aqui geraria falso negativo.
         return None, (
@@ -780,6 +797,33 @@ def _normalize_key(value: object) -> str:
     return _KEY_ALIASES.get(key, key)
 
 
+def _send_text(pyautogui: Any, text: str, interval: float = 0.008) -> None:
+    """Digita texto via clipboard (mais confiável para Unicode no Windows).
+
+    `write()` não lida com todos os caracteres; o clipboard preserva acentos e
+    símbolos. O clipboard anterior é restaurado ao final.
+    """
+    clipboard_module = None
+    old_clipboard = None
+    copied = False
+    try:
+        import pyperclip as clipboard_module
+
+        old_clipboard = clipboard_module.paste()
+        clipboard_module.copy(text)
+        copied = True
+        pyautogui.hotkey("ctrl", "v")
+        time.sleep(0.15)  # dá tempo para o aplicativo ler o clipboard
+    except Exception:
+        pyautogui.write(text, interval=interval)
+    finally:
+        if clipboard_module is not None and copied:
+            try:
+                clipboard_module.copy(old_clipboard or "")
+            except Exception:
+                pass
+
+
 def control_keyboard(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     del ctx
     try:
@@ -794,25 +838,7 @@ def control_keyboard(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
             interval = float(args.get("intervalo", 0.008))
             if not 0 <= interval <= 0.1:
                 return ToolResult.fail("intervalo precisa ficar entre 0 e 0.1 segundo")
-            # write() não lida com todos os caracteres Unicode no Windows; clipboard paste é mais confiável.
-            clipboard_module = None
-            old_clipboard = None
-            copied = False
-            try:
-                import pyperclip as clipboard_module
-                old_clipboard = clipboard_module.paste()
-                clipboard_module.copy(text)
-                copied = True
-                pyautogui.hotkey("ctrl", "v")
-                time.sleep(0.15)  # dá tempo para o aplicativo ler o clipboard
-            except Exception:
-                pyautogui.write(text, interval=interval)
-            finally:
-                if clipboard_module is not None and copied:
-                    try:
-                        clipboard_module.copy(old_clipboard or "")
-                    except Exception:
-                        pass
+            _send_text(pyautogui, text, interval=interval)
             # Lê o campo em foco depois de digitar: sem isso o agente anunciava
             # sucesso mesmo quando o texto não entrava em lugar nenhum.
             state = _focused_field_state()
@@ -856,6 +882,206 @@ def control_keyboard(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         return ToolResult.fail("ação de teclado inválida")
     except Exception as exc:
         return ToolResult.fail(f"Ação de teclado não executada: {type(exc).__name__}: {exc}")
+
+
+_MIN_SEARCH_SCORE = 50
+_MIN_SEARCH_SCORE_WITH_MAGNIFIER = 42
+_SEARCH_AMBIGUITY_MARGIN = 20
+
+
+def _has_magnifier_evidence(candidate: dict[str, Any]) -> bool:
+    return any("lupa" in str(clue).casefold() for clue in candidate.get("evidencias_busca") or [])
+
+
+def _choose_search_field(candidates: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, str]:
+    """Escolhe o campo de busca pela evidência anatômica, não pelo nome do app.
+
+    Age sozinho quando o melhor campo é claro; em empate ou evidência fraca,
+    recusa e explica o motivo — melhor devolver candidatos do que digitar no
+    campo errado.
+    """
+    inputs = [
+        candidate for candidate in candidates
+        if str(candidate.get("tipo") or "") in _INPUT_CONTROL_TYPES
+    ]
+    inputs.sort(key=lambda item: -int(item.get("pontuacao_busca", 0) or 0))
+    if not inputs:
+        return None, "não há campo de entrada (Edit/ComboBox) na janela ativa"
+
+    best = inputs[0]
+    score = int(best.get("pontuacao_busca", 0) or 0)
+    has_magnifier = _has_magnifier_evidence(best)
+    if score < _MIN_SEARCH_SCORE and not (has_magnifier and score >= _MIN_SEARCH_SCORE_WITH_MAGNIFIER):
+        return None, (
+            f"o melhor campo de entrada pontuou {score}, abaixo do mínimo para agir sem confirmação"
+            + ("" if has_magnifier else " e sem lupa ao lado")
+        )
+
+    if len(inputs) > 1:
+        # Só conta como ambiguidade outro campo que também tenha evidência suficiente
+        # para ser barra de pesquisa; um campo de texto comum não deve bloquear a ação.
+        rivals = [
+            candidate for candidate in inputs[1:]
+            if int(candidate.get("pontuacao_busca", 0) or 0) >= _MIN_SEARCH_SCORE
+            or (
+                _has_magnifier_evidence(candidate)
+                and int(candidate.get("pontuacao_busca", 0) or 0) >= _MIN_SEARCH_SCORE_WITH_MAGNIFIER
+            )
+        ]
+        if rivals:
+            second_score = int(rivals[0].get("pontuacao_busca", 0) or 0)
+            if score - second_score < _SEARCH_AMBIGUITY_MARGIN:
+                return None, (
+                    f"há {len(inputs)} campos com pontuação próxima ({score} e {second_score}); "
+                    "não escolho sozinho"
+                )
+
+    return best, f"melhor campo com pontuação {score} ({best.get('confianca_busca') or 'sem confiança'})"
+
+
+def _search_candidates_brief(candidates: list[dict[str, Any]], limit: int = 5) -> str:
+    if not candidates:
+        return "nenhum candidato"
+    parts = []
+    for candidate in candidates[:limit]:
+        parts.append(
+            f"{candidate.get('nome')!r} [{candidate.get('tipo')}] "
+            f"pontuação {candidate.get('pontuacao_busca')}"
+        )
+    return "; ".join(parts)
+
+
+def _control_for_candidate(window: Any, candidate: dict[str, Any]) -> Any | None:
+    """Wrapper UIA do candidato, casado pelo tipo e pelo retângulo exato.
+
+    `from_point` pode devolver um ícone interno (a lupa) no lugar do campo, e
+    InvokePattern num ícone não coloca o cursor no texto. Casar o retângulo
+    garante que o clique vá no próprio campo de entrada.
+    """
+    control_type = str(candidate.get("tipo") or "")
+    if not control_type:
+        return None
+    try:
+        controls = window.descendants(control_type=control_type)
+    except Exception:
+        return None
+    target = (
+        int(candidate.get("esquerda", -1)), int(candidate.get("topo", -1)),
+        int(candidate.get("direita", -1)), int(candidate.get("base", -1)),
+    )
+    for control in controls:
+        try:
+            rect = control.rectangle()
+            bounds = (int(rect.left), int(rect.top), int(rect.right), int(rect.bottom))
+            if bounds == target:
+                return control
+        except Exception:
+            continue
+    return None
+
+
+def pesquisar(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    """Localiza a barra de pesquisa pela anatomia, digita e confirma numa só chamada."""
+    del ctx
+    try:
+        text = str(args.get("texto", "")).strip()
+        if not text:
+            return ToolResult.fail("texto de busca vazio")
+        if len(text) > 1500:
+            return ToolResult.fail("texto excede o limite de 1500 caracteres")
+        # tecla="" desliga o Enter; omitir usa "enter".
+        raw_key = str(args.get("tecla", "enter") or "").strip().lower() if "tecla" in args else "enter"
+        submit_key = _normalize_key(raw_key) if raw_key else ""
+        if submit_key and (not _KEY_RE.fullmatch(submit_key) or submit_key == "win"):
+            return ToolResult.fail("tecla de confirmação inválida ou não permitida")
+
+        snapshot = _active_window_snapshot(limit=80)
+        if not snapshot.get("disponivel"):
+            return ToolResult.fail(
+                "não consegui ler a interface por acessibilidade ("
+                + str(snapshot.get("motivo") or "motivo desconhecido")
+                + "). Use capturar_tela com imagem e controle os campos manualmente."
+            )
+
+        # "elementos" tem os retângulos (necessários para achar o controle exato);
+        # "resumo_pesquisa" é o resumo curto e serve de reserva.
+        ranked = list(snapshot.get("elementos") or snapshot.get("resumo_pesquisa") or [])
+        chosen, reason = _choose_search_field(ranked)
+        if chosen is None:
+            hint = ""
+            if int(snapshot.get("total_elementos_lidos") or 0) == 0:
+                hint = (
+                    " A janela ativa não expôs nenhum controle: verifique se ela está "
+                    "minimizada, atrás de outra janela ou se o aplicativo não oferece acessibilidade."
+                )
+            return ToolResult.fail(
+                f"não identifiquei a barra de pesquisa com segurança: {reason}. "
+                f"Candidatos: {_search_candidates_brief(ranked)}. "
+                "Se algum for o campo certo, use controlar_mouse com o nome dele." + hint
+            )
+
+        window = _active_uia_window()
+        pyautogui = _pyautogui()
+        control = _control_for_candidate(window, chosen)
+        if control is not None:
+            performed = _click_control(control, "clicar", window=window, target=str(chosen.get("nome") or ""))
+        else:
+            # Sem wrapper confiável, o clique usa o centro do retângulo lido do UIA
+            # (geometria medida, não estimada da imagem).
+            try:
+                window.set_focus()
+            except Exception:
+                pass
+            pyautogui.click(int(chosen.get("centro_x", 0)), int(chosen.get("centro_y", 0)))
+            time.sleep(0.08)
+            performed = {
+                "controle": str(chosen.get("nome") or ""),
+                "id_automacao": str(chosen.get("id_automacao") or ""),
+                "tipo": str(chosen.get("tipo") or ""),
+                "metodo": "clique_coordenada_uia",
+                "centro_x": int(chosen.get("centro_x", 0)),
+                "centro_y": int(chosen.get("centro_y", 0)),
+            }
+
+        _send_text(pyautogui, text)
+        state = _focused_field_state()
+        confirmed, message = _typing_confirmation(text, state)
+        focused_in_input = state is not None and str(state.get("tipo") or "") in _INPUT_CONTROL_TYPES
+        # Foco fora de um campo (ex.: o documento do Chromium) significa que o
+        # clique não colocou o cursor no texto: nada foi digitado de fato.
+        succeeded = confirmed is True or (confirmed is None and (state is None or focused_in_input))
+        if state is not None and not focused_in_input:
+            message += (
+                f" O foco ficou em {state.get('tipo')} {state.get('nome')!r}, não no campo de pesquisa; "
+                "o texto não entrou. Clique no campo com controlar_mouse e digite de novo."
+            )
+        # Só confirma no aplicativo se o texto realmente entrou; Enter num campo vazio
+        # poderia submeter um formulário ou acionar outro botão.
+        submitted = bool(submit_key) and succeeded
+        if submitted:
+            pyautogui.press(submit_key)
+        return ToolResult(
+            ok=succeeded,
+            summary=(
+                f"Pesquisei {text!r} no campo {performed['controle']!r} "
+                f"({performed['tipo']}, pontuação {chosen.get('pontuacao_busca')}). {message}"
+                + (f" Tecla {submit_key} enviada." if submitted
+                   else f" Tecla {submit_key} NÃO enviada porque o texto não foi confirmado."
+                   if submit_key else "")
+            ),
+            data={
+                "texto": text,
+                "campo": performed,
+                "pontuacao_busca": chosen.get("pontuacao_busca"),
+                "confianca_busca": chosen.get("confianca_busca"),
+                "evidencias_busca": chosen.get("evidencias_busca"),
+                "confirmado": confirmed,
+                "campo_em_foco": state,
+                "tecla_enviada": submit_key if submitted else None,
+            },
+        )
+    except Exception as exc:
+        return ToolResult.fail(f"Pesquisa não executada: {type(exc).__name__}: {exc}")
 
 
 def build_tools() -> list[ToolSpec]:
@@ -934,6 +1160,22 @@ def build_tools() -> list[ToolSpec]:
             },
             risk=Risk.L1,
             handler=control_keyboard,
+            category="desktop",
+        ),
+        ToolSpec(
+            name="pesquisar",
+            description=_TOOL_DESCRIPTION_SEARCH,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "texto": {"type": "string", "minLength": 1, "maxLength": 1500},
+                    "tecla": {"type": "string", "maxLength": 24, "default": "enter"},
+                },
+                "required": ["texto"],
+                "additionalProperties": False,
+            },
+            risk=Risk.L1,
+            handler=pesquisar,
             category="desktop",
         ),
     ]
