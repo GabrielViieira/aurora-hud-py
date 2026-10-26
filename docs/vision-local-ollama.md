@@ -35,7 +35,17 @@ AURORA_LLM_VISION_TIMEOUT_S=120
 AURORA_LLM_VISION_MAX_RETRIES=0
 ```
 
-Se o arquivo já tiver `AURORA_LLM_VISION_MODEL=gemini-3.8-flash`, **substitua o valor existente** em vez de criar uma segunda linha com a mesma variável.
+Se o arquivo já tiver `AURORA_LLM_VISION_MODEL=gemini-3.8-flash`, **substitua o valor existente** em vez de criar uma segunda linha com a mesma variável. Variáveis definidas no ambiente do Windows têm prioridade sobre o `.env`. Se um teste ainda mostrar `gemini-3.8-flash`, confira no PowerShell:
+
+```powershell
+Get-Item Env:AURORA_LLM_VISION_MODEL -ErrorAction SilentlyContinue
+```
+
+Se houver um valor antigo, remova-o da sessão atual antes de iniciar o teste/aplicativo:
+
+```powershell
+Remove-Item Env:AURORA_LLM_VISION_MODEL -ErrorAction SilentlyContinue
+```
 
 ## 3. Testar a visão local isoladamente
 
@@ -68,6 +78,6 @@ Essa linha confirma que a mensagem com imagem foi encaminhada ao endpoint local.
 ## Limitações do primeiro teste
 
 - O modelo precisa estar baixado e o serviço Ollama em execução.
-- A resposta visual pode ser mais lenta na primeira inferência, enquanto o modelo carrega para a memória. A Aurora permite até 150 segundos para uma chamada de visão local.
+- A resposta visual pode ser mais lenta na primeira inferência, enquanto o modelo carrega para a memória. O exemplo configura 120 segundos para a chamada HTTP; o prazo externo da Aurora acrescenta uma pequena margem, com teto de segurança de 150 segundos.
 - O endpoint está configurado para o modelo Qwen. Não mantenha o nome de um modelo de nuvem nessa variável.
 - Este teste valida o caminho de visão; a capacidade do modelo de emitir chamadas de ferramenta de maneira confiável precisa ser verificada na tarefa real.
