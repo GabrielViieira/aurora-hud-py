@@ -21,6 +21,7 @@ else:
 sys.path.insert(0, str(_REPO_ROOT.parent))
 
 from aurora.tools import desktop_control
+from aurora.tools.base import ToolResult
 
 
 def _screen() -> dict:
@@ -98,6 +99,23 @@ class DesktopCaptureFastTests(unittest.TestCase):
         active_snapshot.assert_called_once()
         capture_monitors.assert_called_once_with(max_width=960, monitor_index=1)
         self.assertTrue(result.data["data_url"].startswith("data:image/"))
+
+
+    def test_tool_content_does_not_embed_raw_image_data_url(self):
+        result = ToolResult(
+            ok=True,
+            summary="Captura de tela concluída.",
+            data={
+                "monitor": 1,
+                "data_url": "data:image/jpeg;base64," + ("A" * 12000),
+            },
+        )
+
+        content = result.to_content(max_chars=20000)
+
+        self.assertIn('"monitor": 1', content)
+        self.assertNotIn("data:image/jpeg;base64", content)
+        self.assertNotIn("A" * 200, content)
 
 
 if __name__ == "__main__":
