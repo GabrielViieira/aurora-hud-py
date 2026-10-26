@@ -61,6 +61,15 @@ class SearchPerceptionTests(unittest.TestCase):
         self.assertEqual(by_name[button["nome"]]["papel_sugerido"], "possível botão de busca")
         self.assertTrue(any("pode ser uma lupa" in clue for clue in by_name[button["nome"]]["evidencias_busca"]))
 
+    def test_unnamed_image_next_to_edit_is_possible_magnifier(self):
+        field = element("Edit", "[Campo de texto sem nome]", 150, 70, 700, 106)
+        icon = element("Image", "[Imagem sem nome]", 701, 70, 737, 106)
+        result = rank_search_candidates([field, icon], window_width=1000)
+        by_name = {item["nome"]: item for item in result}
+
+        self.assertEqual(by_name[icon["nome"]]["papel_sugerido"], "possível ícone de busca")
+        self.assertTrue(any("pode ser uma lupa" in clue for clue in by_name[icon["nome"]]["evidencias_busca"]))
+
     def test_accented_portuguese_search_label_is_recognized(self):
         field = element("Edit", "Pesquisa", 200, 40, 650, 74)
         result = rank_search_candidates([field], window_width=1000)
