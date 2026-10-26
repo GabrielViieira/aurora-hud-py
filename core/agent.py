@@ -1115,7 +1115,7 @@ class AuroraAgent:
                         else:
                             settle_seconds = 0.10
                         time.sleep(settle_seconds)
-                        capture_args = {"monitor": 1, "largura_maxima": 960}
+                        capture_args = {"monitor": 1, "largura_maxima": 640}
                         if fast_verification:
                             capture_args["somente_acessibilidade"] = True
                         else:
