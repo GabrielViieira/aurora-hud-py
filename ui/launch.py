@@ -1671,22 +1671,64 @@ class SvgHologram(QMainWindow):
             return None
 
     def _prepare_sapi_audio(self, japanese_text: str, out_wav: Path) -> Optional[Path]:
-        # Pré-sintetiza WAV com pyttsx3/SAPI, sem reproduzi-lo.
+        # O motor pyttsx3/SAPI deve executar no próprio processo/thread COM.
+        # O engine criado pela HUD era reutilizado em uma thread de worker, onde
+        # runAndWait() podia travar indefinidamente. Isolar a síntese em processo
+        # filho permite impor timeout e não bloquear a fila de fala da HUD.
         if not self._tts_engine or not self._tts_voice_ja:
             return None
+        text_path = out_wav.with_suffix(".txt")
+        worker_path = Path(__file__).resolve().with_name("sapi_synthesize.py")
+        timeout_s = max(5.0, float(os.environ.get("AURORA_SAPI_TIMEOUT_S", "35")))
         try:
-            engine = self._tts_engine
-            engine.setProperty("voice", self._tts_voice_ja)
-            engine.setProperty("rate", 165)
-            engine.save_to_file(japanese_text, str(out_wav))
+            out_wav.parent.mkdir(parents=True, exist_ok=True)
+            text_path.write_text(japanese_text, encoding="utf-8")
+            command = [
+                sys.executable,
+                str(worker_path),
+                "--text-file", str(text_path),
+                "--output", str(out_wav),
+                "--voice-id", str(self._tts_voice_ja),
+                "--rate", "165",
+                "--volume", "0.5",
+            ]
             sapi_started = time.monotonic()
-            print("[Aurora TTS] SAPI: iniciando engine.runAndWait() para gerar WAV.")
-            engine.runAndWait()
-            print(f"[Aurora TTS] SAPI: runAndWait() retornou em {time.monotonic() - sapi_started:.1f}s.")
+            print(
+                f"[Aurora TTS] SAPI: sintetizando em processo isolado "
+                f"(timeout={timeout_s:.0f}s)."
+            )
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_s,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if completed.returncode != 0:
+                detail = (completed.stderr or completed.stdout or "").strip()[:500]
+                print(f"[Aurora TTS] Processo SAPI falhou (código={completed.returncode}): {detail}")
+                return None
+            print(
+                f"[Aurora TTS] Processo SAPI terminou em "
+                f"{time.monotonic() - sapi_started:.1f}s."
+            )
             if out_wav.is_file() and out_wav.stat().st_size > 44:
                 return out_wav
+            print("[Aurora TTS] Processo SAPI terminou sem gerar um WAV válido.")
+        except subprocess.TimeoutExpired:
+            print(
+                f"[Aurora TTS] SAPI excedeu {timeout_s:.0f}s; "
+                "processo isolado interrompido para evitar travar a fila de fala."
+            )
         except Exception as exc:
-            print(f"[Aurora TTS] Não consegui pré-gerar WAV via SAPI: {exc}")
+            print(f"[Aurora TTS] Não consegui pré-gerar WAV via SAPI: {type(exc).__name__}: {exc}")
+        finally:
+            try:
+                text_path.unlink(missing_ok=True)
+            except OSError:
+                pass
         try:
             out_wav.unlink(missing_ok=True)
         except OSError:
