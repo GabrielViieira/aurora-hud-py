@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import threading
 import time
 import unicodedata
+from io import BytesIO
 from urllib.parse import quote_plus
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -75,6 +77,71 @@ def _messages_contain_image(messages: list[ChatMessage]) -> bool:
             if part.get("type") in {"image", "image_url"}:
                 return True
     return False
+
+
+def _shrink_local_vision_image_part(part: dict[str, Any], max_width: int) -> dict[str, Any]:
+    """Reduz imagens data URL antes de enviá-las ao modelo visual local."""
+    try:
+        image_url = part.get("image_url")
+        if isinstance(image_url, dict):
+            url = image_url.get("url")
+            if not isinstance(url, str) or not url.startswith("data:image/") or "," not in url:
+                return part
+            _, encoded = url.split(",", 1)
+            raw = base64.b64decode(encoded)
+            from PIL import Image
+
+            with Image.open(BytesIO(raw)) as source:
+                image = source.convert("RGB")
+            if image.width <= max_width and image.height <= max_width * 2:
+                return part
+            image.thumbnail((max_width, max_width * 2), Image.Resampling.LANCZOS)
+            buffer = BytesIO()
+            image.save(buffer, format="JPEG", quality=76, optimize=True)
+            resized_url = "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+            updated = dict(part)
+            updated_url = dict(image_url)
+            updated_url["url"] = resized_url
+            updated["image_url"] = updated_url
+            return updated
+
+        raw_url = part.get("data")
+        if isinstance(raw_url, str) and raw_url.startswith("data:image/") and "," in raw_url:
+            _, encoded = raw_url.split(",", 1)
+            raw = base64.b64decode(encoded)
+            from PIL import Image
+
+            with Image.open(BytesIO(raw)) as source:
+                image = source.convert("RGB")
+            if image.width <= max_width and image.height <= max_width * 2:
+                return part
+            image.thumbnail((max_width, max_width * 2), Image.Resampling.LANCZOS)
+            buffer = BytesIO()
+            image.save(buffer, format="JPEG", quality=76, optimize=True)
+            updated = dict(part)
+            updated["data"] = "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+            return updated
+    except Exception:
+        # Não quebrar uma solicitação por imagem não reconhecida; o provedor responderá
+        # normalmente ou devolverá um erro explícito para o caminho de fallback.
+        return part
+    return part
+
+
+def _is_vision_token_limit_error(exc: ProviderError) -> bool:
+    """Reconhece erros de contexto/tokens do backend visual para tentar uma imagem menor."""
+    detail = f"{exc} {getattr(exc, 'body', '')}".casefold()
+    has_token_or_context = any(
+        word in detail for word in ("token", "context length", "context window", "prompt length", "sequence length")
+    )
+    has_limit = any(
+        word in detail for word in (
+            "limit", "maximum", "max_", "exceed", "too large", "too many",
+            "reached", "exceeded", "atingido", "limite", "ultrapass", "context length",
+        )
+    )
+    status = getattr(exc, "status", None)
+    return has_token_or_context and has_limit and (status is None or int(status) >= 400)
 
 
 def _is_token_limit_error(exc: ProviderError) -> bool:
@@ -436,8 +503,10 @@ class AuroraAgent:
                 return vision_provider
         return self.provider
 
-    def _prepare_provider_request(self, request: LLMRequest, request_provider) -> LLMRequest:
-        """Prepare a short perception-only prompt for the local vision model."""
+    def _prepare_provider_request(
+        self, request: LLMRequest, request_provider, *, vision_max_width: int = 640
+    ) -> LLMRequest:
+        """Prepare a compact perception-only prompt and image for the local vision model."""
         vision_provider = getattr(self, "vision_provider", None)
         if not (
             vision_provider is not None
@@ -460,7 +529,7 @@ class AuroraAgent:
                 break
 
         image_parts = [
-            part
+            _shrink_local_vision_image_part(part, vision_max_width)
             for part in (image_message.content if isinstance(image_message.content, list) else [])
             if isinstance(part, dict) and part.get("type") in {"image_url", "image"}
         ]
@@ -490,7 +559,7 @@ class AuroraAgent:
             stream=False,
         )
         logger.info(
-            "Visão local em modo percepção: 1 mensagem, sem histórico/ferramentas, saída limitada."
+            "Visão local em modo percepção: 1 mensagem, sem histórico/ferramentas, imagem <= " + str(vision_max_width) + "px, saída limitada."
         )
         return compact_request
 
@@ -545,7 +614,25 @@ class AuroraAgent:
 
         def request_worker() -> None:
             try:
-                outcome["response"] = request_provider.chat(provider_request)
+                try:
+                    outcome["response"] = request_provider.chat(provider_request)
+                except ProviderError as exc:
+                    is_local_vision = (
+                        getattr(self, "vision_provider", None) is not None
+                        and request_provider is getattr(self, "vision_provider", None)
+                        and request_provider is not self.provider
+                    )
+                    if not is_local_vision or not _is_vision_token_limit_error(exc):
+                        raise
+                    smaller_request = self._prepare_provider_request(
+                        request, request_provider, vision_max_width=448
+                    )
+                    print(
+                        "[Aurora agente] Limite de tokens/contexto na visão local; "
+                        "tentando novamente com imagem reduzida para até 448 px."
+                    )
+                    outcome["response"] = request_provider.chat(smaller_request)
+                    outcome["vision_retry_downscaled"] = True
             except Exception as exc:
                 outcome["error"] = exc
             finally:
