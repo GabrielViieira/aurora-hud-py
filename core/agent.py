@@ -246,7 +246,7 @@ class AuroraAgent:
         return self.provider
 
     def _prepare_provider_request(self, request: LLMRequest, request_provider) -> LLMRequest:
-        """Keep local vision calls small and omit tool schemas unsupported by some Ollama models."""
+        """Prepare a short perception-only prompt for the local vision model."""
         vision_provider = getattr(self, "vision_provider", None)
         if not (
             vision_provider is not None
@@ -256,35 +256,87 @@ class AuroraAgent:
         ):
             return request
 
-        # A full agent transcript can exceed Ollama's default 4096-token context.
-        # The vision pass only needs the latest screenshot and the user's latest
-        # plain-text instruction; old turns, system prompt, tool results and tool
-        # schemas are deliberately omitted. The main provider retains full context.
         image_index = next(
             index
             for index in range(len(request.messages) - 1, -1, -1)
             if _messages_contain_image([request.messages[index]])
         )
         image_message = request.messages[image_index]
-        compact_messages: list[ChatMessage] = []
+        user_goal = ""
         for message in reversed(request.messages[:image_index]):
             if message.role == "user" and isinstance(message.content, str) and message.content.strip():
-                compact_messages.append(message)
+                user_goal = message.content.strip()[:800]
                 break
-        compact_messages.append(image_message)
 
-        logger.info(
-            "Preparando visão local com contexto compacto (%s mensagens), sem ferramentas.",
-            len(compact_messages),
+        image_parts = [
+            part
+            for part in (image_message.content if isinstance(image_message.content, list) else [])
+            if isinstance(part, dict) and part.get("type") in {"image_url", "image"}
+        ]
+        if not image_parts:
+            return request
+
+        prompt = (
+            "Você é o módulo de percepção visual local da Aurora. Não responda ao usuário, "
+            "não dê passo a passo e não diga o que a Aurora deveria fazer. Descreva somente "
+            "fatos visíveis que ajudem outro agente a executar o pedido; identifique a janela "
+            "em primeiro plano, elementos relevantes, estado atual e texto legível. "
+            "Se coordenadas não estiverem disponíveis, não invente coordenadas. "
+            "Responda em português com observações objetivas em até 600 caracteres. "
+            f"Pedido original: {user_goal or 'Identifique a janela atual e seus elementos relevantes.'}"
         )
-        return LLMRequest(
-            messages=compact_messages,
+        compact_request = LLMRequest(
+            messages=[
+                ChatMessage(
+                    role="user",
+                    content=[{"type": "text", "text": prompt}, *image_parts],
+                )
+            ],
             tools=[],
             model=request.model,
-            temperature=request.temperature,
-            max_tokens=request.max_tokens,
-            stream=request.stream,
+            temperature=0.1,
+            max_tokens=min(max(100, request.max_tokens), 300),
+            stream=False,
         )
+        logger.info(
+            "Visão local em modo percepção: 1 mensagem, sem histórico/ferramentas, saída limitada."
+        )
+        return compact_request
+
+    def _handoff_local_vision_observation(
+        self, messages: list[ChatMessage], observation: str
+    ) -> bool:
+        """Replace image payloads with a compact textual observation for the main agent."""
+        image_indexes = [
+            index for index, message in enumerate(messages)
+            if _messages_contain_image([message])
+        ]
+        if not image_indexes:
+            return False
+
+        latest_image_index = image_indexes[-1]
+        compact_observation = (observation or "").strip()[:1800]
+        for index in image_indexes:
+            message = messages[index]
+            parts = message.content if isinstance(message.content, list) else []
+            text_parts = [
+                str(part.get("text", "")).strip()
+                for part in parts
+                if isinstance(part, dict) and part.get("type") == "text" and part.get("text")
+            ]
+            content = "\n".join(text_parts).strip()
+            if index == latest_image_index:
+                content = (
+                    f"{content}\nObservação visual objetiva (Qwen2.5-VL local):\n"
+                    f"{compact_observation}"
+                ).strip()
+            else:
+                content = f"{content}\n(Captura anterior já analisada localmente.)".strip()
+            messages[index] = ChatMessage(role=message.role, content=content)
+        logger.info(
+            "Observação visual local entregue ao provedor principal; payloads de imagem removidos."
+        )
+        return True
 
     def _chat_with_cancel(
         self, request: LLMRequest, *, deadline: float
@@ -566,6 +618,23 @@ class AuroraAgent:
                     break
                 model_used = response.model or model_used
                 _accumulate_usage(usage, response.usage)
+
+                if uses_local_vision:
+                    # O modelo visual é apenas percepção: não tem schemas de ferramentas.
+                    # Encaminhe suas observações ao agente principal, que decide ações reais.
+                    observation = (response.text or "").strip()
+                    if observation and self._handoff_local_vision_observation(messages, observation):
+                        print(
+                            "[Aurora agente] Percepção visual local encaminhada ao provedor principal; "
+                            "continuando o ciclo de ferramentas."
+                        )
+                        continue
+                    final_text = (
+                        "O modelo visual local não retornou uma observação utilizável da captura."
+                    )
+                    task.error = final_text
+                    task.transition(TaskStatus.FAILED)
+                    break
 
                 if not response.tool_calls:
                     final_text = response.text.strip() or "(o modelo não devolveu texto)"
