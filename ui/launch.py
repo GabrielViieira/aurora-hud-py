@@ -2185,8 +2185,8 @@ class SvgHologram(QMainWindow):
         with self._task_lock:
             if self._task_active:
                 self.show_caption_requested.emit(
-                    "Já existe uma tarefa em andamento. Para interrompê-la, diga "
-                    "'Aurora, cancele a tarefa' ou pressione Escape."
+                    "Essa nova mensagem não foi enviada à IA porque a tarefa anterior ainda está em andamento. "
+                    "Para interrompê-la, pressione Cancelar ou Escape e envie a nova mensagem novamente."
                 )
                 return
             if self._speech_pending or self._speech_active:
