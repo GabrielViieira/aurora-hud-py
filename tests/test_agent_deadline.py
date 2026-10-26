@@ -26,6 +26,7 @@ sys.path.insert(0, str(_REPO_ROOT.parent))
 from aurora.core.agent import (
     AuroraAgent,
     TaskDeadlineExceeded,
+    _local_app_intent,
     _should_use_accessibility_only_verification,
 )
 from aurora.llm.provider import LLMRequest, LLMResponse
@@ -90,6 +91,18 @@ class AgentDeadlineTests(unittest.TestCase):
                 "controlar_teclado", {"acao": "pressionar", "tecla": "enter"}
             )
         )
+
+    def test_explicit_steam_search_uses_direct_store_url(self):
+        intent = _local_app_intent("Aurora, pesquise o jogo Hollow Knight na Steam")
+        self.assertIsNotNone(intent)
+        self.assertEqual(intent[0], "abrir_url")
+        self.assertEqual(
+            intent[1]["url"],
+            "https://store.steampowered.com/search/?term=hollow+knight",
+        )
+
+    def test_non_steam_search_is_not_routed_without_llm(self):
+        self.assertIsNone(_local_app_intent("pesquise Hollow Knight"))
 
 
 if __name__ == "__main__":
