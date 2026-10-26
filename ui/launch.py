@@ -1862,7 +1862,7 @@ class SvgHologram(QMainWindow):
                 cancelled = stop_event.is_set() or not self._is_speech_generation_current(generation)
                 if cancelled:
                     try:
-                        winsound.PlaySound(None, winsound.SND_PURGE)
+                        winsound.PlaySound(None, 0)
                     except Exception:
                         pass
                 else:
@@ -1972,7 +1972,7 @@ class SvgHologram(QMainWindow):
             stop_event.set()
         try:
             import winsound
-            winsound.PlaySound(None, winsound.SND_PURGE)
+            winsound.PlaySound(None, 0)
         except Exception:
             pass
         try:
