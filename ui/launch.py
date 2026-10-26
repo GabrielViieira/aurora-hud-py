@@ -2359,12 +2359,12 @@ class SvgHologram(QMainWindow):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             question.setDefaultButton(QMessageBox.StandardButton.No)
-            question.setWindowModality(Qt.WindowModality.ApplicationModal)
             question.setWindowFlags(
                 question.windowFlags()
                 | Qt.WindowType.Dialog
                 | Qt.WindowType.WindowStaysOnTopHint
             )
+            question.setWindowModality(Qt.WindowModality.ApplicationModal)
             question.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
             question.raise_()
             question.activateWindow()
