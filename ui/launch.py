@@ -575,6 +575,29 @@ class VoiceListener:
             self._thread = None
 
 
+class _ApprovalTicket:
+    # Compartilha pedido e resultado entre a thread do agente e a interface Qt.
+    def __init__(self, request: object) -> None:
+        self.request = request
+        self.event = threading.Event()
+        self.approved = False
+
+
+class _GuiApprover:
+    # O agente aguarda uma resposta da HUD, nunca input() oculto no terminal.
+    def __init__(self, request_signal, timeout_s: float = 95.0) -> None:
+        self._request_signal = request_signal
+        self._timeout_s = max(5.0, timeout_s)
+
+    def approve(self, request: object) -> bool:
+        ticket = _ApprovalTicket(request)
+        self._request_signal.emit(ticket)
+        if not ticket.event.wait(timeout=self._timeout_s):
+            print("[Aurora aprovação] Timeout esperando confirmação na interface; ação negada.", flush=True)
+            return False
+        return bool(ticket.approved)
+
+
 class SvgHologram(QMainWindow):
     recognized_text = Signal(str)
     voice_status = Signal(str)
@@ -584,6 +607,7 @@ class SvgHologram(QMainWindow):
     speech_preparation_failed = Signal(str, str, str, object)
     speech_playback_finished = Signal(str, str, object)
     visual_state_requested = Signal(str)
+    approval_requested = Signal(object)
 
     def __init__(self, svg_path: Path, listen_on_start: bool = False) -> None:
         super().__init__()
@@ -613,6 +637,9 @@ class SvgHologram(QMainWindow):
         self._runtime = None
         self._agent = None
         self._speech = None
+        self.approval_requested.connect(
+            self._show_approval_dialog, Qt.ConnectionType.QueuedConnection
+        )
         self._init_runtime()
 
         central = QWidget(self)
@@ -809,12 +836,54 @@ class SvgHologram(QMainWindow):
         except Exception as exc:
             print(f"[Aurora visual] Não foi possível aplicar {state!r}: {exc}")
 
+    @Slot(object)
+    def _show_approval_dialog(self, ticket: object) -> None:
+        # A caixa roda no thread Qt; o agente fica aguardando no worker.
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Aurora — autorização necessária")
+        dialog.setIcon(QMessageBox.Icon.Warning)
+        dialog.setText("A Aurora precisa da sua autorização para continuar.")
+        request = getattr(ticket, "request", None)
+        try:
+            details = request.render() if request is not None else "Ação protegida solicitada."
+        except Exception:
+            details = "Ação protegida solicitada."
+        dialog.setInformativeText(
+            details + "\\n\\nEscolha Sim para autorizar esta ação ou Não para recusá-la. "
+            "O pedido expira automaticamente em 90 segundos."
+        )
+        dialog.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        dialog.setDefaultButton(QMessageBox.StandardButton.No)
+        dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
+        dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+
+        # Fecha a caixa automaticamente para que uma autorização pendente não bloqueie o agente.
+        QTimer.singleShot(90_000, dialog.reject)
+        try:
+            ticket.approved = dialog.exec() == QMessageBox.StandardButton.Yes
+            print(
+                f"[Aurora aprovação] ferramenta={getattr(request, 'tool', '?')} "
+                f"decisão={'autorizada' if ticket.approved else 'negada'}.",
+                flush=True,
+            )
+        except Exception as exc:
+            ticket.approved = False
+            print(f"[Aurora aprovação] Falha na caixa de confirmação: {exc}", flush=True)
+        finally:
+            ticket.event.set()
+
     def _init_runtime(self) -> None:
         if not AURORA_AVAILABLE or Settings is None or build_runtime is None:
             return
         try:
             settings = Settings.load()
-            runtime = build_runtime(settings, voice=False)
+            runtime = build_runtime(
+                settings,
+                voice=False,
+                approver=_GuiApprover(self.approval_requested),
+            )
             self._runtime = runtime
             self._agent = runtime.agent
             self._speech = runtime.speech
