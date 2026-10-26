@@ -45,15 +45,15 @@ class HologramEffects:
     PARTICLE_DURATION = 5.0
 
     PALETTES: ClassVar[dict[str, dict[str, str]]] = {
-        # Azul-ciano é a identidade constante; dourado sinaliza fala da Aurora.
+        # Cada estado tem uma paleta própria; speaking mantém o dourado.
         "idle": {"primary": "#38bfff", "secondary": "#8cecff", "core": "#ffffff"},
-        "listening": {"primary": "#38bfff", "secondary": "#8cecff", "core": "#ffffff"},
-        "thinking": {"primary": "#38bfff", "secondary": "#8cecff", "core": "#ffffff"},
+        "listening": {"primary": "#a855f7", "secondary": "#d8b4fe", "core": "#f5ebff"},
+        "thinking": {"primary": "#ffffff", "secondary": "#e8eef7", "core": "#ffffff"},
         "processing": {"primary": "#38bfff", "secondary": "#8cecff", "core": "#ffffff"},
         "speaking": {"primary": "#e9b95b", "secondary": "#ffe4a0", "core": "#fff5d6"},
-        "completed": {"primary": "#38bfff", "secondary": "#8cecff", "core": "#ffffff"},
-        "success": {"primary": "#38bfff", "secondary": "#8cecff", "core": "#ffffff"},
-        "error": {"primary": "#38bfff", "secondary": "#8cecff", "core": "#ffffff"},
+        "completed": {"primary": "#a8f5a2", "secondary": "#d0ffd5", "core": "#f2fff2"},
+        "success": {"primary": "#a8f5a2", "secondary": "#d0ffd5", "core": "#f2fff2"},
+        "error": {"primary": "#ff4d5a", "secondary": "#ffa0a8", "core": "#fff1f2"},
     }
 
     _PARTICLES: ClassVar[tuple[Particle, ...]] = (
@@ -223,7 +223,7 @@ class HologramEffects:
             return (6.0, -5.0, 7.0) if self.state_elapsed <= 0.72 else (0.0, 0.0, 0.0)
         if self.state == "error":
             return (0.0, 0.0, 0.0)
-        return (0.13, -0.09, 0.06)  # completed/azul
+        return (0.13, -0.09, 0.06)  # completed/verde-claro
 
     @staticmethod
     def _begin_canvas(painter: QPainter, rect: QRectF) -> bool:
