@@ -70,6 +70,47 @@ class LocalVisionRoutingTests(unittest.TestCase):
 
         self.assertIs(agent._provider_for_request(request), local)
 
+    def test_local_vision_request_omits_tools(self):
+        local = object()
+        agent = self._agent(vision_provider=local)
+        tools = [{"type": "function", "function": {"name": "capturar_tela"}}]
+        request = LLMRequest(
+            model="qwen2.5vl:3b",
+            tools=tools,
+            messages=[
+                ChatMessage(
+                    role="user",
+                    content=[
+                        {"type": "text", "text": "Descreva esta tela."},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                    ],
+                )
+            ],
+        )
+
+        prepared = agent._prepare_provider_request(request, local)
+
+        self.assertIsNot(prepared, request)
+        self.assertEqual(prepared.tools, [])
+        self.assertEqual(prepared.model, request.model)
+        self.assertIs(prepared.messages, request.messages)
+        # A cópia é alterada, mas a requisição original continua com as ferramentas.
+        self.assertEqual(request.tools, tools)
+
+    def test_main_provider_keeps_tools_for_image_requests(self):
+        local = object()
+        agent = self._agent(vision_provider=local)
+        tools = [{"type": "function", "function": {"name": "capturar_tela"}}]
+        request = LLMRequest(
+            tools=tools,
+            messages=[ChatMessage(role="user", content=[{"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}])],
+        )
+
+        prepared = agent._prepare_provider_request(request, agent.provider)
+
+        self.assertIs(prepared, request)
+        self.assertEqual(prepared.tools, tools)
+
     def test_text_only_request_stays_on_main_provider(self):
         agent = self._agent(vision_provider=object())
         request = LLMRequest(
