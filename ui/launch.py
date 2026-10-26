@@ -166,6 +166,22 @@ BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_SVG = BASE_DIR / "aurora_full.svg"
 DEFAULT_VOSK_MODEL = BASE_DIR / "models" / "vosk-model-small-pt-0.3"
 
+# O Piper Plus fica ativo por padrão. Os motores anteriores continuam no código,
+# mas só iniciam se forem selecionados explicitamente por AURORA_TTS_BACKEND.
+AURORA_TTS_BACKEND = os.environ.get("AURORA_TTS_BACKEND", "piper").strip().casefold()
+if AURORA_TTS_BACKEND not in {"piper", "gpt_sovits", "nanami_rvc"}:
+    print(f"[Aurora TTS] Backend desconhecido {AURORA_TTS_BACKEND!r}; usando Piper Plus.")
+    AURORA_TTS_BACKEND = "piper"
+
+PIPER_MODEL_PATH = Path(os.environ.get(
+    "AURORA_PIPER_MODEL",
+    str(BASE_DIR.parent / "voice" / "voice_JA" / "tsukuyomi-chan-6lang-fp16.onnx"),
+)).expanduser()
+PIPER_CONFIG_PATH = Path(os.environ.get(
+    "AURORA_PIPER_CONFIG",
+    str(BASE_DIR.parent / "voice" / "voice_JA" / "config.json"),
+)).expanduser()
+
 
 class SvgWidget(QWidget):
     """Widget transparente com animações nativas de QPainter."""
@@ -631,13 +647,20 @@ class SvgHologram(QMainWindow):
 
         self._tts_engine = None
         self._tts_lock = threading.Lock()
+        self._piper_voice = None
+        self._piper_load_lock = threading.Lock()
+        self._piper_import_error_reported = False
         self._speech_sequence_lock = threading.Lock()
         self._speech_active = False
         self._tts_voice_ja = None
         self._tts_voice_pt = None
         self._init_tts()
         self._translation_cache = {}
-        self._applio_available = APPLIO_DIR.exists() and RAPHAEL_PTH.exists()
+        self._applio_available = (
+            AURORA_TTS_BACKEND == "nanami_rvc"
+            and APPLIO_DIR.exists()
+            and RAPHAEL_PTH.exists()
+        )
         self._voicevox_enabled = VOICEVOX_AVAILABLE
         # Mantém a API antiga apenas como fallback opcional.
         self._gpt_sovits_process: Optional[subprocess.Popen] = None
@@ -654,7 +677,8 @@ class SvgHologram(QMainWindow):
         self._gpt_sovits_direct_start_lock = threading.Lock()
 
         self._gpt_sovits_enabled = (
-            GPT_SOVITS_ENABLED
+            AURORA_TTS_BACKEND == "gpt_sovits"
+            and GPT_SOVITS_ENABLED
             and GPT_SOVITS_DIRECT_ENABLED
             and GPT_SOVITS_DIRECT_WORKER.is_file()
             and GPT_SOVITS_INFERENCE.is_file()
@@ -663,15 +687,22 @@ class SvgHologram(QMainWindow):
             and GPT_SOVITS_SOVITS_MODEL.is_file()
             and GPT_SOVITS_REFERENCE.is_file()
         )
+        print(f"[Aurora TTS] Backend principal: {AURORA_TTS_BACKEND}.")
+        if AURORA_TTS_BACKEND == "piper":
+            print("[Aurora TTS] GPT-SoVITS e Nanami + RVC estão temporariamente desativados.")
         if self._gpt_sovits_enabled:
             print("[Aurora TTS] GPT-SoVITS Raphael configurado; a inferência direta será iniciada sob demanda.")
-        elif GPT_SOVITS_ENABLED and GPT_SOVITS_DIRECT_ENABLED:
+        elif (
+            AURORA_TTS_BACKEND == "gpt_sovits"
+            and GPT_SOVITS_ENABLED
+            and GPT_SOVITS_DIRECT_ENABLED
+        ):
             print(
                 "[Aurora TTS] Motor GPT-SoVITS direto não configurado "
                 "(worker, inference_webui.py, Python, modelos ou referência ausentes); "
                 "serão usados os fallbacks."
             )
-        if self._gpt_sovits_api_fallback:
+        if AURORA_TTS_BACKEND == "gpt_sovits" and self._gpt_sovits_api_fallback:
             print("[Aurora TTS] Fallback HTTP local GPT-SoVITS habilitado por AURORA_GPT_SOVITS_API_FALLBACK=1.")
 
         model_path = Path(
@@ -1247,6 +1278,68 @@ class SvgHologram(QMainWindow):
             shutil.rmtree(work_dir, ignore_errors=True)
             return None
 
+    def _speak_with_piper_plus(self, japanese_text: str, out_wav: Path) -> Optional[Path]:
+        """Gera WAV com a voz Tsukuyomi-chan pelo Piper Plus/ONNX local."""
+        if not japanese_text.strip():
+            return None
+        if not PIPER_MODEL_PATH.is_file():
+            print(f"[Aurora Piper] Modelo ONNX não encontrado: {PIPER_MODEL_PATH}")
+            return None
+        if not PIPER_CONFIG_PATH.is_file():
+            print(f"[Aurora Piper] Configuração do modelo não encontrada: {PIPER_CONFIG_PATH}")
+            return None
+
+        try:
+            from piper_plus import PiperVoice
+        except Exception as exc:
+            if not self._piper_import_error_reported:
+                print(
+                    "[Aurora Piper] Não foi possível importar Piper Plus. Instale no mesmo Python "
+                    "que executa a Aurora com: python -m pip install piper-plus. "
+                    f"Detalhe: {type(exc).__name__}: {exc}"
+                )
+                self._piper_import_error_reported = True
+            return None
+
+        import wave
+
+        started = time.perf_counter()
+        try:
+            # Carrega o ONNX uma única vez e reutiliza a sessão para todas as falas.
+            with self._piper_load_lock:
+                if self._piper_voice is None:
+                    self._piper_voice = PiperVoice.load(
+                        str(PIPER_MODEL_PATH),
+                        config_path=str(PIPER_CONFIG_PATH),
+                    )
+                    print(f"[Aurora Piper] Voz carregada: {PIPER_MODEL_PATH.name}")
+                voice = self._piper_voice
+
+            out_wav.parent.mkdir(parents=True, exist_ok=True)
+            with wave.open(str(out_wav), "wb") as wav_file:
+                voice.synthesize(japanese_text, wav_file)
+
+            if not out_wav.is_file() or out_wav.stat().st_size <= 44:
+                raise RuntimeError("Piper Plus não produziu um WAV válido.")
+
+            with wave.open(str(out_wav), "rb") as wav_file:
+                duration = wav_file.getnframes() / max(1, wav_file.getframerate())
+                sample_rate = wav_file.getframerate()
+
+            elapsed = time.perf_counter() - started
+            print(
+                f"[Aurora Piper] Áudio gerado em {elapsed:.2f}s "
+                f"({duration:.2f}s, {sample_rate} Hz)."
+            )
+            return out_wav
+        except Exception as exc:
+            try:
+                out_wav.unlink(missing_ok=True)
+            except OSError:
+                pass
+            print(f"[Aurora Piper] Falha na síntese: {type(exc).__name__}: {exc}")
+            return None
+
     def _speak_with_gpt_sovits(self, japanese_text: str) -> Optional[Path]:
         """Prioriza o motor direto; a API HTTP só é usada se o fallback for ativado."""
         audio = self._speak_with_gpt_sovits_direct(japanese_text)
@@ -1450,9 +1543,17 @@ class SvgHologram(QMainWindow):
                         if not spoken_text or not _JA_KANA_RE.search(spoken_text):
                             audio_path = None
                         else:
-                            audio_path = self._speak_with_gpt_sovits(spoken_text)
-                            if not audio_path and self._applio_available:
+                            if AURORA_TTS_BACKEND == "piper":
+                                audio_path = self._speak_with_piper_plus(
+                                    spoken_text, job_dir / "aurora_piper.wav"
+                                )
+                            elif AURORA_TTS_BACKEND == "gpt_sovits":
+                                audio_path = self._speak_with_gpt_sovits(spoken_text)
+                            elif AURORA_TTS_BACKEND == "nanami_rvc" and self._applio_available:
                                 audio_path = self._speak_with_applio(spoken_text)
+
+                            # Falhas do backend selecionado não reativam GPT-SoVITS ou RVC
+                            # implicitamente; usam somente fallbacks locais/explicitamente ativos.
                             if not audio_path and self._voicevox_enabled:
                                 candidate = job_dir / "aurora_voicevox.wav"
                                 if self._speak_with_voicevox_to_file(spoken_text, candidate):
@@ -1511,8 +1612,11 @@ class SvgHologram(QMainWindow):
         self._set_speech_visual_state("speaking")
         # O GPT-SoVITS já entrega áudio normalizado pelo próprio motor.
         # Não reduzir a voz do Raphael a 40% antes da reprodução.
-        is_raphael_model = Path(audio_path).name == "aurora_raphael_tts.wav"
-        if not is_raphael_model and not _lower_wav_volume(audio_path, gain=0.4):
+        is_normalized_model = Path(audio_path).name in {
+            "aurora_raphael_tts.wav",
+            "aurora_piper.wav",
+        }
+        if not is_normalized_model and not _lower_wav_volume(audio_path, gain=0.4):
             print("[Aurora TTS] WAV mantido no volume original.")
         import wave
         wav_frames = 0
