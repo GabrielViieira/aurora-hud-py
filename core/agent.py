@@ -7,6 +7,7 @@ import re
 import threading
 import time
 import unicodedata
+from urllib.parse import quote_plus
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -154,6 +155,24 @@ def _local_app_intent(text: str) -> tuple[str, dict[str, str]] | None:
     value = re.sub(r"[\s.!?]+$", "", value).strip()
     if re.fullmatch(r"(?:liste|listar|mostre|mostrar)\s+(?:(?:os|as)\s+)?aplicativos(?:\s+abertos)?", value) or value in {"quais aplicativos estao abertos", "listar apps", "liste apps"}:
         return ("listar_aplicativos", {"filtro": "", "max_resultados": 40})
+
+    # Atalho determinístico para pesquisa explicitamente pedida na Steam.
+    # Abre os resultados diretamente, sem depender de visão/cliques no campo de busca.
+    steam_match = re.fullmatch(
+        r"(?:por favor\s+)?(?:pesquise|pesquisar|pesquisa|procure|procurar|busque|buscar|encontre|encontrar)\s+"
+        r"(?:por\s+)?(.+?)\s+(?:na|no)\s+(?:loja\s+da\s+)?steam",
+        value,
+    )
+    if steam_match:
+        game_query = (steam_match.group(1) or "").strip(" \\t.,!?;:")
+        game_query = re.sub(r"^(?:(?:o|a|um|uma)\\s+)?(?:jogo|game)\\s+", "", game_query)
+        game_query = re.sub(r"^(?:o|a|um|uma)\\s+", "", game_query).strip()
+        if game_query and len(game_query) <= 120:
+            return (
+                "abrir_url",
+                {"url": "https://store.steampowered.com/search/?term=" + quote_plus(game_query)},
+            )
+
     open_match = re.fullmatch(
         r"(?:por favor\s+)?(?:abra|abre|abrir|inicie|inicia|iniciar|execute|executar|open|launch|start)\s+(?:(?:o|a|os|as|um|uma|the)\s+)?([a-z0-9][a-z0-9 ._+#()\-]{0,79})",
         value,
