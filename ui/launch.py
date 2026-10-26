@@ -628,9 +628,10 @@ class SvgHologram(QMainWindow):
     voice_status = Signal(str)
     show_caption_requested = Signal(str)
     speak_requested = Signal(str)
-    speech_ready = Signal(str, str, str, str, object)  # legenda, fala, WAV, estado, evento
-    speech_preparation_failed = Signal(str, str, str, object)
-    speech_playback_finished = Signal(str, str, object)
+    speech_ready = Signal(str, str, str, str, int, object)  # legenda, fala, WAV, estado, geração, evento
+    speech_preparation_failed = Signal(str, str, str, int, object)
+    speech_playback_finished = Signal(str, str, int, object)
+    speech_queue_state_changed = Signal(int, bool)
     visual_state_requested = Signal(str)
     approval_requested = Signal(object)
     agent_task_finished = Signal()
@@ -668,6 +669,13 @@ class SvgHologram(QMainWindow):
         self._active_task_thread: Optional[threading.Thread] = None
         self._active_approval_dialog = None
         self._exit_after_task = False
+        self._speech_generation_lock = threading.Lock()
+        self._speech_generation = 0
+        self._speech_pending = False
+        self._speech_active = False
+        self._active_speech_generation: Optional[int] = None
+        self._active_speech_stop_event: Optional[threading.Event] = None
+        self._active_speech_done = None
         self._allow_close = False
         self.approval_requested.connect(
             self._show_approval_dialog, Qt.ConnectionType.QueuedConnection
@@ -707,6 +715,9 @@ class SvgHologram(QMainWindow):
         self.speech_ready.connect(self._play_prepared_speech, Qt.ConnectionType.QueuedConnection)
         self.speech_preparation_failed.connect(self._speech_preparation_failed, Qt.ConnectionType.QueuedConnection)
         self.speech_playback_finished.connect(self._finish_prepared_speech, Qt.ConnectionType.QueuedConnection)
+        self.speech_queue_state_changed.connect(
+            self._on_speech_queue_state_changed, Qt.ConnectionType.QueuedConnection
+        )
         self.visual_state_requested.connect(self.set_visual_state, Qt.ConnectionType.QueuedConnection)
         self.set_visual_state("idle")
 
@@ -716,7 +727,6 @@ class SvgHologram(QMainWindow):
         self._piper_load_lock = threading.Lock()
         self._piper_import_error_reported = False
         self._speech_sequence_lock = threading.Lock()
-        self._speech_active = False
         self._tts_voice_ja = None
         self._tts_voice_pt = None
         self._init_tts()
