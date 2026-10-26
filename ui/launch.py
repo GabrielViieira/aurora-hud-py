@@ -1629,6 +1629,12 @@ class SvgHologram(QMainWindow):
         if audio_name == "aurora_piper.wav":
             if not _lower_wav_volume(audio_path, gain=PIPER_OUTPUT_GAIN):
                 print("[Aurora TTS] Não foi possível reduzir o volume da voz Piper; WAV mantido.")
+        elif audio_name == "aurora_nanami.wav":
+            # Eco curto e discreto, aplicado ao WAV da Nanami sem RVC nem modelos extras.
+            if not _add_short_echo_wav(audio_path, delay_ms=38, decay=0.14):
+                print("[Aurora TTS] Não foi possível aplicar o eco da Nanami; áudio seco mantido.")
+            if not _lower_wav_volume(audio_path, gain=0.4):
+                print("[Aurora TTS] WAV Nanami mantido no volume original.")
         elif audio_name != "aurora_raphael_tts.wav" and not _lower_wav_volume(audio_path, gain=0.4):
             print("[Aurora TTS] WAV mantido no volume original.")
         import wave
@@ -1944,6 +1950,53 @@ class SvgHologram(QMainWindow):
         except Exception as exc:
             print(f"[Aurora UI] Erro ao fechar runtime: {exc}")
         super().closeEvent(event)
+
+def _add_short_echo_wav(path: str, delay_ms: int = 38, decay: float = 0.14) -> bool:
+    # Soma uma cópia bem baixa do áudio, atrasada alguns milissegundos.
+    # Usa só a biblioteca padrão e mantém os canais do WAV original.
+    import array
+    import sys
+    import wave
+
+    try:
+        with wave.open(path, "rb") as source:
+            params = source.getparams()
+            if params.sampwidth != 2 or params.comptype != "NONE" or params.framerate <= 0:
+                return False
+            frames = source.readframes(source.getnframes())
+
+        original = array.array("h")
+        original.frombytes(frames)
+        if original.itemsize != 2 or params.nchannels < 1:
+            return False
+        if sys.byteorder != "little":
+            original.byteswap()
+
+        delay_frames = max(1, int(params.framerate * max(1, delay_ms) / 1000))
+        delay_samples = delay_frames * params.nchannels
+        output = array.array("h", original)
+        output.extend([0] * delay_samples)
+
+        # A cópia atrasada é calculada a partir do original para não criar repetições infinitas.
+        for index, sample in enumerate(original):
+            target_index = index + delay_samples
+            mixed = output[target_index] + int(sample * decay)
+            output[target_index] = max(-32768, min(32767, mixed))
+
+        if sys.byteorder != "little":
+            output.byteswap()
+
+        with wave.open(path, "wb") as target:
+            target.setparams(params)
+            target.writeframes(output.tobytes())
+
+        print(f"[Aurora TTS] Eco Nanami aplicado: {delay_frames / params.framerate * 1000:.0f} ms, retorno {decay:.0%}.")
+        return True
+
+    except (OSError, ValueError, EOFError, wave.Error) as exc:
+        print(f"[Aurora TTS] Não foi possível aplicar o eco: {exc}")
+        return False
+
 
 def _lower_wav_volume(path: str, gain: float = 0.4) -> bool:
     # Reduz o volume de WAV PCM de 16 bits sem alterar a duração.
