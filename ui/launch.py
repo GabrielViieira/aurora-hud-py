@@ -1679,7 +1679,10 @@ class SvgHologram(QMainWindow):
             engine.setProperty("voice", self._tts_voice_ja)
             engine.setProperty("rate", 165)
             engine.save_to_file(japanese_text, str(out_wav))
+            sapi_started = time.monotonic()
+            print("[Aurora TTS] SAPI: iniciando engine.runAndWait() para gerar WAV.")
             engine.runAndWait()
+            print(f"[Aurora TTS] SAPI: runAndWait() retornou em {time.monotonic() - sapi_started:.1f}s.")
             if out_wav.is_file() and out_wav.stat().st_size > 44:
                 return out_wav
         except Exception as exc:
@@ -1697,6 +1700,10 @@ class SvgHologram(QMainWindow):
             self._speech_generation += 1
             generation = self._speech_generation
             self._speech_pending = True
+        print(
+            f"[Aurora TTS] Fala enfileirada: geração={generation}, "
+            f"caracteres={len(text)}, estado_final={final_state}."
+        )
         self.speech_queue_state_changed.emit(generation, True)
         worker = threading.Thread(
             target=self._prepare_speech_job,
@@ -1733,20 +1740,37 @@ class SvgHologram(QMainWindow):
         audio_path: Optional[Path] = None
         job_dir = Path(tempfile.mkdtemp(prefix="aurora_speech_"))
         spoken_text = text
+        prep_started = time.monotonic()
+        stage = "aguardando fila de fala"
+        print(f"[Aurora TTS] Preparação iniciada: geração={generation}.")
         with self._speech_sequence_lock:
+            print(f"[Aurora TTS] Geração={generation}: adquiriu a fila de fala.")
             try:
                 if not self._is_speech_generation_current(generation):
                     return
                 try:
+                    stage = "aguardando bloqueio do mecanismo TTS"
+                    print(f"[Aurora TTS] Geração={generation}: aguardando lock do TTS.")
                     with self._tts_lock:
                         if not self._is_speech_generation_current(generation):
                             return
+                        stage = "traduzindo a resposta para japonês"
+                        print(f"[Aurora TTS] Geração={generation}: início da tradução.")
+                        translate_started = time.monotonic()
                         spoken_text = self._translate_to_japanese(text)
+                        print(
+                            f"[Aurora TTS] Geração={generation}: tradução terminou em "
+                            f"{time.monotonic() - translate_started:.1f}s; "
+                            f"caracteres={len(spoken_text or '')}."
+                        )
                         if not self._is_speech_generation_current(generation):
                             return
                         if not spoken_text or not _JA_KANA_RE.search(spoken_text):
                             audio_path = None
                         else:
+                            stage = f"sintetizando áudio (backend={AURORA_TTS_BACKEND})"
+                            synth_started = time.monotonic()
+                            print(f"[Aurora TTS] Geração={generation}: início da {stage}.")
                             if AURORA_TTS_BACKEND == "piper":
                                 audio_path = self._speak_with_piper_plus(
                                     spoken_text, job_dir / "aurora_piper.wav"
@@ -1767,22 +1791,39 @@ class SvgHologram(QMainWindow):
                                 if not audio_path:
                                     candidate = job_dir / "aurora_sapi.wav"
                                     audio_path = self._prepare_sapi_audio(spoken_text, candidate)
+                            print(
+                                f"[Aurora TTS] Geração={generation}: síntese terminou em "
+                                f"{time.monotonic() - synth_started:.1f}s; "
+                                f"arquivo={'sim' if audio_path and audio_path.is_file() else 'não'}."
+                            )
                 except Exception as exc:
-                    print(f"[Aurora TTS] Falha na preparação da fala: {exc}")
+                    print(f"[Aurora TTS] Geração={generation}: falha na etapa '{stage}': {type(exc).__name__}: {exc}")
                     audio_path = None
 
                 if not self._is_speech_generation_current(generation):
                     return
                 if audio_path and audio_path.is_file() and audio_path.stat().st_size > 44:
+                    print(
+                        f"[Aurora TTS] Geração={generation}: WAV pronto; "
+                        f"preparação levou {time.monotonic() - prep_started:.1f}s. "
+                        "Enviando áudio para reprodução."
+                    )
                     self.speech_ready.emit(
                         caption, spoken_text, str(audio_path), final_state, generation, done
                     )
                 else:
+                    print(
+                        f"[Aurora TTS] Geração={generation}: não foi possível gerar WAV; "
+                        f"preparação levou {time.monotonic() - prep_started:.1f}s."
+                    )
                     self.speech_preparation_failed.emit(
                         caption, spoken_text, final_state, generation, done
                     )
+                print(f"[Aurora TTS] Geração={generation}: aguardando confirmação de fim da fala.")
                 if not done.wait(timeout=900):
-                    print("[Aurora TTS] Timeout aguardando fim da reprodução.")
+                    print(f"[Aurora TTS] Geração={generation}: timeout aguardando fim da reprodução.")
+                else:
+                    print(f"[Aurora TTS] Geração={generation}: a UI confirmou o fim da fala.")
             finally:
                 try:
                     if audio_path:
@@ -2200,10 +2241,19 @@ class SvgHologram(QMainWindow):
         self.visual_state_requested.emit("thinking")
 
         def _run() -> None:
+            task_started = time.monotonic()
+            print(f"[Aurora tarefa] Início do turno; tamanho da mensagem={len(message)} caracteres.")
             try:
                 reply = self._agent.handle(message)
                 reply_text = getattr(reply, "text", "") or ""
                 status = str(getattr(reply, "status", "") or "").upper()
+                tools_used = getattr(reply, "tools_used", []) or []
+                print(
+                    f"[Aurora tarefa] Agente retornou status={status or 'desconhecido'}, "
+                    f"duração={time.monotonic() - task_started:.1f}s, "
+                    f"ferramentas={','.join(str(name) for name in tools_used) or 'nenhuma'}; "
+                    f"resposta={len(reply_text)} caracteres."
+                )
                 if status.endswith("CANCELLED"):
                     self.show_caption_requested.emit("Tarefa cancelada.")
                     self.visual_state_requested.emit("idle")
@@ -2215,6 +2265,10 @@ class SvgHologram(QMainWindow):
                 else:
                     self.visual_state_requested.emit("completed")
             except Exception as exc:
+                print(
+                    f"[Aurora tarefa] Exceção após {time.monotonic() - task_started:.1f}s: "
+                    f"{type(exc).__name__}: {exc}"
+                )
                 if self._agent is not None and self._agent.cancel_event.is_set():
                     self.show_caption_requested.emit("Tarefa cancelada.")
                     self.visual_state_requested.emit("idle")
@@ -2222,6 +2276,7 @@ class SvgHologram(QMainWindow):
                     err = f"Erro ao processar: {exc}"
                     self.speak_with_caption(err, "エラーが発生しました。", final_state="error")
             finally:
+                print(f"[Aurora tarefa] Worker saindo após {time.monotonic() - task_started:.1f}s.")
                 self.agent_task_finished.emit()
 
         worker = threading.Thread(target=_run, daemon=True, name="AuroraAgentTask")
