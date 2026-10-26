@@ -534,6 +534,17 @@ class AuroraAgent:
         started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         started = time.perf_counter()
 
+        # Última barreira antes de executar: cancelar pode acontecer entre a decisão
+        # do modelo e a entrada nesta função.
+        if self.cancel_event.is_set():
+            final_statuses = {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}
+            if task.status not in final_statuses:
+                task.transition(TaskStatus.CANCELLED)
+            task.error = "cancelada pelo usuário"
+            self.tasks.save(task)
+            self.audit.record("tool.cancelled", task_id=task.id, tool=call.name, reason="pedido de cancelamento")
+            return ToolResult.fail("Tarefa cancelada antes da execução da ferramenta."), False
+
         if not self.registry.has(call.name):
             result = ToolResult.fail(f"ferramenta desconhecida: {call.name}")
             self.audit.record("tool.unknown", task_id=task.id, tool=call.name)
