@@ -246,28 +246,45 @@ class AuroraAgent:
         return self.provider
 
     def _prepare_provider_request(self, request: LLMRequest, request_provider) -> LLMRequest:
-        """Remove tool schemas from local vision calls; some Ollama models reject them."""
+        """Keep local vision calls small and omit tool schemas unsupported by some Ollama models."""
         vision_provider = getattr(self, "vision_provider", None)
-        if (
+        if not (
             vision_provider is not None
             and request_provider is vision_provider
             and request_provider is not self.provider
             and _messages_contain_image(request.messages)
-            and request.tools
         ):
-            logger.info(
-                "Chamando modelo visual local sem definições de ferramentas; "
-                "a chamada será usada para descrever a imagem."
-            )
-            return LLMRequest(
-                messages=request.messages,
-                tools=[],
-                model=request.model,
-                temperature=request.temperature,
-                max_tokens=request.max_tokens,
-                stream=request.stream,
-            )
-        return request
+            return request
+
+        # A full agent transcript can exceed Ollama's default 4096-token context.
+        # The vision pass only needs the latest screenshot and the user's latest
+        # plain-text instruction; old turns, system prompt, tool results and tool
+        # schemas are deliberately omitted. The main provider retains full context.
+        image_index = next(
+            index
+            for index in range(len(request.messages) - 1, -1, -1)
+            if _messages_contain_image([request.messages[index]])
+        )
+        image_message = request.messages[image_index]
+        compact_messages: list[ChatMessage] = []
+        for message in reversed(request.messages[:image_index]):
+            if message.role == "user" and isinstance(message.content, str) and message.content.strip():
+                compact_messages.append(message)
+                break
+        compact_messages.append(image_message)
+
+        logger.info(
+            "Preparando visão local com contexto compacto (%s mensagens), sem ferramentas.",
+            len(compact_messages),
+        )
+        return LLMRequest(
+            messages=compact_messages,
+            tools=[],
+            model=request.model,
+            temperature=request.temperature,
+            max_tokens=request.max_tokens,
+            stream=request.stream,
+        )
 
     def _chat_with_cancel(
         self, request: LLMRequest, *, deadline: float
