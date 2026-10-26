@@ -1691,23 +1691,54 @@ class SvgHologram(QMainWindow):
     def _queue_speech(self, caption: str, text: str, final_state: str) -> None:
         if not text or not text.strip():
             return
-        threading.Thread(
+        with self._speech_generation_lock:
+            self._speech_generation += 1
+            generation = self._speech_generation
+            self._speech_pending = True
+        self.speech_queue_state_changed.emit(generation, True)
+        worker = threading.Thread(
             target=self._prepare_speech_job,
-            args=(caption, text, final_state),
+            args=(caption, text, final_state, generation),
             daemon=True,
             name="AuroraSpeechPrepare",
-        ).start()
+        )
+        try:
+            worker.start()
+        except Exception as exc:
+            with self._speech_generation_lock:
+                if generation == self._speech_generation:
+                    self._speech_pending = False
+            self.speech_queue_state_changed.emit(generation, False)
+            print(f"[Aurora TTS] Não consegui iniciar preparação da fala: {exc}")
 
-    def _prepare_speech_job(self, caption: str, text: str, final_state: str) -> None:
-        # Prepara tradução/áudio primeiro; só então publica legenda e toca WAV.
+    def _is_speech_generation_current(self, generation: int) -> bool:
+        with self._speech_generation_lock:
+            return generation == self._speech_generation
+
+    @Slot(int, bool)
+    def _on_speech_queue_state_changed(self, generation: int, pending: bool) -> None:
+        with self._speech_generation_lock:
+            if generation != self._speech_generation:
+                return
+            self._speech_pending = pending
+        self._update_cancel_button()
+
+    def _prepare_speech_job(
+        self, caption: str, text: str, final_state: str, generation: int,
+    ) -> None:
+        # Cada fala carrega uma geração. Cancelar invalida falas em fila e sínteses antigas.
         done = threading.Event()
         audio_path: Optional[Path] = None
         job_dir = Path(tempfile.mkdtemp(prefix="aurora_speech_"))
         spoken_text = text
         with self._speech_sequence_lock:
             try:
+                if not self._is_speech_generation_current(generation):
+                    return
                 try:
                     with self._tts_lock:
+                        if not self._is_speech_generation_current(generation):
+                            return
                         spoken_text = self._translate_to_japanese(text)
                         if not spoken_text or not _JA_KANA_RE.search(spoken_text):
                             audio_path = None
@@ -1721,13 +1752,9 @@ class SvgHologram(QMainWindow):
                             elif AURORA_TTS_BACKEND == "nanami_rvc" and self._applio_available:
                                 audio_path = self._speak_with_applio(spoken_text)
                             elif AURORA_TTS_BACKEND == "nanami":
-                                # Fala diretamente pela voz japonesa instalada; não passa pelo RVC.
                                 audio_path = self._prepare_sapi_audio(
                                     spoken_text, job_dir / "aurora_nanami.wav"
                                 )
-
-                            # No modo Nanami direto, não troca silenciosamente para outra voz.
-                            # Os demais motores mantêm os fallbacks locais já existentes.
                             if AURORA_TTS_BACKEND != "nanami":
                                 if not audio_path and self._voicevox_enabled:
                                     candidate = job_dir / "aurora_voicevox.wav"
@@ -1740,17 +1767,16 @@ class SvgHologram(QMainWindow):
                     print(f"[Aurora TTS] Falha na preparação da fala: {exc}")
                     audio_path = None
 
+                if not self._is_speech_generation_current(generation):
+                    return
                 if audio_path and audio_path.is_file() and audio_path.stat().st_size > 44:
                     self.speech_ready.emit(
-                        caption, spoken_text, str(audio_path), final_state, done
+                        caption, spoken_text, str(audio_path), final_state, generation, done
                     )
                 else:
                     self.speech_preparation_failed.emit(
-                        caption, spoken_text, final_state, done
+                        caption, spoken_text, final_state, generation, done
                     )
-
-                # Mantém a fila serializada até a reprodução terminar, para não
-                # sobrepor falas nem deixar um áudio antigo tocar depois do novo.
                 if not done.wait(timeout=900):
                     print("[Aurora TTS] Timeout aguardando fim da reprodução.")
             finally:
@@ -1774,31 +1800,36 @@ class SvgHologram(QMainWindow):
         except Exception as exc:
             print(f"[Aurora visual] Não consegui aplicar {state}: {exc}")
 
-    @Slot(str, str, str, str, object)
-    
+    @Slot(str, str, str, str, int, object)
     def _play_prepared_speech(
         self, caption: str, spoken_text: str, audio_path: str,
-        final_state: str, done: object,
+        final_state: str, generation: int, done: object,
     ) -> None:
-        # Exibe o balão e inicia o WAV já pronto, no mesmo instante lógico.
-        self._speech_active = bool(caption)
+        if not self._is_speech_generation_current(generation):
+            done.set()
+            return
+        self._speech_active = True
+        self._active_speech_generation = generation
+        stop_event = threading.Event()
+        self._active_speech_stop_event = stop_event
+        self._active_speech_done = done
         if caption:
             self.show_caption(caption)
         self._set_speech_visual_state("speaking")
-        # A saída do Piper é atenuada para 30% da amplitude original.
-        # O WAV é novo a cada turno, então o ganho não se acumula entre falas.
+        self._update_cancel_button()
+
         audio_name = Path(audio_path).name
         if audio_name == "aurora_piper.wav":
             if not _lower_wav_volume(audio_path, gain=PIPER_OUTPUT_GAIN):
                 print("[Aurora TTS] Não foi possível reduzir o volume da voz Piper; WAV mantido.")
         elif audio_name == "aurora_nanami.wav":
-            # Eco curto e discreto, aplicado ao WAV da Nanami sem RVC nem modelos extras.
             if not _add_short_echo_wav(audio_path, delay_ms=38, decay=0.14):
-                print("[Aurora TTS] Não foi possível aplicar o eco da Nanami; áudio seco mantido.")
+                print("[Aurora TTS] Não foi possível aplicar o eco da Nanami; WAV seco mantido.")
             if not _lower_wav_volume(audio_path, gain=0.4):
                 print("[Aurora TTS] WAV Nanami mantido no volume original.")
         elif audio_name != "aurora_raphael_tts.wav" and not _lower_wav_volume(audio_path, gain=0.4):
             print("[Aurora TTS] WAV mantido no volume original.")
+
         import wave
         wav_frames = 0
         wav_duration = 0.0
@@ -1814,41 +1845,72 @@ class SvgHologram(QMainWindow):
             )
         except Exception as exc:
             print(f"[Aurora TTS] Não consegui inspecionar WAV antes da reprodução: {exc}")
+
         def _play() -> None:
             try:
                 import winsound
-                winsound.PlaySound(audio_path, winsound.SND_FILENAME)
-                print(f"[Aurora TTS] Reprodução WAV concluída ({wav_frames} frames).")
-            except Exception as exc:
-                print(f"[Aurora TTS] Falha ao reproduzir WAV pronto: {exc}")
-                # Tenta o TTS direto como último recurso, sem perder o balão.
-                self.speech_preparation_failed.emit(
-                    caption, spoken_text, final_state, done
+                if stop_event.is_set() or not self._is_speech_generation_current(generation):
+                    self.speech_playback_finished.emit("cancelled", caption, generation, done)
+                    return
+                # A reprodução assíncrona pode ser interrompida sem esperar o fim da fala.
+                winsound.PlaySound(audio_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+                deadline = time.monotonic() + max(0.15, wav_duration + 0.12)
+                while time.monotonic() < deadline:
+                    remaining = deadline - time.monotonic()
+                    if stop_event.wait(min(0.05, max(0.0, remaining))):
+                        break
+                cancelled = stop_event.is_set() or not self._is_speech_generation_current(generation)
+                if cancelled:
+                    try:
+                        winsound.PlaySound(None, winsound.SND_PURGE)
+                    except Exception:
+                        pass
+                else:
+                    print(f"[Aurora TTS] Reprodução WAV concluída ({wav_frames} frames).")
+                self.speech_playback_finished.emit(
+                    "cancelled" if cancelled else final_state, caption, generation, done
                 )
-                
-                return
-            self.speech_playback_finished.emit(final_state, caption, done)
-        
+            except Exception as exc:
+                if stop_event.is_set() or not self._is_speech_generation_current(generation):
+                    self.speech_playback_finished.emit("cancelled", caption, generation, done)
+                else:
+                    print(f"[Aurora TTS] Falha ao reproduzir WAV pronto: {exc}")
+                    self.speech_preparation_failed.emit(
+                        caption, spoken_text, final_state, generation, done
+                    )
+
         try:
             threading.Thread(target=_play, daemon=True, name="AuroraSpeechPlayback").start()
         except Exception as exc:
             print(f"[Aurora TTS] Não consegui iniciar a reprodução: {exc}")
-            self.speech_preparation_failed.emit(caption, spoken_text, final_state, done)
-    
-    @Slot(str, str, str, object)
+            self.speech_preparation_failed.emit(caption, spoken_text, final_state, generation, done)
+
+    @Slot(str, str, str, int, object)
     def _speech_preparation_failed(
-        self, caption: str, spoken_text: str, final_state: str, done: object,
+        self, caption: str, spoken_text: str, final_state: str, generation: int, done: object,
     ) -> None:
-        # Fallback: mostra o balão e usa reprodução direta se gerar WAV falhar.
-        self._speech_active = bool(caption)
+        if not self._is_speech_generation_current(generation):
+            done.set()
+            return
+        if self._active_speech_generation != generation or self._active_speech_stop_event is None:
+            self._active_speech_stop_event = threading.Event()
+        self._active_speech_generation = generation
+        stop_event = self._active_speech_stop_event
+        self._active_speech_done = done
+        self._speech_active = True
         if caption:
             self.show_caption(caption)
         self._set_speech_visual_state("speaking")
+        self._update_cancel_button()
 
         def _fallback() -> None:
             try:
                 with self._tts_lock:
-                    if self._tts_engine and self._tts_voice_ja and spoken_text.strip():
+                    if (
+                        not stop_event.is_set()
+                        and self._is_speech_generation_current(generation)
+                        and self._tts_engine and self._tts_voice_ja and spoken_text.strip()
+                    ):
                         self._tts_engine.setProperty("voice", self._tts_voice_ja)
                         self._tts_engine.setProperty("rate", 165)
                         self._tts_engine.say(spoken_text)
@@ -1856,23 +1918,75 @@ class SvgHologram(QMainWindow):
             except Exception as exc:
                 print(f"[Aurora TTS] Fallback de voz falhou: {exc}")
             finally:
-                self.speech_playback_finished.emit(final_state, caption, done)
+                cancelled = stop_event.is_set() or not self._is_speech_generation_current(generation)
+                self.speech_playback_finished.emit(
+                    "cancelled" if cancelled else final_state, caption, generation, done
+                )
 
         threading.Thread(target=_fallback, daemon=True, name="AuroraSpeechFallback").start()
 
-    @Slot(str, str, object)
-    def _finish_prepared_speech(self, final_state: str, caption: str, done: object) -> None:
-        if caption:
-            self._speech_active = False
-            if getattr(self, "caption_label", None) is not None and self.caption_label.isVisible():
-                words = len(caption.split())
-                hold_ms = max(2500, min(5000, 1700 + words * 100))
-                self.caption_hide_timer.start(hold_ms)
-        self._set_speech_visual_state(final_state)
+    @Slot(str, str, int, object)
+    def _finish_prepared_speech(
+        self, final_state: str, caption: str, generation: int, done: object,
+    ) -> None:
         try:
+            if not self._is_speech_generation_current(generation):
+                return
+            self._speech_active = False
+            if self._active_speech_generation == generation:
+                self._active_speech_generation = None
+                self._active_speech_stop_event = None
+                self._active_speech_done = None
+            with self._speech_generation_lock:
+                if generation == self._speech_generation:
+                    self._speech_pending = False
+            cancelled = final_state == "cancelled"
+            if caption:
+                if cancelled:
+                    self.caption_hide_timer.stop()
+                    if self.caption_label.isVisible():
+                        self.caption_label.hide()
+                elif self.caption_label.isVisible():
+                    words = len(caption.split())
+                    hold_ms = max(2500, min(5000, 1700 + words * 100))
+                    self.caption_hide_timer.start(hold_ms)
+            self._set_speech_visual_state("idle" if cancelled else final_state)
+            self._update_cancel_button()
+            self.speech_queue_state_changed.emit(generation, False)
+        finally:
             done.set()
+
+    def _cancel_speech_output(self) -> bool:
+        with self._speech_generation_lock:
+            was_pending = self._speech_pending
+            self._speech_generation += 1
+            generation = self._speech_generation
+            self._speech_pending = False
+        was_active = self._speech_active
+        stop_event = self._active_speech_stop_event
+        self._speech_active = False
+        self._active_speech_generation = None
+        self._active_speech_stop_event = None
+        self._active_speech_done = None
+        if stop_event is not None:
+            stop_event.set()
+        try:
+            import winsound
+            winsound.PlaySound(None, winsound.SND_PURGE)
         except Exception:
             pass
+        try:
+            if self._tts_engine is not None:
+                self._tts_engine.stop()
+        except Exception:
+            pass
+        self.caption_hide_timer.stop()
+        if self.caption_label.isVisible():
+            self.caption_label.hide()
+        self._set_speech_visual_state("idle")
+        self.speech_queue_state_changed.emit(generation, False)
+        self._update_cancel_button()
+        return was_pending or was_active or stop_event is not None
 
     def speak_with_caption(
         self, caption: str, speech_text: str, *, final_state: Optional[str] = None,
