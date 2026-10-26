@@ -702,6 +702,7 @@ class AuroraAgent:
                         and desktop_batch_requires_serial
                         and call.name != preferred_desktop_tool
                     )
+                    tool_elapsed_ms = 0
                     if deferred:
                         result = ToolResult(
                             ok=True,
@@ -738,7 +739,7 @@ class AuroraAgent:
                         tool_elapsed_ms = round((time.perf_counter() - tool_started) * 1000)
                     print(
                         f"[Aurora agente] Ferramenta concluída: {call.name}; "
-                        f"ok={result.ok}; duração={tool_elapsed_ms if not deferred else 0}ms; "
+                        f"ok={result.ok}; duração={tool_elapsed_ms}ms; "
                         f"resumo={str(result.summary)[:180]}"
                     )
                     if call.name == "capturar_tela" and result.ok and not result.data.get("adiada"):
