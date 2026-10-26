@@ -148,8 +148,21 @@ def _shrink_local_vision_image_part(part: dict[str, Any], max_width: int) -> dic
     return part
 
 
+def _is_vision_repetition_error(exc: ProviderError) -> bool:
+    """Reconhece o aborto por geração repetitiva do backend local.
+
+    O Ollama responde `prediction aborted, token repeat limit reached` quando a
+    decodificação degenera em loop. Não é falta de contexto: encolher a imagem
+    não corrige, e cada tentativa custa uma inferência inteira.
+    """
+    detail = f"{exc} {getattr(exc, 'body', '')}".casefold()
+    return "repeat" in detail or "repeti" in detail or "degener" in detail
+
+
 def _is_vision_token_limit_error(exc: ProviderError) -> bool:
     """Reconhece erros de contexto/tokens do backend visual para tentar uma imagem menor."""
+    if _is_vision_repetition_error(exc):
+        return False
     detail = f"{exc} {getattr(exc, 'body', '')}".casefold()
     has_token_or_context = any(
         word in detail for word in ("token", "context length", "context window", "prompt length", "sequence length")
@@ -524,7 +537,12 @@ class AuroraAgent:
         return self.provider
 
     def _prepare_provider_request(
-        self, request: LLMRequest, request_provider, *, vision_max_width: int = 640
+        self,
+        request: LLMRequest,
+        request_provider,
+        *,
+        vision_max_width: int = 640,
+        repetition_retry: bool = False,
     ) -> LLMRequest:
         """Prepare a compact perception-only prompt and image for the local vision model."""
         vision_provider = getattr(self, "vision_provider", None)
@@ -556,6 +574,12 @@ class AuroraAgent:
         if not image_parts:
             return request
 
+        anti_repetition = (
+            " Sua descrição anterior entrou em repetição: escreva no máximo quatro fatos "
+            "curtos e distintos, sem repetir palavras nem listar o mesmo item duas vezes."
+            if repetition_retry
+            else ""
+        )
         prompt = (
             "Você é o módulo de percepção visual local da Aurora. Não responda ao usuário, "
             "não dê passo a passo e não diga o que a Aurora deveria fazer. Descreva somente "
@@ -564,6 +588,7 @@ class AuroraAgent:
             "Se coordenadas não estiverem disponíveis, não invente coordenadas. "
             "Responda em português com observações objetivas em até 600 caracteres. "
             f"Pedido original: {user_goal or 'Identifique a janela atual e seus elementos relevantes.'}"
+            f"{anti_repetition}"
         )
         compact_request = LLMRequest(
             messages=[
@@ -574,12 +599,19 @@ class AuroraAgent:
             ],
             tools=[],
             model=request.model,
-            temperature=0.1,
-            max_tokens=min(max(100, request.max_tokens), 300),
+            # Amostragem baixa demais degenera em loop em modelo 3B; a nova tentativa
+            # sobe a temperatura e encurta a saída para limitar o custo da inferência.
+            temperature=0.35 if repetition_retry else 0.1,
+            max_tokens=(
+                120 if repetition_retry else min(max(100, request.max_tokens), 300)
+            ),
             stream=False,
         )
         logger.info(
-            "Visão local em modo percepção: 1 mensagem, sem histórico/ferramentas, imagem <= " + str(vision_max_width) + "px, saída limitada."
+            "Visão local em modo percepção: 1 mensagem, sem histórico/ferramentas, imagem <= "
+            + str(vision_max_width)
+            + "px, saída limitada"
+            + (", retomada por repetição." if repetition_retry else ".")
         )
         return compact_request
 
@@ -685,7 +717,25 @@ class AuroraAgent:
                         and request_provider is getattr(self, "vision_provider", None)
                         and request_provider is not self.provider
                     )
-                    if not is_local_vision or not _is_vision_token_limit_error(exc):
+                    if not is_local_vision:
+                        raise
+
+                    # Repetição é degeneração de decodificação: a nova tentativa troca a
+                    # amostragem (e encurta a saída) em vez de encolher a imagem. Reduzir
+                    # a resolução perderia detalhe e ainda somaria mais duas inferências.
+                    if _is_vision_repetition_error(exc):
+                        print(
+                            "[Aurora agente] Geração repetitiva na visão local; "
+                            "tentando novamente com amostragem diferente e saída mais curta."
+                        )
+                        retry_request = self._prepare_provider_request(
+                            request, request_provider, repetition_retry=True
+                        )
+                        outcome["response"] = request_provider.chat(retry_request)
+                        outcome["vision_retry_repetition"] = True
+                        return
+
+                    if not _is_vision_token_limit_error(exc):
                         raise
 
                     last_error = exc

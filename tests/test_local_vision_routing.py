@@ -239,6 +239,110 @@ class LocalVisionRoutingTests(unittest.TestCase):
         )
         self.assertTrue(_is_vision_token_limit_error(error))
 
+    def test_vision_repetition_error_is_not_treated_as_context_limit(self):
+        """O Ollama aborta por repetição de tokens; isso não é limite de contexto."""
+        error = ProviderError(
+            "HTTP 500: prediction aborted, token repeat limit reached",
+            kind="unavailable",
+            status=500,
+            body='{"error":"prediction aborted, token repeat limit reached"}',
+        )
+        self.assertFalse(_is_vision_token_limit_error(error))
+
+    def test_vision_repetition_error_retries_with_new_sampling(self):
+        """Repetição pede nova amostragem; encolher a imagem não corrige o loop."""
+        buffer = BytesIO()
+        Image.new("RGB", (960, 540), (12, 34, 56)).save(buffer, format="PNG")
+        data_url = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+
+        class RepeatingFirstCallProvider:
+            def __init__(self):
+                self.requests = []
+
+            def chat(self, request):
+                self.requests.append(request)
+                if len(self.requests) == 1:
+                    raise ProviderError(
+                        "HTTP 500: prediction aborted, token repeat limit reached",
+                        kind="unavailable",
+                        status=500,
+                        body='{"error":"prediction aborted, token repeat limit reached"}',
+                    )
+                return LLMResponse(text="Steam aberto na loja, com a barra de busca visível.")
+
+        local = RepeatingFirstCallProvider()
+        agent = self._agent(vision_provider=local)
+        agent.cancel_event = threading.Event()
+        request = LLMRequest(
+            model="qwen2.5vl:3b",
+            messages=[
+                ChatMessage(
+                    role="user",
+                    content=[
+                        {"type": "text", "text": "Identifique a janela."},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                )
+            ],
+        )
+
+        response = agent._chat_with_cancel(request, deadline=time.monotonic() + 10)
+
+        self.assertIn("Steam", response.text)
+        self.assertEqual(len(local.requests), 2)
+        first, retry = local.requests
+        self.assertGreater(retry.temperature, first.temperature)
+        self.assertLess(retry.max_tokens, first.max_tokens)
+
+        # A imagem não deve ser encolhida para tratar repetição.
+        widths = []
+        for submitted in local.requests:
+            url = submitted.messages[0].content[1]["image_url"]["url"]
+            raw = base64.b64decode(url.split(",", 1)[1])
+            with Image.open(BytesIO(raw)) as img:
+                widths.append(img.size[0])
+        self.assertEqual(widths, [640, 640])
+
+    def test_vision_repetition_error_twice_stops_after_two_attempts(self):
+        """Custo limitado: duas tentativas e o turno cai no fallback de acessibilidade."""
+        buffer = BytesIO()
+        Image.new("RGB", (960, 540), (12, 34, 56)).save(buffer, format="PNG")
+        data_url = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+
+        class AlwaysRepeatingProvider:
+            def __init__(self):
+                self.requests = []
+
+            def chat(self, request):
+                self.requests.append(request)
+                raise ProviderError(
+                    "HTTP 500: prediction aborted, token repeat limit reached",
+                    kind="unavailable",
+                    status=500,
+                    body='{"error":"prediction aborted, token repeat limit reached"}',
+                )
+
+        local = AlwaysRepeatingProvider()
+        agent = self._agent(vision_provider=local)
+        agent.cancel_event = threading.Event()
+        request = LLMRequest(
+            model="qwen2.5vl:3b",
+            messages=[
+                ChatMessage(
+                    role="user",
+                    content=[
+                        {"type": "text", "text": "Identifique a janela."},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                )
+            ],
+        )
+
+        with self.assertRaises(ProviderError):
+            agent._chat_with_cancel(request, deadline=time.monotonic() + 10)
+
+        self.assertEqual(len(local.requests), 2)
+
     def test_local_vision_non_token_error_is_not_retried_as_context_limit(self):
         error = ProviderError(
             "HTTP 500: server internal error",
