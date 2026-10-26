@@ -97,6 +97,30 @@ def _should_auto_capture_after_action(
 
 
 # AURORA_LOCAL_APP_ROUTER_V1
+def _local_memory_intent(text: str) -> tuple[bool, str] | None:
+    """Detecta pedidos explícitos para guardar uma instrução sem chamar o LLM."""
+    raw = (text or "").strip()
+    raw = re.sub(r"^(?:(?:ei|hey)\s+)?aurora[\s,!:;.-]*", "", raw, flags=re.IGNORECASE).strip()
+
+    patterns = (
+        r"^(?:por favor\s+)?(?:guarde|guardar|guarda)\s+"
+        r"(?:(?:na mem[oó]ria|para lembrar)\s+)?"
+        r"(?:(?:a|uma|esta|essa|seguinte)\s+)?"
+        r"(?:(?:instru[cç][aã]o|regra|prefer[eê]ncia|nota|fato)\s*)?"
+        r"(?::|,|-)?\s*(.*)$",
+        r"^(?:por favor\s+)?(?:lembre-se de|lembre de|lembra de|anote|anotar|memorize|memorizar|registre|registrar)\s*"
+        r"(?:(?:que|o seguinte)\s+)?(.*)$",
+    )
+    for pattern in patterns:
+        match = re.fullmatch(pattern, raw, flags=re.IGNORECASE)
+        if match:
+            instruction = (match.group(1) or "").strip().strip(" \t\r\n,;:-")
+            if instruction.casefold().startswith("que "):
+                instruction = instruction[4:].strip()
+            return True, instruction
+    return None
+
+
 def _local_app_intent(text: str) -> tuple[str, dict[str, str]] | None:
     """Roteia comandos curtos e explícitos para ferramentas locais, sem consultar o LLM."""
     value = unicodedata.normalize("NFKD", (text or "").strip().casefold())
@@ -209,6 +233,93 @@ class AuroraAgent:
         self.tasks.save(task)
         self.events.emit("turn.started", task_id=task.id, session_id=session_id)
         self.audit.record("turn.started", task_id=task.id, message=text[:500])
+
+        # Salvar instruções explícitas não deve depender do provedor de linguagem.
+        # O caminho local responde mesmo quando o LLM está lento ou indisponível.
+        memory_intent = _local_memory_intent(text)
+        if memory_intent is not None:
+            _, instruction = memory_intent
+            memory_id = None
+            if not instruction:
+                final_text = (
+                    "Qual instrução devo guardar? Diga, por exemplo: "
+                    "'Aurora, guarde esta instrução: tire uma captura de tela antes de clicar.'"
+                )
+                task.transition(TaskStatus.COMPLETED)
+                memory_status = "needs_details"
+            else:
+                try:
+                    memory_id = self.memory.remember(
+                        instruction,
+                        layer="semantic",
+                        kind="instruction",
+                        tags=("instrucao", "preferencia"),
+                        importance=0.95,
+                        source="user",
+                        session_id=session_id,
+                    )
+                    if memory_id is None:
+                        final_text = (
+                            "Não consegui guardar essa instrução. A memória recusou o conteúdo "
+                            "por estar vazio ou parecer conter credenciais; nada foi salvo."
+                        )
+                        task.error = "instrução não gravada pela política de memória"
+                        task.transition(TaskStatus.FAILED)
+                        memory_status = "rejected"
+                    else:
+                        final_text = f"Guardei a instrução na memória local: {instruction}"
+                        task.transition(TaskStatus.COMPLETED)
+                        memory_status = "saved"
+                        self.audit.record(
+                            "memory.written",
+                            task_id=task.id,
+                            kind="instruction",
+                            memory_id=memory_id,
+                            content=instruction[:300],
+                        )
+                except Exception as exc:
+                    logger.exception("falha ao salvar instrução solicitada pelo usuário")
+                    final_text = f"Não consegui guardar a instrução: {type(exc).__name__}: {exc}"
+                    task.error = final_text
+                    task.transition(TaskStatus.FAILED)
+                    memory_status = "error"
+
+            self.tasks.save(task)
+            self.conversations.add_message(
+                session_id,
+                "assistant",
+                final_text,
+                meta={"task_id": task.id, "model": "local-memory", "status": task.status.value},
+            )
+            latency_ms = int((time.monotonic() - started) * 1000)
+            reply = AgentReply(
+                text=final_text,
+                task_id=task.id,
+                status=task.status.value,
+                model="local-memory",
+                tool_calls=0,
+                tools_used=["memoria_local"] if memory_status == "saved" else [],
+                latency_ms=latency_ms,
+                context=None,
+            )
+            self.events.emit(
+                "turn.finished",
+                task_id=task.id,
+                status=reply.status,
+                tools=len(reply.tools_used),
+                latency_ms=latency_ms,
+            )
+            self.audit.record(
+                "turn.finished",
+                task_id=task.id,
+                status=reply.status,
+                model=reply.model,
+                tools=reply.tools_used,
+                duration_ms=latency_ms,
+                memory_status=memory_status,
+            )
+            self.metrics.record("turn", value=latency_ms, model=reply.model, tools=len(reply.tools_used))
+            return reply
 
         messages, report = self._build_context(text, session_id)
         self._last_context = report
