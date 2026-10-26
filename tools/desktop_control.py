@@ -185,7 +185,8 @@ def _active_window_snapshot(limit: int = 50) -> dict[str, Any]:
                     if len(controls) >= max_scan_nodes:
                         break
 
-        for control in controls[:160]:
+        max_controls = 160 if scan_mode == "fast" else 500
+        for control in controls[:max_controls]:
             try:
                 info = getattr(control, "element_info", None)
                 control_type = str(getattr(info, "control_type", "") or "")
@@ -221,8 +222,15 @@ def _active_window_snapshot(limit: int = 50) -> dict[str, Any]:
                     }[control_type]
                     name = help_text or placeholder
                 name = re.sub(r"\s+", " ", name)[:180]
-                # Evita is_visible(), que pode exigir uma chamada COM adicional
-                # por controle e somar segundos em árvores grandes de navegadores.
+                # No modo rápido, evita uma chamada COM de visibilidade por controle;
+                # o retângulo ainda precisa cruzar a janela ativa. O modo full preserva
+                # a checagem de visibilidade mais detalhada.
+                if scan_mode == "full":
+                    try:
+                        if not control.is_visible():
+                            continue
+                    except Exception:
+                        pass
                 bounds = control.rectangle()
                 left, top, right, bottom = (
                     int(bounds.left), int(bounds.top), int(bounds.right), int(bounds.bottom)
