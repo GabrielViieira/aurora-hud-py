@@ -2243,7 +2243,12 @@ class SvgHologram(QMainWindow):
         if show_feedback:
             self.show_caption_requested.emit(feedback)
         self.visual_state_requested.emit("idle")
-        self._update_cancel_button()
+        if task_active:
+            # Mantém o botão desabilitado enquanto o turno cancelado termina de limpar o estado.
+            self.cancel_task_btn.setText("Cancelando…")
+            self.cancel_task_btn.setEnabled(False)
+        else:
+            self._update_cancel_button()
 
     def _on_agent_task_finished(self) -> None:
         with self._task_lock:
