@@ -301,18 +301,25 @@ def _active_window_snapshot(limit: int = 35) -> dict[str, Any]:
 
 def capture_screen(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     """Captura pixels para visão ou faz uma verificação rápida apenas via UI Automation."""
-    del ctx
     try:
         from aurora.tools.screen_capture import capture_monitors
 
-        max_width = int(args.get("largura_maxima", 640))
+        requested_max_width = int(args.get("largura_maxima", 640))
+        max_width = requested_max_width
         monitor_index = int(args.get("monitor", 1))
         accessibility_only = args.get("somente_acessibilidade", False) is True
         image_only = args.get("somente_imagem", False) is True
         if accessibility_only and image_only:
             return ToolResult.fail("somente_acessibilidade e somente_imagem não podem ser usados juntos")
-        if max_width < 320 or max_width > 2200:
+        if requested_max_width < 320 or requested_max_width > 2200:
             return ToolResult.fail("largura_maxima deve ficar entre 320 e 2200")
+        llm_settings = getattr(getattr(ctx, "settings", None), "llm", None)
+        local_vision_configured = bool(getattr(llm_settings, "vision_base_url", ""))
+        if local_vision_configured:
+            # A requisição visual local é reduzida novamente antes do envio; não capture
+            # uma imagem maior do que o modelo receberá, para evitar trabalho duplicado.
+            max_width = min(max_width, 640)
+        width_was_capped = max_width != requested_max_width
         if monitor_index < 1 or monitor_index > 16:
             return ToolResult.fail("monitor deve ficar entre 1 e 16")
 
@@ -383,6 +390,8 @@ def capture_screen(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
             "tempo_captura_ms": capture_ms,
             "tempo_uia_ms": uia_ms,
             "tempo_total_ms": total_ms,
+            "largura_solicitada": requested_max_width,
+            "limite_visao_local_aplicado": width_was_capped,
             "modo_uia": (
                 "omitida_captura_rapida" if image_only else
                 os.environ.get("AURORA_DESKTOP_UIA_MODE", "fast").strip().lower() or "fast"
@@ -702,7 +711,7 @@ def build_tools() -> list[ToolSpec]:
                 "type": "object",
                 "properties": {
                     "monitor": {"type": "integer", "minimum": 1, "maximum": 16, "description": "Índice de monitor (padrão 1)."},
-                    "largura_maxima": {"type": "integer", "minimum": 320, "maximum": 2200, "description": "Largura máxima da captura em pixels; padrão 640 para reduzir a latência e o uso de tokens. Aumente apenas quando o detalhe visual for insuficiente."},
+                    "largura_maxima": {"type": "integer", "minimum": 320, "maximum": 2200, "description": "Largura máxima pedida; padrão 640. Quando a visão local Ollama estiver configurada, valores acima de 640 são limitados a 640 para evitar codificar pixels que serão descartados antes da inferência."},
                     "somente_acessibilidade": {"type": "boolean", "description": "Preferir true para localizar campos/botões e executar tarefas com controles convencionais. Evita pixels e inferência visual se UI Automation retornar controles úteis; sem controles úteis, captura imagem como fallback."},
                     "somente_imagem": {"type": "boolean", "description": "Use true para tarefas puramente visuais (ícones, layout, conteúdo gráfico) ou quando UIA já foi considerada insuficiente; omite a varredura UIA e reduz latência."},
                 },
