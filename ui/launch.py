@@ -1740,6 +1740,8 @@ class SvgHologram(QMainWindow):
                         if not self._is_speech_generation_current(generation):
                             return
                         spoken_text = self._translate_to_japanese(text)
+                        if not self._is_speech_generation_current(generation):
+                            return
                         if not spoken_text or not _JA_KANA_RE.search(spoken_text):
                             audio_path = None
                         else:
