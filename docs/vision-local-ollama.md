@@ -50,7 +50,7 @@ Se houver um valor antigo, remova-o da sessão atual antes de iniciar o teste/ap
 Remove-Item Env:AURORA_LLM_VISION_MODEL -ErrorAction SilentlyContinue
 ```
 
-A ferramenta `capturar_tela` pode capturar até 960 px para preservar detalhe visual, mas o agente reduz a imagem enviada ao modelo local para no máximo 640 px. Se o backend responder com um erro de limite de tokens/contexto, o agente faz uma segunda tentativa com imagem de até 448 px. Isso reduz o uso de tokens visuais em modelos com janela de contexto pequena. Se texto pequeno ficar difícil de ler, prefira complementar com `interface_acessivel.elementos` antes de aumentar a resolução. O texto base64 da imagem também é excluído do histórico textual enviado ao provedor principal.
+A ferramenta `capturar_tela` usa 640 px por padrão para reduzir latência e tokens. O agente limita a imagem enviada ao modelo local a no máximo 640 px; se o backend responder com erro de limite de tokens/contexto, faz uma segunda tentativa com imagem de até 448 px. Isso reduz o uso de tokens visuais em modelos com janela de contexto pequena. Se texto pequeno ficar difícil de ler, prefira complementar com `interface_acessivel.elementos` antes de aumentar a resolução. O texto base64 da imagem também é excluído do histórico textual enviado ao provedor principal.
 
 ## 3. Testar a visão local isoladamente
 
