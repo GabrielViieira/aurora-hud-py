@@ -1,10 +1,14 @@
 """Testes da rota de visão local independente do provedor de conversa."""
 from __future__ import annotations
 
+import base64
 import sys
 import types
 import unittest
+from io import BytesIO
 from pathlib import Path
+
+from PIL import Image
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if "aurora" in sys.modules:
@@ -20,8 +24,8 @@ else:
 sys.path.insert(0, str(_REPO_ROOT.parent))
 
 from aurora.config.settings import Settings
-from aurora.core.agent import AuroraAgent
-from aurora.llm.provider import ChatMessage, LLMRequest
+from aurora.core.agent import AuroraAgent, _is_vision_token_limit_error
+from aurora.llm.provider import ChatMessage, LLMRequest, ProviderError
 
 
 class LocalVisionRoutingTests(unittest.TestCase):
@@ -109,6 +113,53 @@ class LocalVisionRoutingTests(unittest.TestCase):
         # A solicitação original não é modificada para o provedor principal.
         self.assertEqual(request.tools, tools)
         self.assertEqual(len(request.messages), 6)
+
+    def test_local_vision_request_resizes_large_data_url_image(self):
+        local = object()
+        agent = self._agent(vision_provider=local)
+        buffer = BytesIO()
+        Image.new("RGB", (960, 540), (12, 34, 56)).save(buffer, format="PNG")
+        data_url = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+        request = LLMRequest(
+            model="qwen2.5vl:3b",
+            messages=[
+                ChatMessage(
+                    role="user",
+                    content=[
+                        {"type": "text", "text": "Identifique a janela."},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                )
+            ],
+        )
+
+        prepared = agent._prepare_provider_request(request, local)
+        resized_url = prepared.messages[0].content[1]["image_url"]["url"]
+        resized_bytes = base64.b64decode(resized_url.split(",", 1)[1])
+        with Image.open(BytesIO(resized_bytes)) as resized:
+            self.assertEqual(resized.size, (640, 360))
+            self.assertEqual(resized.format, "JPEG")
+
+        # O payload da conversa principal continua intacto.
+        self.assertEqual(request.messages[0].content[1]["image_url"]["url"], data_url)
+
+    def test_local_vision_token_limit_error_is_detected(self):
+        error = ProviderError(
+            "HTTP 500: limit token atingido",
+            kind="bad_request",
+            status=500,
+            body='{"error":"limit token atingido"}',
+        )
+        self.assertTrue(_is_vision_token_limit_error(error))
+
+    def test_local_vision_non_token_error_is_not_retried_as_context_limit(self):
+        error = ProviderError(
+            "HTTP 500: server internal error",
+            kind="unavailable",
+            status=500,
+            body='{"error":"server internal error"}',
+        )
+        self.assertFalse(_is_vision_token_limit_error(error))
 
     def test_local_vision_observation_removes_images_for_main_provider(self):
         agent = self._agent(vision_provider=object())
