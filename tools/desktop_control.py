@@ -120,20 +120,21 @@ def _active_window_snapshot(limit: int = 50) -> dict[str, Any]:
                 "esquerda": int(rect.left), "topo": int(rect.top),
                 "direita": int(rect.right), "base": int(rect.bottom),
             },
+            "resumo_pesquisa": [],
             "elementos": [],
             "total_elementos_lidos": 0,
         }
         useful_types = {
             "Button", "Text", "Edit", "Hyperlink", "MenuItem", "TabItem",
             "CheckBox", "RadioButton", "ComboBox", "ListItem", "TreeItem",
-            "DataItem", "Document", "Group",
+            "DataItem", "Document", "Group", "Image",
         }
         priority_types = {
             # Campos editáveis são especialmente importantes para buscas e formulários.
             "Edit": -1, "Button": 0, "MenuItem": 0, "Hyperlink": 0,
             "ComboBox": 1, "CheckBox": 1, "RadioButton": 1, "TabItem": 1,
             "ListItem": 2, "TreeItem": 2, "DataItem": 2, "Text": 3,
-            "Document": 4, "Group": 5,
+            "Image": 2, "Document": 4, "Group": 5,
         }
         candidates: list[dict[str, Any]] = []
         seen: set[tuple[Any, ...]] = set()
@@ -199,11 +200,14 @@ def _active_window_snapshot(limit: int = 50) -> dict[str, Any]:
                 if not name:
                     # Botões sem rótulo podem ser ícones (por exemplo, uma lupa).
                     # Mantê-los permite usar geometria e proximidade para classificá-los.
-                    if control_type not in {"Edit", "Button"}:
+                    if control_type not in {"Edit", "Button", "Image"}:
                         continue
-                    name = help_text or (
-                        "[Campo de texto sem nome]" if control_type == "Edit" else "[Botão sem nome]"
-                    )
+                    placeholder = {
+                        "Edit": "[Campo de texto sem nome]",
+                        "Button": "[Botão sem nome]",
+                        "Image": "[Imagem sem nome]",
+                    }[control_type]
+                    name = help_text or placeholder
                 name = re.sub(r"\s+", " ", name)[:180]
                 try:
                     if not control.is_visible():
