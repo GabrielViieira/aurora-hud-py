@@ -134,7 +134,7 @@ def build_runtime(
     if provider_override is None and settings.llm.vision_base_url:
         vision_provider = FreeLLMClient(
             settings.llm.vision_base_url,
-            "ollama-local",
+            "ollama",
             timeout_s=settings.llm.vision_timeout_s,
             max_retries=settings.llm.vision_max_retries,
             on_metrics=_metrics_recorder(metrics),
