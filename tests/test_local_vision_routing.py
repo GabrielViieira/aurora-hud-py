@@ -99,12 +99,38 @@ class LocalVisionRoutingTests(unittest.TestCase):
         self.assertIsNot(prepared, request)
         self.assertEqual(prepared.tools, [])
         self.assertEqual(prepared.model, request.model)
-        self.assertEqual(len(prepared.messages), 2)
-        self.assertEqual(prepared.messages[0].content, "Descreva a janela que está aberta.")
-        self.assertIs(prepared.messages[1], image_message)
+        self.assertEqual(len(prepared.messages), 1)
+        self.assertEqual(prepared.max_tokens, 300)
+        parts = prepared.messages[0].content
+        self.assertIsInstance(parts, list)
+        self.assertIn("Descreva a janela que está aberta.", parts[0]["text"])
+        self.assertIn("até 600 caracteres", parts[0]["text"])
+        self.assertEqual(parts[1]["type"], "image_url")
         # A solicitação original não é modificada para o provedor principal.
         self.assertEqual(request.tools, tools)
         self.assertEqual(len(request.messages), 6)
+
+    def test_local_vision_observation_removes_images_for_main_provider(self):
+        agent = self._agent(vision_provider=object())
+        messages = [
+            ChatMessage(role="user", content="Abra o Steam e veja a loja."),
+            ChatMessage(
+                role="user",
+                content=[
+                    {"type": "text", "text": "Captura visual da área de trabalho."},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                ],
+            ),
+        ]
+
+        handed_off = agent._handoff_local_vision_observation(
+            messages, "Steam está aberto; a janela principal mostra a Loja e a barra lateral."
+        )
+
+        self.assertTrue(handed_off)
+        self.assertTrue(all(not (isinstance(m.content, list)) for m in messages))
+        self.assertIn("Steam está aberto", messages[1].content)
+        self.assertIn("Captura visual", messages[1].content)
 
     def test_main_provider_keeps_tools_for_image_requests(self):
         local = object()
