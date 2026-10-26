@@ -43,6 +43,14 @@ class SearchPerceptionTests(unittest.TestCase):
         self.assertGreater(result[0]["pontuacao_busca"], result[1]["pontuacao_busca"])
         self.assertEqual(result[0]["confianca_busca"], "alta")
 
+    def test_static_search_label_does_not_outrank_input_field(self):
+        field = element("Edit", "[Campo de texto sem nome]", 150, 70, 700, 106)
+        label = element("Text", "Search", 80, 72, 130, 100)
+        result = rank_search_candidates([label, field], window_width=1000)
+
+        self.assertEqual(result[0]["tipo"], "Edit")
+        self.assertEqual(result[0]["papel_sugerido"], "possível campo de busca")
+
     def test_wide_unnamed_edit_is_a_candidate(self):
         field = element("Edit", "[Campo de texto sem nome]", 150, 70, 700, 106)
         result = rank_search_candidates([field], window_width=1000)
