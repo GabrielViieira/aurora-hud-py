@@ -1,7 +1,14 @@
 """Testes do classificador genérico de controles de pesquisa."""
+import importlib.util
 import unittest
+from pathlib import Path
 
-from tools.search_perception import rank_search_candidates
+_MODULE_PATH = Path(__file__).resolve().parents[1] / "tools" / "search_perception.py"
+_SPEC = importlib.util.spec_from_file_location("search_perception_under_test", _MODULE_PATH)
+assert _SPEC is not None and _SPEC.loader is not None
+_MODULE = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(_MODULE)
+rank_search_candidates = _MODULE.rank_search_candidates
 
 
 def element(
