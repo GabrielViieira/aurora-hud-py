@@ -49,7 +49,7 @@ _LLM_CALL_TIMEOUT_PADDING_SECONDS = 15.0
 
 
 class TaskDeadlineExceeded(TimeoutError):
-    """A tarefa excedeu seu prazo global enquanto aguardava o provedor."""
+    """O prazo máximo da chamada ao provedor ou do turno foi excedido."""
 
 
 
@@ -656,7 +656,7 @@ class AuroraAgent:
         except TaskDeadlineExceeded as exc:
             elapsed_s = time.monotonic() - started
             logger.warning(
-                "prazo global da tarefa excedido durante chamada ao modelo",
+                "prazo de espera do modelo excedido",
                 extra={"aurora": {"elapsed_s": round(elapsed_s, 2)}},
             )
             final_text = (
@@ -665,7 +665,7 @@ class AuroraAgent:
                 "para iniciar novas ações. Tente novamente; se acontecer de novo, verifique "
                 "a conexão e a disponibilidade do provedor."
             )
-            task.error = f"prazo global excedido após {elapsed_s:.1f}s: {exc}"
+            task.error = f"prazo de espera do modelo/turno excedido após {elapsed_s:.1f}s: {exc}"
             if task.status not in {TaskStatus.COMPLETED, TaskStatus.CANCELLED, TaskStatus.FAILED}:
                 task.transition(TaskStatus.FAILED)
         except ProviderError as exc:
