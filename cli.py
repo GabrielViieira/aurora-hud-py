@@ -323,6 +323,7 @@ def repl(runtime: Runtime) -> int:
             continue
 
         try:
+            agent.reset_cancel()
             reply = agent.handle(line)
         except KeyboardInterrupt:
             agent.cancel()
