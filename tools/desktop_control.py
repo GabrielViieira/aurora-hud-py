@@ -290,7 +290,7 @@ def capture_screen(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     try:
         from aurora.tools.screen_capture import capture_monitors
 
-        max_width = int(args.get("largura_maxima", 960))
+        max_width = int(args.get("largura_maxima", 640))
         monitor_index = int(args.get("monitor", 1))
         accessibility_only = args.get("somente_acessibilidade", False) is True
         image_only = args.get("somente_imagem", False) is True
@@ -687,7 +687,7 @@ def build_tools() -> list[ToolSpec]:
                 "type": "object",
                 "properties": {
                     "monitor": {"type": "integer", "minimum": 1, "maximum": 16, "description": "Índice de monitor (padrão 1)."},
-                    "largura_maxima": {"type": "integer", "minimum": 320, "maximum": 2200, "description": "Largura máxima da imagem enviada ao modelo; padrão 960 para reduzir a carga do modelo visual local."},
+                    "largura_maxima": {"type": "integer", "minimum": 320, "maximum": 2200, "description": "Largura máxima da captura em pixels; padrão 640 para reduzir a latência e o uso de tokens. Aumente apenas quando o detalhe visual for insuficiente."},
                     "somente_acessibilidade": {"type": "boolean", "description": "Verificação rápida sem gerar imagem; se UI Automation não retornar controles úteis, a ferramenta captura a tela como fallback."},
                     "somente_imagem": {"type": "boolean", "description": "Captura pixels sem varrer UI Automation, para verificações pós-ação cuja próxima decisão depende da imagem; usar quando latência importa."},
                 },
