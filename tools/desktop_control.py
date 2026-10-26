@@ -282,31 +282,59 @@ def _active_window_snapshot(limit: int = 50) -> dict[str, Any]:
 
 
 def capture_screen(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
-    """Captura um monitor e fornece data_url para o agente enviar como imagem ao LLM."""
+    """Captura pixels para visão ou faz uma verificação rápida apenas via UI Automation."""
     del ctx
     try:
         from aurora.tools.screen_capture import capture_monitors
+
         max_width = int(args.get("largura_maxima", 960))
         monitor_index = int(args.get("monitor", 1))
+        accessibility_only = args.get("somente_acessibilidade", False) is True
         if max_width < 320 or max_width > 2200:
             return ToolResult.fail("largura_maxima deve ficar entre 320 e 2200")
         if monitor_index < 1 or monitor_index > 16:
             return ToolResult.fail("monitor deve ficar entre 1 e 16")
 
         total_started = time.perf_counter()
-        capture_started = time.perf_counter()
-        # Captura apenas o monitor solicitado, evitando codificar telas que serão descartadas.
-        screens = capture_monitors(max_width=max_width, monitor_index=monitor_index)
-        capture_ms = round((time.perf_counter() - capture_started) * 1000)
-        if not screens:
-            return ToolResult.fail(f"monitor {monitor_index} não encontrado ou indisponível")
-        selected = screens[0]
-        data_url = str(selected.get("data_url", ""))
-        if not data_url.startswith("data:image/"):
-            return ToolResult.fail("captura não produziu uma imagem válida")
+        screens: list[dict[str, Any]] = []
+        capture_ms = 0
+        selected: dict[str, Any] | None = None
+        data_url = ""
+
+        # Caminho rápido: primeiro tenta obter somente a árvore acessível, sem
+        # capturar/encodar imagem. Se UIA não trouxer controles, cai para a captura visual.
+        if not accessibility_only:
+            capture_started = time.perf_counter()
+            screens = capture_monitors(max_width=max_width, monitor_index=monitor_index)
+            capture_ms = round((time.perf_counter() - capture_started) * 1000)
+            if not screens:
+                return ToolResult.fail(f"monitor {monitor_index} não encontrado ou indisponível")
+            selected = screens[0]
+            data_url = str(selected.get("data_url", ""))
+            if not data_url.startswith("data:image/"):
+                return ToolResult.fail("captura não produziu uma imagem válida")
+
         uia_started = time.perf_counter()
         ui_snapshot = _active_window_snapshot()
         uia_ms = round((time.perf_counter() - uia_started) * 1000)
+        ui_elements = ui_snapshot.get("elementos", [])
+        uia_useful = bool(ui_snapshot.get("disponivel") and isinstance(ui_elements, list) and ui_elements)
+
+        if accessibility_only and not uia_useful:
+            # UIA não conseguiu descrever a tela; a verificação adaptativa volta
+            # para imagem em vez de deixar o agente decidir às cegas.
+            capture_started = time.perf_counter()
+            screens = capture_monitors(max_width=max_width, monitor_index=monitor_index)
+            capture_ms = round((time.perf_counter() - capture_started) * 1000)
+            if not screens:
+                return ToolResult.fail(
+                    "UI Automation não retornou controles úteis e a captura visual também falhou."
+                )
+            selected = screens[0]
+            data_url = str(selected.get("data_url", ""))
+            if not data_url.startswith("data:image/"):
+                return ToolResult.fail("captura não produziu uma imagem válida")
+
         total_ms = round((time.perf_counter() - total_started) * 1000)
         try:
             virtual_left, virtual_top, virtual_width, virtual_height = _virtual_bounds(_pyautogui())
@@ -318,52 +346,186 @@ def capture_screen(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
             }
         except Exception:
             virtual_bounds = None
-        metadata = {
+
+        metadata: dict[str, Any] = {
             "tempo_captura_ms": capture_ms,
             "tempo_uia_ms": uia_ms,
             "tempo_total_ms": total_ms,
             "modo_uia": os.environ.get("AURORA_DESKTOP_UIA_MODE", "fast").strip().lower() or "fast",
-            "monitor": selected["monitor"],
-            "origem_x": selected["left"],
-            "origem_y": selected["top"],
-            "largura_original": selected["width"],
-            "altura_original": selected["height"],
-            "largura_capturada": selected["captured_size"][0],
-            "altura_capturada": selected["captured_size"][1],
             "area_trabalho_virtual": virtual_bounds,
-            "mime_type": selected.get("mime_type", "image/jpeg"),
             "interface_acessivel": ui_snapshot,
         }
-        ui_count = len(ui_snapshot.get("elementos", []))
+        if selected is not None:
+            metadata.update({
+                "monitor": selected["monitor"],
+                "origem_x": selected["left"],
+                "origem_y": selected["top"],
+                "largura_original": selected["width"],
+                "altura_original": selected["height"],
+                "largura_capturada": selected["captured_size"][0],
+                "altura_capturada": selected["captured_size"][1],
+                "mime_type": selected.get("mime_type", "image/jpeg"),
+            })
+        else:
+            metadata["somente_acessibilidade"] = True
+
+        ui_count = len(ui_elements) if isinstance(ui_elements, list) else 0
         search_count = len(ui_snapshot.get("resumo_pesquisa", []))
         active_title = str(ui_snapshot.get("janela_ativa") or "janela não identificada")
-        return ToolResult(
-            ok=True,
-            summary=(f"Tela capturada: monitor {monitor_index}, "
-                     f"{metadata['largura_capturada']}x{metadata['altura_capturada']} "
-                     f"(captura {capture_ms} ms, UIA {uia_ms} ms). "
-                     + (f"Origem desktop da captura=({selected['left']}, {selected['top']}); "
-                        f"tamanho original={selected['width']}x{selected['height']}; "
-                        f"área de trabalho virtual={virtual_bounds}. " if virtual_bounds else "")
-                     + f"Janela em primeiro plano: {active_title}. "
-                     + (f"Leitura local encontrou {ui_count} controles acessíveis." if ui_snapshot.get("disponivel") else
-                        "Leitura local de controles indisponível; use a imagem e não invente nomes de elementos.")
-                     + (f" Classificador heurístico destacou {search_count} possível(is) candidato(s) a busca; confira a pontuação, as evidências e a imagem." if ui_snapshot.get("disponivel") else "")
-                     + " A imagem será enviada ao modelo para inspeção visual."),
-            data={**metadata, "data_url": data_url},
-        )
+        if selected is None:
+            summary = (
+                f"Verificação rápida via UI Automation, sem imagem: janela={active_title}; "
+                f"controles={ui_count}; UIA={uia_ms} ms; total={total_ms} ms. "
+                "Use esses dados para controles acessíveis; se o estado visual não estiver claro, "
+                "solicite capturar_tela para análise visual."
+            )
+        else:
+            summary = (
+                f"Tela capturada: monitor {monitor_index}, "
+                f"{metadata['largura_capturada']}x{metadata['altura_capturada']} "
+                f"(captura {capture_ms} ms, UIA {uia_ms} ms, total {total_ms} ms). "
+                + (f"Origem desktop da captura=({selected['left']}, {selected['top']}); "
+                   f"tamanho original={selected['width']}x{selected['height']}; "
+                   f"área de trabalho virtual={virtual_bounds}. " if virtual_bounds else "")
+                + f"Janela em primeiro plano: {active_title}. "
+                + (f"Leitura local encontrou {ui_count} controles acessíveis." if ui_snapshot.get("disponivel") else
+                   "Leitura local de controles indisponível; use a imagem e não invente nomes de elementos.")
+                + (f" Classificador heurístico destacou {search_count} possível(is) candidato(s) a busca; confira a pontuação, as evidências e a imagem." if ui_snapshot.get("disponivel") else "")
+                + " A imagem será enviada ao modelo para inspeção visual."
+            )
+        result_data = dict(metadata)
+        if selected is not None:
+            result_data["data_url"] = data_url
+        return ToolResult(ok=True, summary=summary, data=result_data)
     except Exception as exc:
         return ToolResult.fail(f"Falha ao capturar a tela: {type(exc).__name__}: {exc}")
+
+
+def _perform_accessible_mouse_action(target: str, action: str) -> dict[str, Any]:
+    """Atinge um controle UIA por nome/AutomationId, sem inferir coordenadas da imagem."""
+    if os.name != "nt":
+        raise RuntimeError("Ação por controle acessível só está disponível no Windows.")
+    normalized_target = re.sub(r"\s+", " ", target).strip().casefold()
+    if not normalized_target:
+        raise ValueError("controle precisa conter um nome ou id de automação exato.")
+
+    import ctypes
+    from pywinauto import Desktop
+
+    hwnd = int(ctypes.windll.user32.GetForegroundWindow())
+    if not hwnd:
+        raise RuntimeError("O Windows não informou uma janela em primeiro plano.")
+    window = Desktop(backend="uia").window(handle=hwnd)
+    if not window.exists(timeout=0.5):
+        raise RuntimeError("A janela ativa não está acessível pela UI Automation.")
+
+    found: dict[tuple[Any, ...], Any] = {}
+    # Tenta pelo AutomationId (normalmente mais barato) e depois pelo nome exato.
+    for criterion in ({"auto_id": target}, {"title": target}):
+        try:
+            candidates = window.descendants(**criterion)
+        except Exception:
+            candidates = []
+        for control in candidates:
+            try:
+                info = getattr(control, "element_info", None)
+                name = str(control.window_text() or getattr(info, "name", "") or "").strip()
+                automation_id = str(getattr(info, "automation_id", "") or "").strip()
+                matched_values = {
+                    re.sub(r"\s+", " ", value).strip().casefold()
+                    for value in (name, automation_id) if value
+                }
+                if normalized_target not in matched_values:
+                    continue
+                bounds = control.rectangle()
+                control_type = str(getattr(info, "control_type", "") or "")
+                key = (control_type, name.casefold(), automation_id, int(bounds.left), int(bounds.top),
+                       int(bounds.right), int(bounds.bottom))
+                found[key] = control
+            except Exception:
+                continue
+
+    if not found:
+        raise ValueError(
+            f"nenhum controle visível corresponde exatamente a {target!r}; "
+            "use o nome/id retornado por capturar_tela ou use coordenadas verificadas."
+        )
+    if len(found) != 1:
+        raise ValueError(
+            f"o controle {target!r} corresponde a {len(found)} elementos; "
+            "use o id de automação para distinguir o alvo."
+        )
+
+    control = next(iter(found.values()))
+    try:
+        if not control.is_visible():
+            raise ValueError(f"controle {target!r} não está visível.")
+        if not control.is_enabled():
+            raise ValueError(f"controle {target!r} está desabilitado.")
+    except AttributeError:
+        pass
+
+    method = "click_input"
+    if action == "clicar":
+        invoke = getattr(control, "invoke", None)
+        if callable(invoke):
+            try:
+                invoke()
+                method = "uia_invoke"
+            except (AttributeError, NotImplementedError):
+                control.click_input()
+            except Exception as exc:
+                # Só faz fallback quando o método não está disponível; um erro genérico
+                # poderia ter ocorrido depois de a aplicação receber a ação.
+                if exc.__class__.__name__ in {"NoPatternInterfaceError", "NoPatternInterface"}:
+                    control.click_input()
+                else:
+                    raise
+    elif action == "duplo_clique":
+        control.double_click_input()
+        method = "double_click_input"
+    elif action == "clique_direito":
+        control.right_click_input()
+        method = "right_click_input"
+    else:
+        raise ValueError("controle nomeado só aceita clicar, duplo_clique ou clique_direito.")
+
+    bounds = control.rectangle()
+    return {
+        "controle": str(control.window_text() or target)[:180],
+        "id_automacao": str(getattr(getattr(control, "element_info", None), "automation_id", "") or "")[:120],
+        "tipo": str(getattr(getattr(control, "element_info", None), "control_type", "") or ""),
+        "metodo": method,
+        "centro_x": (int(bounds.left) + int(bounds.right)) // 2,
+        "centro_y": (int(bounds.top) + int(bounds.bottom)) // 2,
+    }
 
 
 def control_mouse(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     del ctx
     try:
-        pyautogui = _pyautogui()
         action = str(args.get("acao", "")).strip().lower()
         duration = float(args.get("duracao", 0.15))
         if not 0 <= duration <= 2.0:
             return ToolResult.fail("duracao precisa estar entre 0 e 2 segundos")
+
+        accessible_target = str(args.get("controle", "") or "").strip()
+        if accessible_target:
+            if action not in {"clicar", "duplo_clique", "clique_direito"}:
+                return ToolResult.fail(
+                    "controle nomeado aceita apenas clicar, duplo_clique ou clique_direito"
+                )
+            performed = _perform_accessible_mouse_action(accessible_target, action)
+            return ToolResult(
+                ok=True,
+                summary=(
+                    f"Mouse via UI Automation: {action} no controle "
+                    f"{performed['controle']!r} pelo método {performed['metodo']}."
+                ),
+                data={"acao": action, "origem": "ui_automation", **performed},
+            )
+
+        pyautogui = _pyautogui()
         if action == "scroll":
             amount = int(args.get("quantidade_scroll", 0))
             if not -20 <= amount <= 20 or amount == 0:
@@ -490,6 +652,7 @@ def build_tools() -> list[ToolSpec]:
                 "properties": {
                     "monitor": {"type": "integer", "minimum": 1, "maximum": 16, "description": "Índice de monitor (padrão 1)."},
                     "largura_maxima": {"type": "integer", "minimum": 320, "maximum": 2200, "description": "Largura máxima da imagem enviada ao modelo; padrão 960 para reduzir a carga do modelo visual local."},
+                    "somente_acessibilidade": {"type": "boolean", "description": "Verificação rápida sem gerar imagem; se UI Automation não retornar controles úteis, a ferramenta captura a tela como fallback."},
                 },
                 "additionalProperties": False,
             },
@@ -504,6 +667,10 @@ def build_tools() -> list[ToolSpec]:
                 "type": "object",
                 "properties": {
                     "acao": {"type": "string", "enum": ["mover", "clicar", "duplo_clique", "clique_direito", "scroll", "arrastar"]},
+                    "controle": {
+                        "type": "string", "maxLength": 180,
+                        "description": "Opcional: nome EXATO ou AutomationId de um controle listado por capturar_tela. Para clicar/duplo-clique/clique direito, prefira isso quando houver correspondência única; não use rótulos ambíguos.",
+                    },
                     "x": {
                         "type": "integer", "minimum": -10000, "maximum": 10000,
                         "description": "Coordenada X absoluta do desktop em pixels. Prefira centro_x da UI Automation; para imagem reduzida, aplique origem e fator de escala da captura. Pode ser negativa somente se estiver dentro dos limites virtuais.",
