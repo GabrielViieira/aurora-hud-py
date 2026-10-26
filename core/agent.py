@@ -45,6 +45,8 @@ _NON_MUTATING_DESKTOP_TOOLS = frozenset({"capturar_tela", "listar_aplicativos"})
 # Impomos também um prazo de parede por chamada para que o HUD não fique
 # indefinidamente em thinking se a conexão permanecer parcialmente aberta.
 _MAX_LLM_CALL_WALL_SECONDS = 90.0
+# Modelos visuais locais podem precisar de mais tempo na primeira inferência.
+_MAX_LOCAL_VISION_CALL_WALL_SECONDS = 150.0
 _LLM_CALL_TIMEOUT_PADDING_SECONDS = 15.0
 
 
@@ -189,9 +191,12 @@ class AuroraAgent:
         events: EventBus,
         metrics: Metrics,
         policy: PermissionPolicy,
+        vision_provider=None,
     ) -> None:
         self.settings = settings
         self.provider = provider
+        # Se configurado, usa um endpoint separado apenas para mensagens com imagens.
+        self.vision_provider = vision_provider
         self.registry = registry
         self.router = router
         self.memory = memory
@@ -232,6 +237,14 @@ class AuroraAgent:
         """Limpa um cancelamento anterior antes de iniciar explicitamente um novo turno."""
         self.cancel_event.clear()
 
+    def _provider_for_request(self, request: LLMRequest):
+        """Escolhe a visão local para pedidos com imagens; o chat segue no provedor principal."""
+        if _messages_contain_image(request.messages):
+            vision_provider = getattr(self, "vision_provider", None)
+            if vision_provider is not None:
+                return vision_provider
+        return self.provider
+
     def _chat_with_cancel(
         self, request: LLMRequest, *, deadline: float
     ) -> LLMResponse | None:
@@ -243,10 +256,11 @@ class AuroraAgent:
         """
         completed = threading.Event()
         outcome: dict[str, Any] = {}
+        request_provider = self._provider_for_request(request)
 
         def request_worker() -> None:
             try:
-                outcome["response"] = self.provider.chat(request)
+                outcome["response"] = request_provider.chat(request)
             except Exception as exc:
                 outcome["error"] = exc
             finally:
@@ -464,11 +478,27 @@ class AuroraAgent:
                     max_tokens=self.settings.llm.max_output_tokens,
                 )
                 llm_started = time.monotonic()
-                configured_timeout = max(1.0, float(self.settings.llm.timeout_s))
+                is_vision_request = _messages_contain_image(messages)
+                uses_local_vision = (
+                    is_vision_request and getattr(self, "vision_provider", None) is not None
+                )
+                configured_timeout = max(
+                    1.0,
+                    float(
+                        self.settings.llm.vision_timeout_s
+                        if uses_local_vision
+                        else self.settings.llm.timeout_s
+                    ),
+                )
+                max_call_wall_seconds = (
+                    _MAX_LOCAL_VISION_CALL_WALL_SECONDS
+                    if uses_local_vision
+                    else _MAX_LLM_CALL_WALL_SECONDS
+                )
                 request_timeout = max(
                     15.0,
                     min(
-                        _MAX_LLM_CALL_WALL_SECONDS,
+                        max_call_wall_seconds,
                         configured_timeout + _LLM_CALL_TIMEOUT_PADDING_SECONDS,
                     ),
                 )
@@ -476,7 +506,8 @@ class AuroraAgent:
                 llm_wait_started = time.monotonic()
                 print(
                     f"[Aurora agente] Chamando modelo na iteração {iterations}; "
-                    f"modelo={request.model}; imagem={_messages_contain_image(messages)}; "
+                    f"modelo={request.model}; imagem={is_vision_request}; "
+                    f"provedor={'visao-local' if uses_local_vision else 'principal'}; "
                     f"prazo_de_espera={request_deadline - llm_wait_started:.1f}s."
                 )
                 response = self._chat_with_cancel(request, deadline=request_deadline)
