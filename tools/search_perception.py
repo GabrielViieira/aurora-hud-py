@@ -154,9 +154,9 @@ def rank_search_candidates(
     # Ícones de lupa podem ser botões sem nome. A proximidade com um Edit
     # horizontal ajuda a reconhecê-los sem depender do aplicativo.
     for button in ranked:
-        if button.get("tipo") != "Button":
+        if button.get("tipo") not in {"Button", "Image"}:
             continue
-        if not str(button.get("nome") or "").startswith("[Botão sem nome]"):
+        if not str(button.get("nome") or "").startswith(("[Botão sem nome]", "[Imagem sem nome]")):
             continue
         if str(button.get("ajuda") or "").strip() or str(button.get("id_automacao") or "").strip():
             continue
@@ -170,7 +170,7 @@ def rank_search_candidates(
                 field["evidencias_busca"].append("há um botão próximo que pode ser a ação/ícone de busca")
             button["pontuacao_busca"] = min(100, max(20, button["pontuacao_busca"]) + 18)
             button["evidencias_busca"].append(
-                "botão sem nome alinhado a um campo editável comprido; pode ser uma lupa"
+                "controle visual sem nome alinhado a um campo editável comprido; pode ser uma lupa"
             )
             break
 
@@ -189,6 +189,8 @@ def rank_search_candidates(
             item["papel_sugerido"] = "possível campo de busca"
         elif score >= 30 and item.get("tipo") == "Button":
             item["papel_sugerido"] = "possível botão de busca"
+        elif score >= 30 and item.get("tipo") == "Image":
+            item["papel_sugerido"] = "possível ícone de busca"
         else:
             item["papel_sugerido"] = ""
 
