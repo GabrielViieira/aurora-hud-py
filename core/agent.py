@@ -78,6 +78,26 @@ def _messages_contain_image(messages: list[ChatMessage]) -> bool:
                 return True
     return False
 
+def _has_useful_accessibility_snapshot(messages: list[ChatMessage]) -> bool:
+    """Retorna True se uma mensagem de ferramenta contém controles UIA utilizáveis."""
+    for message in messages:
+        if message.role != "tool" or not isinstance(message.content, str):
+            continue
+        try:
+            payload = json.loads(message.content)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            continue
+        snapshot = data.get("interface_acessivel")
+        if not isinstance(snapshot, dict) or not snapshot.get("disponivel"):
+            continue
+        elements = snapshot.get("elementos")
+        if isinstance(elements, list) and elements:
+            return True
+    return False
+
 
 def _shrink_local_vision_image_part(part: dict[str, Any], max_width: int) -> dict[str, Any]:
     """Reduz imagens data URL antes de enviá-las ao modelo visual local."""
@@ -598,6 +618,52 @@ class AuroraAgent:
         )
         return True
 
+    def _handoff_local_vision_failure_to_accessibility(
+        self, messages: list[ChatMessage], error: ProviderError
+    ) -> bool:
+        """Remove pixels after local vision failure when structured UIA data is available."""
+        if not _has_useful_accessibility_snapshot(messages):
+            return False
+        image_indexes = [
+            index for index, message in enumerate(messages)
+            if _messages_contain_image([message])
+        ]
+        if not image_indexes:
+            return False
+
+        detail = str(error).strip()
+        if len(detail) > 180:
+            detail = detail[:177] + "..."
+        note = (
+            "A análise de pixels pelo modelo visual local falhou"
+            + (f" ({detail})" if detail else "")
+            + ". Use somente os controles estruturados retornados pela ferramenta "
+            + "capturar_tela; não finja ter visto a imagem nem invente posições. "
+            + "Se esses dados não forem suficientes para uma ação segura, informe a limitação."
+        )
+        for index in image_indexes:
+            message = messages[index]
+            parts = message.content if isinstance(message.content, list) else []
+            text_parts = [
+                str(part.get("text", "")).strip()
+                for part in parts
+                if isinstance(part, dict) and part.get("type") == "text" and part.get("text")
+            ]
+            content = "\n".join(text_parts).strip()
+            if index == image_indexes[-1]:
+                content = (content + "\n" + note).strip()
+            elif content:
+                content += "\n(Pixels desta captura removidos; use apenas os dados estruturados já registrados.)"
+            else:
+                content = "(Pixels desta captura indisponíveis; use apenas os dados estruturados já registrados.)"
+            messages[index] = ChatMessage(role=message.role, content=content)
+
+        print(
+            "[Aurora agente] Visão local falhou; removi as imagens e continuarei "
+            "com os controles UIA disponíveis, sem inventar observações visuais."
+        )
+        return True
+
     def _chat_with_cancel(
         self, request: LLMRequest, *, deadline: float
     ) -> LLMResponse | None:
@@ -624,15 +690,26 @@ class AuroraAgent:
                     )
                     if not is_local_vision or not _is_vision_token_limit_error(exc):
                         raise
-                    smaller_request = self._prepare_provider_request(
-                        request, request_provider, vision_max_width=448
-                    )
-                    print(
-                        "[Aurora agente] Limite de tokens/contexto na visão local; "
-                        "tentando novamente com imagem reduzida para até 448 px."
-                    )
-                    outcome["response"] = request_provider.chat(smaller_request)
-                    outcome["vision_retry_downscaled"] = True
+
+                    last_error = exc
+                    for width in (448, 320):
+                        smaller_request = self._prepare_provider_request(
+                            request, request_provider, vision_max_width=width
+                        )
+                        print(
+                            "[Aurora agente] Limite de tokens/contexto na visão local; "
+                            f"tentando novamente com imagem de até {width} px."
+                        )
+                        try:
+                            outcome["response"] = request_provider.chat(smaller_request)
+                        except ProviderError as retry_error:
+                            if not _is_vision_token_limit_error(retry_error):
+                                raise
+                            last_error = retry_error
+                            continue
+                        outcome["vision_retry_downscaled"] = width
+                        return
+                    raise last_error
             except Exception as exc:
                 outcome["error"] = exc
             finally:
@@ -896,7 +973,11 @@ class AuroraAgent:
                 try:
                     response = self._chat_with_cancel(request, deadline=request_deadline)
                 except ProviderError as call_error:
-                    if uses_local_vision or not _is_token_limit_error(call_error):
+                    if uses_local_vision:
+                        if self._handoff_local_vision_failure_to_accessibility(messages, call_error):
+                            continue
+                        raise
+                    if not _is_token_limit_error(call_error):
                         raise
                     recovery_error = call_error
                     recovered = False
@@ -1255,6 +1336,10 @@ class AuroraAgent:
                 task.transition(TaskStatus.FAILED)
         except ProviderError as exc:
             logger.warning("falha do provedor", extra={"aurora": {"kind": exc.kind}})
+            print(
+                f"[Aurora agente] Detalhes da falha do provedor: tipo={exc.kind}; "
+                f"HTTP={getattr(exc, 'status', None)}; detalhe={str(exc)[:260]}"
+            )
             if self.cancel_event.is_set():
                 final_text = "Tarefa cancelada a pedido do usuário."
                 task.error = "cancelada pelo usuário"
