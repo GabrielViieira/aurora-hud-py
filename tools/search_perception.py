@@ -50,7 +50,16 @@ def _score_candidate(candidate: dict[str, Any], window_width: int) -> tuple[int,
     evidence: list[str] = []
 
     if _has_term(name, _SEARCH_TERMS):
-        score += 48
+        # Rótulo em um campo editável é evidência mais forte que o mesmo texto
+        # em um Text estático (que pode apenas rotular um campo próximo).
+        if control_type == "Edit":
+            score += 52
+        elif control_type == "Button":
+            score += 35
+        elif control_type in {"Text", "Hyperlink"}:
+            score += 24
+        else:
+            score += 32
         evidence.append("rótulo contém termo de pesquisa")
     if _has_term(help_text, _SEARCH_TERMS):
         score += 30
