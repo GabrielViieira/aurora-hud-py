@@ -221,6 +221,43 @@ class AuroraAgent:
         """Limpa um cancelamento anterior antes de iniciar explicitamente um novo turno."""
         self.cancel_event.clear()
 
+    def _chat_with_cancel(self, request: LLMRequest) -> LLMResponse | None:
+        """Espera o provedor sem bloquear o cancelamento do turno.
+
+        A requisição HTTP subjacente não é interrompida à força pela stdlib; se o
+        usuário cancelar, sua thread daemon é abandonada e a resposta é ignorada.
+        Isso libera imediatamente o agente para aceitar uma nova instrução.
+        """
+        completed = threading.Event()
+        outcome: dict[str, Any] = {}
+
+        def request_worker() -> None:
+            try:
+                outcome["response"] = self.provider.chat(request)
+            except Exception as exc:
+                outcome["error"] = exc
+            finally:
+                completed.set()
+
+        worker = threading.Thread(
+            target=request_worker,
+            daemon=True,
+            name="AuroraCancellableLLMRequest",
+        )
+        worker.start()
+        while not completed.wait(0.05):
+            if self.cancel_event.is_set():
+                return None
+        if self.cancel_event.is_set():
+            return None
+        error = outcome.get("error")
+        if isinstance(error, Exception):
+            raise error
+        response = outcome.get("response")
+        if response is None:
+            raise RuntimeError("O provedor terminou sem resposta nem erro.")
+        return response
+
     # ------------------------------------------------------------------ turno
     def handle(self, user_text: str) -> AgentReply:
         text = (user_text or "").strip()
@@ -406,17 +443,15 @@ class AuroraAgent:
                     temperature=self.settings.llm.temperature,
                     max_tokens=self.settings.llm.max_output_tokens,
                 )
-                response: LLMResponse = self.provider.chat(request)
-                model_used = response.model or model_used
-                _accumulate_usage(usage, response.usage)
-
-                # Cancelamento pode chegar enquanto a chamada de rede do modelo aguarda.
-                # Ignore qualquer resposta tardia antes que ela gere novas ações.
-                if self.cancel_event.is_set():
+                response = self._chat_with_cancel(request)
+                if response is None or self.cancel_event.is_set():
                     final_text = "Tarefa cancelada a pedido do usuário."
                     task.error = "cancelada pelo usuário"
-                    task.transition(TaskStatus.CANCELLED)
+                    if task.status not in {TaskStatus.COMPLETED, TaskStatus.CANCELLED, TaskStatus.FAILED}:
+                        task.transition(TaskStatus.CANCELLED)
                     break
+                model_used = response.model or model_used
+                _accumulate_usage(usage, response.usage)
 
                 if not response.tool_calls:
                     final_text = response.text.strip() or "(o modelo não devolveu texto)"
