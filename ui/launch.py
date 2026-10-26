@@ -95,7 +95,7 @@ def _classify_hud_control_command(text: str) -> str:
     value = re.sub(r"^(?:(?:ei|hey) )?aurora(?:\s+|$)", "", value).strip()
 
     cancel_patterns = (
-        r"(?:cancele|cancelar|cancel|pare|parar|interrompa|interromper|stop)(?: (?:a|o))?(?: (?:tarefa|instrucao|comando|execucao|processo|isso|atual))?(?: agora)?",
+        r"(?:cancele|cancelar|cancel|pare|parar|interrompa|interromper|stop)(?: (?:a|o|the))?(?: (?:tarefa|instrucao|comando|execucao|processo|isso|task|instruction|command))?(?: (?:atual|current))?(?: agora| now)?",
         r"(?:cancel|stop) (?:the )?(?:current )?(?:task|instruction|command)",
     )
     if any(re.fullmatch(pattern, value) for pattern in cancel_patterns):
