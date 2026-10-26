@@ -217,6 +217,10 @@ class AuroraAgent:
         self.cancel_event.set()
         self.events.emit("turn.cancel_requested", session_id=self.session_id)
 
+    def reset_cancel(self) -> None:
+        """Limpa um cancelamento anterior antes de iniciar explicitamente um novo turno."""
+        self.cancel_event.clear()
+
     # ------------------------------------------------------------------ turno
     def handle(self, user_text: str) -> AgentReply:
         text = (user_text or "").strip()
@@ -224,8 +228,12 @@ class AuroraAgent:
             return AgentReply(text="", status=TaskStatus.CANCELLED.value)
 
         session_id = self.ensure_session()
-        self.cancel_event.clear()
         started = time.monotonic()
+        if self.cancel_event.is_set():
+            return AgentReply(
+                text="Tarefa cancelada a pedido do usuário.",
+                status=TaskStatus.CANCELLED.value,
+            )
 
         self.conversations.add_message(session_id, "user", text)
         task = Task.create(text, session_id=session_id)
