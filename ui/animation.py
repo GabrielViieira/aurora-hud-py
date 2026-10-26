@@ -13,15 +13,15 @@ class D20Animation:
     CENTER = 400.0
 
     PALETTES = {
-        # A cor do icosaedro acompanha a HUD: ciano normalmente, dourado ao falar.
+        # A cor acompanha o estado visual: azul, roxo, branco, verde ou vermelho.
         "idle": "#38bfff",
-        "listening": "#38bfff",
-        "thinking": "#38bfff",
+        "listening": "#a855f7",
+        "thinking": "#ffffff",
         "processing": "#38bfff",
         "speaking": "#e9b95b",
-        "completed": "#38bfff",
-        "success": "#38bfff",
-        "error": "#38bfff",
+        "completed": "#a8f5a2",
+        "success": "#a8f5a2",
+        "error": "#ff4d5a",
     }
 
     def __init__(self, *, scale: float = 165.0, rotation_speed: float = 0.72, tilt_x: float = 0.2) -> None:
@@ -99,7 +99,7 @@ class D20Animation:
             speed = 5.3 if self.state_elapsed <= 0.72 else 0.0
         elif self.state == "error":
             speed = 0.0
-        else:  # completed: cor azul, movimento lento
+        else:  # completed: verde-claro, movimento lento
             speed = self.rotation_speed * 0.30
 
         self.angle_y = (self.angle_y + speed * dt) % tau
