@@ -631,15 +631,11 @@ class AuroraAgent:
         if not image_indexes:
             return False
 
-        detail = str(error).strip()
-        if len(detail) > 180:
-            detail = detail[:177] + "..."
         note = (
-            "A análise de pixels pelo modelo visual local falhou"
-            + (f" ({detail})" if detail else "")
-            + ". Use somente os controles estruturados retornados pela ferramenta "
-            + "capturar_tela; não finja ter visto a imagem nem invente posições. "
-            + "Se esses dados não forem suficientes para uma ação segura, informe a limitação."
+            "A análise de pixels pelo modelo visual local falhou. Use somente os controles "
+            "estruturados retornados pela ferramenta capturar_tela; não finja ter visto a "
+            "imagem nem invente posições. Se esses dados não forem suficientes para uma ação "
+            "segura, informe a limitação."
         )
         for index in image_indexes:
             message = messages[index]
@@ -659,8 +655,9 @@ class AuroraAgent:
             messages[index] = ChatMessage(role=message.role, content=content)
 
         print(
-            "[Aurora agente] Visão local falhou; removi as imagens e continuarei "
-            "com os controles UIA disponíveis, sem inventar observações visuais."
+            "[Aurora agente] Visão local falhou; "
+            f"HTTP={getattr(error, 'status', None)}; detalhe={str(error)[:220]}. "
+            "Removi as imagens e continuarei com os controles UIA disponíveis."
         )
         return True
 
