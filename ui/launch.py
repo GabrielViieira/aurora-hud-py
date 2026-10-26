@@ -868,7 +868,7 @@ class SvgHologram(QMainWindow):
         # Escape cancela a tarefa em curso; Ctrl+Shift+Q pede para encerrar.
         self.cancel_shortcut = QShortcut(QKeySequence("Escape"), self)
         self.cancel_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
-        self.cancel_shortcut.activated.connect(self.cancel_current_task)
+        self.cancel_shortcut.activated.connect(self._on_escape_shortcut)
         self.exit_shortcut = QShortcut(QKeySequence("Ctrl+Shift+Q"), self)
         self.exit_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
         self.exit_shortcut.activated.connect(self.close)
