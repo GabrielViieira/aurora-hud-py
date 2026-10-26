@@ -245,6 +245,30 @@ class AuroraAgent:
                 return vision_provider
         return self.provider
 
+    def _prepare_provider_request(self, request: LLMRequest, request_provider) -> LLMRequest:
+        """Remove tool schemas from local vision calls; some Ollama models reject them."""
+        vision_provider = getattr(self, "vision_provider", None)
+        if (
+            vision_provider is not None
+            and request_provider is vision_provider
+            and request_provider is not self.provider
+            and _messages_contain_image(request.messages)
+            and request.tools
+        ):
+            logger.info(
+                "Chamando modelo visual local sem definições de ferramentas; "
+                "a chamada será usada para descrever a imagem."
+            )
+            return LLMRequest(
+                messages=request.messages,
+                tools=[],
+                model=request.model,
+                temperature=request.temperature,
+                max_tokens=request.max_tokens,
+                stream=request.stream,
+            )
+        return request
+
     def _chat_with_cancel(
         self, request: LLMRequest, *, deadline: float
     ) -> LLMResponse | None:
@@ -257,10 +281,11 @@ class AuroraAgent:
         completed = threading.Event()
         outcome: dict[str, Any] = {}
         request_provider = self._provider_for_request(request)
+        provider_request = self._prepare_provider_request(request, request_provider)
 
         def request_worker() -> None:
             try:
-                outcome["response"] = request_provider.chat(request)
+                outcome["response"] = request_provider.chat(provider_request)
             except Exception as exc:
                 outcome["error"] = exc
             finally:
