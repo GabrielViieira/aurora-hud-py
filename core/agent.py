@@ -164,9 +164,9 @@ def _local_app_intent(text: str) -> tuple[str, dict[str, str]] | None:
         value,
     )
     if steam_match:
-        game_query = (steam_match.group(1) or "").strip(" \\t.,!?;:")
-        game_query = re.sub(r"^(?:(?:o|a|um|uma)\\s+)?(?:jogo|game)\\s+", "", game_query)
-        game_query = re.sub(r"^(?:o|a|um|uma)\\s+", "", game_query).strip()
+        game_query = (steam_match.group(1) or "").strip(" \t.,!?;:")
+        game_query = re.sub(r"^(?:(?:o|a|um|uma)\s+)?(?:jogo|game)\s+", "", game_query)
+        game_query = re.sub(r"^(?:o|a|um|uma)\s+", "", game_query).strip()
         if game_query and len(game_query) <= 120:
             return (
                 "abrir_url",
