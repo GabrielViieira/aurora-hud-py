@@ -664,7 +664,7 @@ class SvgHologram(QMainWindow):
         self._runtime = None
         self._agent = None
         self._speech = None
-        self._task_lock = threading.Lock()
+        self._task_lock = threading.RLock()
         self._task_active = False
         self._active_task_thread: Optional[threading.Thread] = None
         self._active_approval_dialog = None
