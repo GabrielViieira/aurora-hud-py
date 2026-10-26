@@ -42,7 +42,7 @@ def _read_env_file() -> dict[str, str]:
     return {}
 
 
-def _capture_jpeg(max_width: int = 1280, quality: int = 80) -> tuple[str, tuple[int, int]]:
+def _capture_jpeg(max_width: int = 640, quality: int = 76) -> tuple[str, tuple[int, int]]:
     try:
         import pyautogui
     except ImportError as exc:
@@ -70,7 +70,7 @@ def main() -> int:
         default="Descreva em português o que está visível na tela. Cite o aplicativo e os elementos principais.",
         help="Instrução enviada ao modelo visual.",
     )
-    parser.add_argument("--max-width", type=int, default=1280, help="Largura máxima da imagem (padrão: 1280).")
+    parser.add_argument("--max-width", type=int, default=640, help="Largura máxima da imagem (padrão: 640; aumente apenas para diagnóstico).")
     args = parser.parse_args()
 
     settings = _read_env_file()
