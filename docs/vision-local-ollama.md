@@ -26,7 +26,7 @@ Deve aparecer `qwen2.5vl:3b` (ou uma etiqueta equivalente retornada pelo Ollama)
 
 ## 2. Configurar o .env da Aurora
 
-No arquivo `.env` que o runtime da Aurora carrega, mantenha as demais configurações, incluindo a chave atual do FreeLLM, e ajuste/adicone estas linhas:
+No arquivo `.env` que o runtime da Aurora carrega, mantenha as demais configurações, incluindo a chave atual do FreeLLM, e ajuste/adicione estas linhas:
 
 ```dotenv
 AURORA_LLM_VISION_BASE_URL=http://127.0.0.1:11434/v1
@@ -37,7 +37,19 @@ AURORA_LLM_VISION_MAX_RETRIES=0
 
 Se o arquivo já tiver `AURORA_LLM_VISION_MODEL=gemini-3.8-flash`, **substitua o valor existente** em vez de criar uma segunda linha com a mesma variável.
 
-## 3. Reiniciar e validar
+## 3. Testar a visão local isoladamente
+
+Antes de abrir a Aurora, execute no diretório do projeto:
+
+```powershell
+py tools/test_local_vision.py
+```
+
+O script captura a tela, reduz a imagem e a envia diretamente ao endereço local configurado para obter uma descrição. Ele não usa o FreeLLM nem envia a captura à nuvem; por isso, é o teste mais simples para separar problemas do Ollama/modelo dos problemas do agente. Feche antes qualquer janela que não queira incluir na captura.
+
+Se o Ollama responder com uma descrição coerente, o modelo visual local está funcionando.
+
+## 4. Reiniciar e validar a integração
 
 Feche todas as janelas da Aurora e inicie de novo:
 
