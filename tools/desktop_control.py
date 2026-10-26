@@ -23,7 +23,9 @@ _TOOL_DESCRIPTION_CAPTURE = (
     "y = origem_y + v * altura_original / altura_capturada. "
     "Não trate pixels da imagem reduzida como coordenadas absolutas. Coordenadas negativas só são válidas "
     "quando estiverem dentro dos limites da área de trabalho virtual, por exemplo em um monitor à esquerda/acima. "
-    "Escolha um monitor pelo índice (1 é o primeiro listado)."
+    "Escolha um monitor pelo índice (1 é o primeiro listado). "
+    "Use somente_imagem=true para verificar visualmente com menor latência, omitindo a varredura UIA; "
+    "use somente_acessibilidade=true para tentar uma verificação rápida sem pixels."
 )
 _TOOL_DESCRIPTION_MOUSE = (
     "Controla o mouse na área de trabalho virtual. Faça capturar_tela antes. Se houver um controle acessível "
@@ -291,6 +293,9 @@ def capture_screen(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         max_width = int(args.get("largura_maxima", 960))
         monitor_index = int(args.get("monitor", 1))
         accessibility_only = args.get("somente_acessibilidade", False) is True
+        image_only = args.get("somente_imagem", False) is True
+        if accessibility_only and image_only:
+            return ToolResult.fail("somente_acessibilidade e somente_imagem não podem ser usados juntos")
         if max_width < 320 or max_width > 2200:
             return ToolResult.fail("largura_maxima deve ficar entre 320 e 2200")
         if monitor_index < 1 or monitor_index > 16:
@@ -315,9 +320,20 @@ def capture_screen(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
             if not data_url.startswith("data:image/"):
                 return ToolResult.fail("captura não produziu uma imagem válida")
 
-        uia_started = time.perf_counter()
-        ui_snapshot = _active_window_snapshot()
-        uia_ms = round((time.perf_counter() - uia_started) * 1000)
+        if image_only:
+            # Em verificações pós-ação cujo próximo passo depende da visão, a árvore UIA
+            # acrescenta latência sem substituir a inspeção da imagem.
+            ui_snapshot = {
+                "disponivel": False,
+                "motivo": "UI Automation omitida nesta captura visual rápida.",
+                "elementos": [],
+                "resumo_pesquisa": [],
+            }
+            uia_ms = 0
+        else:
+            uia_started = time.perf_counter()
+            ui_snapshot = _active_window_snapshot()
+            uia_ms = round((time.perf_counter() - uia_started) * 1000)
         ui_elements = ui_snapshot.get("elementos", [])
         uia_useful = bool(ui_snapshot.get("disponivel") and isinstance(ui_elements, list) and ui_elements)
 
@@ -352,7 +368,10 @@ def capture_screen(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
             "tempo_captura_ms": capture_ms,
             "tempo_uia_ms": uia_ms,
             "tempo_total_ms": total_ms,
-            "modo_uia": os.environ.get("AURORA_DESKTOP_UIA_MODE", "fast").strip().lower() or "fast",
+            "modo_uia": (
+                "omitida_captura_rapida" if image_only else
+                os.environ.get("AURORA_DESKTOP_UIA_MODE", "fast").strip().lower() or "fast"
+            ),
             "area_trabalho_virtual": virtual_bounds,
             "interface_acessivel": ui_snapshot,
         }
@@ -388,9 +407,13 @@ def capture_screen(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
                 + (f"Origem desktop da captura=({selected['left']}, {selected['top']}); "
                    f"tamanho original={selected['width']}x{selected['height']}; "
                    f"área de trabalho virtual={virtual_bounds}. " if virtual_bounds else "")
-                + f"Janela em primeiro plano: {active_title}. "
-                + (f"Leitura local encontrou {ui_count} controles acessíveis." if ui_snapshot.get("disponivel") else
-                   "Leitura local de controles indisponível; use a imagem e não invente nomes de elementos.")
+                + (f"Janela em primeiro plano: {active_title}. " if not image_only else "")
+                + (
+                    "UI Automation omitida para reduzir a latência; confira o estado pela imagem."
+                    if image_only else
+                    (f"Leitura local encontrou {ui_count} controles acessíveis." if ui_snapshot.get("disponivel") else
+                     "Leitura local de controles indisponível; use a imagem e não invente nomes de elementos.")
+                )
                 + (f" Classificador heurístico destacou {search_count} possível(is) candidato(s) a busca; confira a pontuação, as evidências e a imagem." if ui_snapshot.get("disponivel") else "")
                 + " A imagem será enviada ao modelo para inspeção visual."
             )
@@ -666,6 +689,7 @@ def build_tools() -> list[ToolSpec]:
                     "monitor": {"type": "integer", "minimum": 1, "maximum": 16, "description": "Índice de monitor (padrão 1)."},
                     "largura_maxima": {"type": "integer", "minimum": 320, "maximum": 2200, "description": "Largura máxima da imagem enviada ao modelo; padrão 960 para reduzir a carga do modelo visual local."},
                     "somente_acessibilidade": {"type": "boolean", "description": "Verificação rápida sem gerar imagem; se UI Automation não retornar controles úteis, a ferramenta captura a tela como fallback."},
+                    "somente_imagem": {"type": "boolean", "description": "Captura pixels sem varrer UI Automation, para verificações pós-ação cuja próxima decisão depende da imagem; usar quando latência importa."},
                 },
                 "additionalProperties": False,
             },
