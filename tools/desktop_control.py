@@ -83,7 +83,10 @@ def _check_point(pyautogui, x: Any, y: Any, label: str = "posição") -> tuple[i
     left, top, width, height = _virtual_bounds(pyautogui)
     if not (left <= x < left + width and top <= y < top + height):
         raise ValueError(
-            f"{label} ({x}, {y}) fora da área de trabalho ({left}, {top}, {width}, {height})"
+            f"{label} ({x}, {y}) fora da área de trabalho virtual: "
+            f"x entre {left} e {left + width - 1}, y entre {top} e {top + height - 1}. "
+            "Use coordenadas absolutas do desktop; se o ponto veio da imagem reduzida, "
+            "converta usando origem_x/origem_y e as dimensões original/capturada retornadas pela captura."
         )
     # PyAutoGUI usa o canto superior esquerdo da tela principal como fail-safe.
     if x == 0 and y == 0:
@@ -501,10 +504,22 @@ def build_tools() -> list[ToolSpec]:
                 "type": "object",
                 "properties": {
                     "acao": {"type": "string", "enum": ["mover", "clicar", "duplo_clique", "clique_direito", "scroll", "arrastar"]},
-                    "x": {"type": "integer", "minimum": -10000, "maximum": 10000},
-                    "y": {"type": "integer", "minimum": -10000, "maximum": 10000},
-                    "destino_x": {"type": "integer", "minimum": -10000, "maximum": 10000},
-                    "destino_y": {"type": "integer", "minimum": -10000, "maximum": 10000},
+                    "x": {
+                        "type": "integer", "minimum": -10000, "maximum": 10000,
+                        "description": "Coordenada X absoluta do desktop em pixels. Prefira centro_x da UI Automation; para imagem reduzida, aplique origem e fator de escala da captura. Pode ser negativa somente se estiver dentro dos limites virtuais.",
+                    },
+                    "y": {
+                        "type": "integer", "minimum": -10000, "maximum": 10000,
+                        "description": "Coordenada Y absoluta do desktop em pixels. Prefira centro_y da UI Automation; para imagem reduzida, aplique origem e fator de escala da captura. Pode ser negativa somente se estiver dentro dos limites virtuais.",
+                    },
+                    "destino_x": {
+                        "type": "integer", "minimum": -10000, "maximum": 10000,
+                        "description": "Coordenada X absoluta do destino no desktop; use a mesma conversão e validação de x.",
+                    },
+                    "destino_y": {
+                        "type": "integer", "minimum": -10000, "maximum": 10000,
+                        "description": "Coordenada Y absoluta do destino no desktop; use a mesma conversão e validação de y.",
+                    },
                     "quantidade_scroll": {"type": "integer", "minimum": -20, "maximum": 20},
                     "duracao": {"type": "number", "minimum": 0, "maximum": 2},
                 },
