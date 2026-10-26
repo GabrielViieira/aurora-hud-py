@@ -175,12 +175,15 @@ if AURORA_TTS_BACKEND not in {"piper", "gpt_sovits", "nanami_rvc"}:
 
 PIPER_MODEL_PATH = Path(os.environ.get(
     "AURORA_PIPER_MODEL",
-    str(BASE_DIR.parent / "voice" / "voice_JA" / "tsukuyomi-chan-6lang-fp16.onnx"),
+    str(BASE_DIR.parent / "voice" / "voice_JA" / "mera-multilingual.onnx"),
 )).expanduser()
 PIPER_CONFIG_PATH = Path(os.environ.get(
     "AURORA_PIPER_CONFIG",
     str(BASE_DIR.parent / "voice" / "voice_JA" / "config.json"),
 )).expanduser()
+
+# Atenua somente a saída do Piper para metade da amplitude atual (aprox. -6 dB).
+PIPER_OUTPUT_GAIN = 0.5
 
 
 class SvgWidget(QWidget):
@@ -1279,7 +1282,7 @@ class SvgHologram(QMainWindow):
             return None
 
     def _speak_with_piper_plus(self, japanese_text: str, out_wav: Path) -> Optional[Path]:
-        """Gera WAV com a voz Tsukuyomi-chan pelo Piper Plus/ONNX local."""
+        """Gera WAV com a voz Piper Plus/ONNX configurada localmente (Mera por padrão).""
         if not japanese_text.strip():
             return None
         if not PIPER_MODEL_PATH.is_file():
@@ -1610,13 +1613,13 @@ class SvgHologram(QMainWindow):
         if caption:
             self.show_caption(caption)
         self._set_speech_visual_state("speaking")
-        # O GPT-SoVITS já entrega áudio normalizado pelo próprio motor.
-        # Não reduzir a voz do Raphael a 40% antes da reprodução.
-        is_normalized_model = Path(audio_path).name in {
-            "aurora_raphael_tts.wav",
-            "aurora_piper.wav",
-        }
-        if not is_normalized_model and not _lower_wav_volume(audio_path, gain=0.4):
+        # A voz Mera/Piper é atenuada para metade da amplitude usada anteriormente.
+        # O WAV é novo a cada turno, então o ganho não se acumula entre falas.
+        audio_name = Path(audio_path).name
+        if audio_name == "aurora_piper.wav":
+            if not _lower_wav_volume(audio_path, gain=PIPER_OUTPUT_GAIN):
+                print("[Aurora TTS] Não foi possível reduzir o volume da voz Piper; WAV mantido.")
+        elif audio_name != "aurora_raphael_tts.wav" and not _lower_wav_volume(audio_path, gain=0.4):
             print("[Aurora TTS] WAV mantido no volume original.")
         import wave
         wav_frames = 0
