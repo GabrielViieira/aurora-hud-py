@@ -768,7 +768,7 @@ class AuroraAgent:
                         capture_call = ToolCall(
                             id=f"auto-capture-{call.id}",
                             name="capturar_tela",
-                            arguments={"monitor": 1, "largura_maxima": 1920},
+                            arguments={"monitor": 1, "largura_maxima": 960},
                         )
                         capture_result, _ = self._run_tool(capture_call, task, ctx)
                         tool_call_count += 1
