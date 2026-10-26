@@ -163,9 +163,9 @@ def _active_window_snapshot(limit: int = 50) -> dict[str, Any]:
             from collections import deque
 
             scan_started = time.perf_counter()
-            scan_budget_s = 0.65
-            max_scan_nodes = 400
-            max_scan_depth = 7
+            scan_budget_s = 0.35
+            max_scan_nodes = 160
+            max_scan_depth = 5
             controls = []
             queue = deque([(window, 0)])
             while queue and len(controls) < max_scan_nodes:
@@ -185,7 +185,7 @@ def _active_window_snapshot(limit: int = 50) -> dict[str, Any]:
                     if len(controls) >= max_scan_nodes:
                         break
 
-        for control in controls[:500]:
+        for control in controls[:160]:
             try:
                 info = getattr(control, "element_info", None)
                 control_type = str(getattr(info, "control_type", "") or "")
@@ -221,16 +221,16 @@ def _active_window_snapshot(limit: int = 50) -> dict[str, Any]:
                     }[control_type]
                     name = help_text or placeholder
                 name = re.sub(r"\s+", " ", name)[:180]
-                try:
-                    if not control.is_visible():
-                        continue
-                except Exception:
-                    pass
+                # Evita is_visible(), que pode exigir uma chamada COM adicional
+                # por controle e somar segundos em árvores grandes de navegadores.
                 bounds = control.rectangle()
                 left, top, right, bottom = (
                     int(bounds.left), int(bounds.top), int(bounds.right), int(bounds.bottom)
                 )
                 if right <= left or bottom <= top:
+                    continue
+                # Mantém apenas controles cujo retângulo cruza a janela ativa.
+                if right <= int(rect.left) or left >= int(rect.right) or bottom <= int(rect.top) or top >= int(rect.bottom):
                     continue
                 key = (control_type, name.casefold(), left, top, right, bottom)
                 if key in seen:
