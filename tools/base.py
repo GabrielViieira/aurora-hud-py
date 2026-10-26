@@ -36,7 +36,14 @@ class ToolResult:
     def to_content(self, max_chars: int = 8000) -> str:
         payload: dict[str, Any] = {"ok": self.ok, "summary": self.summary}
         if self.data:
-            payload["data"] = self.data
+            # Imagens/data URLs são transportadas separadamente para o modelo visual.
+            # Incluir base64 no histórico textual consome contexto e pode causar HTTP 500.
+            safe_data = {
+                key: value for key, value in self.data.items()
+                if key not in {"data_url", "image_data_url"}
+            }
+            if safe_data:
+                payload["data"] = safe_data
         if self.error:
             payload["error"] = self.error
         text = json.dumps(payload, ensure_ascii=False, default=str)
