@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import sys
 import threading
 import time
@@ -150,13 +151,13 @@ class LocalVisionRoutingTests(unittest.TestCase):
         Image.new("RGB", (960, 540), (12, 34, 56)).save(buffer, format="PNG")
         data_url = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
 
-        class TokenLimitedFirstCallProvider:
+        class TokenLimitedFirstCallsProvider:
             def __init__(self):
                 self.requests = []
 
             def chat(self, request):
                 self.requests.append(request)
-                if len(self.requests) == 1:
+                if len(self.requests) < 3:
                     raise ProviderError(
                         "HTTP 500: limit token atingido",
                         kind="bad_request",
@@ -165,7 +166,7 @@ class LocalVisionRoutingTests(unittest.TestCase):
                     )
                 return LLMResponse(text="Janela do aplicativo identificada.")
 
-        local = TokenLimitedFirstCallProvider()
+        local = TokenLimitedFirstCallsProvider()
         agent = self._agent(vision_provider=local)
         agent.cancel_event = threading.Event()
         request = LLMRequest(
@@ -184,14 +185,50 @@ class LocalVisionRoutingTests(unittest.TestCase):
         response = agent._chat_with_cancel(request, deadline=time.monotonic() + 10)
 
         self.assertEqual(response.text, "Janela do aplicativo identificada.")
-        self.assertEqual(len(local.requests), 2)
+        self.assertEqual(len(local.requests), 3)
         sizes = []
         for submitted in local.requests:
             url = submitted.messages[0].content[1]["image_url"]["url"]
             raw = base64.b64decode(url.split(",", 1)[1])
             with Image.open(BytesIO(raw)) as img:
                 sizes.append(img.size)
-        self.assertEqual(sizes, [(640, 360), (448, 252)])
+        self.assertEqual(sizes, [(640, 360), (448, 252), (320, 180)])
+
+    def test_local_vision_failure_falls_back_to_accessibility_data(self):
+        agent = self._agent(vision_provider=object())
+        accessible_result = {
+            "ok": True,
+            "data": {
+                "interface_acessivel": {
+                    "disponivel": True,
+                    "elementos": [{"tipo": "Edit", "nome": "Search", "centro_x": 420, "centro_y": 90}],
+                }
+            },
+        }
+        messages = [
+            ChatMessage(role="tool", content=json.dumps(accessible_result), name="capturar_tela"),
+            ChatMessage(
+                role="user",
+                content=[
+                    {"type": "text", "text": "Captura visual após a ação."},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                ],
+            ),
+        ]
+        error = ProviderError(
+            "HTTP 500: limite do modelo visual",
+            kind="bad_request",
+            status=500,
+            body='{"error":"limite do modelo visual"}',
+        )
+
+        recovered = agent._handoff_local_vision_failure_to_accessibility(messages, error)
+
+        self.assertTrue(recovered)
+        self.assertTrue(all(not (isinstance(message.content, list)) for message in messages))
+        self.assertIn("UI Automation", messages[-1].content)
+        self.assertIn("não finja ter visto", messages[-1].content)
+        self.assertIn("Search", messages[0].content)
 
     def test_local_vision_token_limit_error_is_detected(self):
         error = ProviderError(
