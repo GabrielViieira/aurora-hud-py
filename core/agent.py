@@ -41,6 +41,12 @@ _DO_NOT_REMEMBER_RE = re.compile(r"(?i)\b(não (?:registre|guarde|salve|anote)|e
 _MAX_IDENTICAL_ACTION_EXECUTIONS = 2
 _NON_MUTATING_DESKTOP_TOOLS = frozenset({"capturar_tela", "listar_aplicativos"})
 
+# Um provedor pode reiniciar seu timeout de socket conforme recebe bytes.
+# Impomos também um prazo de parede por chamada para que o HUD não fique
+# indefinidamente em thinking se a conexão permanecer parcialmente aberta.
+_MAX_LLM_CALL_WALL_SECONDS = 90.0
+_LLM_CALL_TIMEOUT_PADDING_SECONDS = 15.0
+
 
 class TaskDeadlineExceeded(TimeoutError):
     """A tarefa excedeu seu prazo global enquanto aguardava o provedor."""
@@ -457,7 +463,17 @@ class AuroraAgent:
                     temperature=self.settings.llm.temperature,
                     max_tokens=self.settings.llm.max_output_tokens,
                 )
-                response = self._chat_with_cancel(request, deadline=deadline)
+                llm_started = time.monotonic()
+                configured_timeout = max(1.0, float(self.settings.llm.timeout_s))
+                request_timeout = max(
+                    15.0,
+                    min(
+                        _MAX_LLM_CALL_WALL_SECONDS,
+                        configured_timeout + _LLM_CALL_TIMEOUT_PADDING_SECONDS,
+                    ),
+                )
+                request_deadline = min(deadline, llm_started + request_timeout)
+                response = self._chat_with_cancel(request, deadline=request_deadline)
                 if response is None or self.cancel_event.is_set():
                     final_text = "Tarefa cancelada a pedido do usuário."
                     task.error = "cancelada pelo usuário"
@@ -644,9 +660,10 @@ class AuroraAgent:
                 extra={"aurora": {"elapsed_s": round(elapsed_s, 2)}},
             )
             final_text = (
-                "Interrompi esta tarefa porque o limite total de tempo foi atingido "
-                "enquanto eu aguardava o modelo de IA. Nenhuma nova ação será iniciada "
-                "com uma resposta atrasada; tente novamente com um pedido mais curto."
+                "Interrompi esta tarefa porque o modelo de IA não respondeu dentro do "
+                "prazo de segurança. A Aurora foi liberada e não usará uma resposta atrasada "
+                "para iniciar novas ações. Tente novamente; se acontecer de novo, verifique "
+                "a conexão e a disponibilidade do provedor."
             )
             task.error = f"prazo global excedido após {elapsed_s:.1f}s: {exc}"
             if task.status not in {TaskStatus.COMPLETED, TaskStatus.CANCELLED, TaskStatus.FAILED}:
