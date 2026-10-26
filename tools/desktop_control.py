@@ -342,8 +342,7 @@ def capture_screen(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
                      + (f"Origem desktop da captura=({selected['left']}, {selected['top']}); "
                         f"tamanho original={selected['width']}x{selected['height']}; "
                         f"área de trabalho virtual={virtual_bounds}. " if virtual_bounds else "")
-                     
-                     f"Janela em primeiro plano: {active_title}. "
+                     + f"Janela em primeiro plano: {active_title}. "
                      + (f"Leitura local encontrou {ui_count} controles acessíveis." if ui_snapshot.get("disponivel") else
                         "Leitura local de controles indisponível; use a imagem e não invente nomes de elementos.")
                      + (f" Classificador heurístico destacou {search_count} possível(is) candidato(s) a busca; confira a pontuação, as evidências e a imagem." if ui_snapshot.get("disponivel") else "")
