@@ -24,8 +24,10 @@ _TOOL_DESCRIPTION_CAPTURE = (
     "Não trate pixels da imagem reduzida como coordenadas absolutas. Coordenadas negativas só são válidas "
     "quando estiverem dentro dos limites da área de trabalho virtual, por exemplo em um monitor à esquerda/acima. "
     "Escolha um monitor pelo índice (1 é o primeiro listado). "
-    "Use somente_imagem=true para verificar visualmente com menor latência, omitindo a varredura UIA; "
-    "use somente_acessibilidade=true para tentar uma verificação rápida sem pixels."
+    "Para encontrar campos, botões ou controles de texto em tarefas interativas, prefira "
+    "somente_acessibilidade=true na primeira tentativa; se não houver controles úteis, a ferramenta "
+    "captura pixels automaticamente. Para pedidos puramente visuais (descrever imagem/ícone/layout), "
+    "use somente_imagem=true para omitir UIA. Use captura normal quando precisar de imagem e controles."
 )
 _TOOL_DESCRIPTION_MOUSE = (
     "Controla o mouse na área de trabalho virtual. Faça capturar_tela antes. Se houver um controle acessível "
@@ -97,7 +99,7 @@ def _check_point(pyautogui, x: Any, y: Any, label: str = "posição") -> tuple[i
     return x, y
 
 
-def _active_window_snapshot(limit: int = 50) -> dict[str, Any]:
+def _active_window_snapshot(limit: int = 35) -> dict[str, Any]:
     """Lê nomes e retângulos de controles acessíveis da janela em primeiro plano.
 
     É uma observação local sem OCR nem chamada de modelo. Falhas da árvore UIA
@@ -186,7 +188,12 @@ def _active_window_snapshot(limit: int = 50) -> dict[str, Any]:
                         break
 
         max_controls = 160 if scan_mode == "fast" else 500
+        # Limite também o processamento dos elementos: consultas COM individuais
+        # podem demorar além do orçamento usado apenas para percorrer a árvore.
+        processing_deadline = time.perf_counter() + 1.2 if scan_mode == "fast" else None
         for control in controls[:max_controls]:
+            if processing_deadline is not None and time.perf_counter() >= processing_deadline:
+                break
             try:
                 info = getattr(control, "element_info", None)
                 control_type = str(getattr(info, "control_type", "") or "")
@@ -696,8 +703,8 @@ def build_tools() -> list[ToolSpec]:
                 "properties": {
                     "monitor": {"type": "integer", "minimum": 1, "maximum": 16, "description": "Índice de monitor (padrão 1)."},
                     "largura_maxima": {"type": "integer", "minimum": 320, "maximum": 2200, "description": "Largura máxima da captura em pixels; padrão 640 para reduzir a latência e o uso de tokens. Aumente apenas quando o detalhe visual for insuficiente."},
-                    "somente_acessibilidade": {"type": "boolean", "description": "Verificação rápida sem gerar imagem; se UI Automation não retornar controles úteis, a ferramenta captura a tela como fallback."},
-                    "somente_imagem": {"type": "boolean", "description": "Captura pixels sem varrer UI Automation, para verificações pós-ação cuja próxima decisão depende da imagem; usar quando latência importa."},
+                    "somente_acessibilidade": {"type": "boolean", "description": "Preferir true para localizar campos/botões e executar tarefas com controles convencionais. Evita pixels e inferência visual se UI Automation retornar controles úteis; sem controles úteis, captura imagem como fallback."},
+                    "somente_imagem": {"type": "boolean", "description": "Use true para tarefas puramente visuais (ícones, layout, conteúdo gráfico) ou quando UIA já foi considerada insuficiente; omite a varredura UIA e reduz latência."},
                 },
                 "additionalProperties": False,
             },
