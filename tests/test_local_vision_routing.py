@@ -226,7 +226,7 @@ class LocalVisionRoutingTests(unittest.TestCase):
 
         self.assertTrue(recovered)
         self.assertTrue(all(not (isinstance(message.content, list)) for message in messages))
-        self.assertIn("UI Automation", messages[-1].content)
+        self.assertIn("controles estruturados", messages[-1].content)
         self.assertIn("não finja ter visto", messages[-1].content)
         self.assertIn("Search", messages[0].content)
 
