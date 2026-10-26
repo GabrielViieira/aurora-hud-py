@@ -277,7 +277,7 @@ def capture_screen(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     del ctx
     try:
         from aurora.tools.screen_capture import capture_monitors
-        max_width = int(args.get("largura_maxima", 1920))
+        max_width = int(args.get("largura_maxima", 960))
         monitor_index = int(args.get("monitor", 1))
         if max_width < 320 or max_width > 2200:
             return ToolResult.fail("largura_maxima deve ficar entre 320 e 2200")
@@ -466,7 +466,7 @@ def build_tools() -> list[ToolSpec]:
                 "type": "object",
                 "properties": {
                     "monitor": {"type": "integer", "minimum": 1, "maximum": 16, "description": "Índice de monitor (padrão 1)."},
-                    "largura_maxima": {"type": "integer", "minimum": 320, "maximum": 2200, "description": "Largura máxima da imagem enviada ao modelo; padrão 1920 para ler texto pequeno."},
+                    "largura_maxima": {"type": "integer", "minimum": 320, "maximum": 2200, "description": "Largura máxima da imagem enviada ao modelo; padrão 960 para reduzir a carga do modelo visual local."},
                 },
                 "additionalProperties": False,
             },
