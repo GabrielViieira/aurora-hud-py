@@ -175,11 +175,11 @@ if AURORA_TTS_BACKEND not in {"piper", "gpt_sovits", "nanami_rvc"}:
 
 PIPER_MODEL_PATH = Path(os.environ.get(
     "AURORA_PIPER_MODEL",
-    str(BASE_DIR.parent / "voice" / "voice_JA" / "mera-multilingual.onnx"),
+    str(BASE_DIR.parent / "voice" / "voice_JA" / "sample-voice-v2.onnx"),
 )).expanduser()
 PIPER_CONFIG_PATH = Path(os.environ.get(
     "AURORA_PIPER_CONFIG",
-    str(BASE_DIR.parent / "voice" / "voice_JA" / "config.json"),
+    str(BASE_DIR.parent / "voice" / "voice_JA" / "sample-voice-v2.onnx.json"),
 )).expanduser()
 
 # Atenua a saída do Piper para 30% da amplitude original (aprox. -10,5 dB).
@@ -1282,7 +1282,7 @@ class SvgHologram(QMainWindow):
             return None
 
     def _speak_with_piper_plus(self, japanese_text: str, out_wav: Path) -> Optional[Path]:
-        # Gera WAV com a voz Piper Plus/ONNX configurada localmente (Mera por padrão).
+        # Gera WAV com a voz sample-voice-v2 via Piper Plus/ONNX.
         if not japanese_text.strip():
             return None
         if not PIPER_MODEL_PATH.is_file():
@@ -1613,7 +1613,7 @@ class SvgHologram(QMainWindow):
         if caption:
             self.show_caption(caption)
         self._set_speech_visual_state("speaking")
-        # A voz Mera/Piper é atenuada para 30% da amplitude original.
+        # A saída do Piper é atenuada para 30% da amplitude original.
         # O WAV é novo a cada turno, então o ganho não se acumula entre falas.
         audio_name = Path(audio_path).name
         if audio_name == "aurora_piper.wav":
