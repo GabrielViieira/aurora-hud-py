@@ -50,6 +50,8 @@ Se houver um valor antigo, remova-o da sessão atual antes de iniciar o teste/ap
 Remove-Item Env:AURORA_LLM_VISION_MODEL -ErrorAction SilentlyContinue
 ```
 
+A ferramenta `capturar_tela` usa largura máxima padrão de 960 px para reduzir a carga da inferência local. Um teste isolado com `py tools/test_local_vision.py --max-width 960` respondeu corretamente depois de uma captura maior retornar HTTP 500; isso sugere que resoluções menores podem ser mais estáveis. Se texto pequeno ficar difícil de ler, prefira complementar com `interface_acessivel.elementos` antes de aumentar a resolução.
+
 ## 3. Testar a visão local isoladamente
 
 Antes de abrir a Aurora, execute no diretório do projeto:
