@@ -473,7 +473,18 @@ class AuroraAgent:
                     ),
                 )
                 request_deadline = min(deadline, llm_started + request_timeout)
+                llm_wait_started = time.monotonic()
+                print(
+                    f"[Aurora agente] Chamando modelo na iteração {iterations}; "
+                    f"modelo={request.model}; imagem={_messages_contain_image(messages)}; "
+                    f"prazo_de_espera={request_deadline - llm_wait_started:.1f}s."
+                )
                 response = self._chat_with_cancel(request, deadline=request_deadline)
+                print(
+                    f"[Aurora agente] Modelo respondeu em {time.monotonic() - llm_wait_started:.1f}s; "
+                    f"tool_calls={len(response.tool_calls) if response is not None else 0}; "
+                    f"texto={len(response.text or '') if response is not None else 0} caracteres."
+                )
                 if response is None or self.cancel_event.is_set():
                     final_text = "Tarefa cancelada a pedido do usuário."
                     task.error = "cancelada pelo usuário"
@@ -518,6 +529,10 @@ class AuroraAgent:
                         break
                     tool_call_count += 1
                     signature = _tool_call_signature(call)
+                    print(
+                        f"[Aurora agente] Ferramenta solicitada: {call.name}; "
+                        f"campos={','.join(sorted(call.arguments)) or 'nenhum'}."
+                    )
                     deferred = (
                         call.name in desktop_tool_names
                         and desktop_batch_requires_serial
@@ -555,6 +570,10 @@ class AuroraAgent:
                             if guarded_action:
                                 action_call_counts[signature] = attempts + 1
                             result, fatal = self._run_tool(call, task, ctx)
+                    print(
+                        f"[Aurora agente] Ferramenta concluída: {call.name}; "
+                        f"ok={result.ok}; resumo={str(result.summary)[:180]}"
+                    )
                     if call.name == "capturar_tela" and result.ok and not result.data.get("adiada"):
                         image_url = result.data.pop("data_url", "")
                         if isinstance(image_url, str) and image_url.startswith("data:image/"):
@@ -659,6 +678,7 @@ class AuroraAgent:
                 "prazo de espera do modelo excedido",
                 extra={"aurora": {"elapsed_s": round(elapsed_s, 2)}},
             )
+            print(f"[Aurora agente] Timeout de modelo/tarefa após {elapsed_s:.1f}s: {exc}")
             final_text = (
                 "Interrompi esta tarefa porque o modelo de IA não respondeu dentro do "
                 "prazo de segurança. A Aurora foi liberada e não usará uma resposta atrasada "
@@ -701,6 +721,10 @@ class AuroraAgent:
         if not final_text:
             final_text = "Não consegui produzir uma resposta final para este pedido."
 
+        print(
+            f"[Aurora agente] Turno finalizado: status={task.status.value}; "
+            f"duração={latency_ms / 1000:.1f}s; ferramentas={','.join(tools_used) or 'nenhuma'}."
+        )
         self.tasks.save(task)
         self.conversations.add_message(
             session_id,
