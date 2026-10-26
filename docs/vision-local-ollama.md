@@ -2,8 +2,8 @@
 
 Este modo encaminha **somente as chamadas que contêm imagens** para um endpoint local compatível com a API OpenAI. As mensagens sem imagem continuam usando o provedor principal configurado na Aurora.
 
-O cliente local recebe a imagem **sem definições de ferramentas (`tools`)**, pois alguns modelos Ollama retornam HTTP 400 quando elas são enviadas. Portanto, a chamada visual local serve para interpretar/descrever a captura; as chamadas normais do agente continuam usando o provedor principal.
-Para respeitar o contexto padrão de 4096 tokens de alguns modelos Ollama, a chamada visual também recebe um contexto compacto: a instrução textual mais recente e a captura mais nova, sem prompt de sistema nem histórico antigo. O histórico completo permanece disponível para o provedor principal.
+O cliente local recebe a imagem **sem definições de ferramentas (`tools`)**, pois alguns modelos Ollama retornam HTTP 400 quando elas são enviadas. A resposta visual é tratada como uma observação, os payloads de imagem são removidos do histórico e essa observação volta ao provedor principal, que continua o ciclo de decisão e pode chamar as ferramentas de mouse/teclado.
+Para respeitar o contexto padrão de 4096 tokens de alguns modelos Ollama, a chamada visual recebe somente uma instrução curta e a imagem, sem prompt de sistema nem histórico antigo. A saída visual é limitada a 300 tokens e o histórico completo permanece disponível para o provedor principal.
 
 ## 1. Instalar e baixar um modelo visual
 
