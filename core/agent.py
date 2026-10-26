@@ -42,6 +42,11 @@ _MAX_IDENTICAL_ACTION_EXECUTIONS = 2
 _NON_MUTATING_DESKTOP_TOOLS = frozenset({"capturar_tela", "listar_aplicativos"})
 
 
+class TaskDeadlineExceeded(TimeoutError):
+    """A tarefa excedeu seu prazo global enquanto aguardava o provedor."""
+
+
+
 def _tool_call_signature(call: ToolCall) -> str:
     """Chave estável para detectar repetição da mesma ferramenta e argumentos."""
     args = json.dumps(call.arguments, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str)
@@ -221,12 +226,14 @@ class AuroraAgent:
         """Limpa um cancelamento anterior antes de iniciar explicitamente um novo turno."""
         self.cancel_event.clear()
 
-    def _chat_with_cancel(self, request: LLMRequest) -> LLMResponse | None:
-        """Espera o provedor sem bloquear o cancelamento do turno.
+    def _chat_with_cancel(
+        self, request: LLMRequest, *, deadline: float
+    ) -> LLMResponse | None:
+        """Espera o provedor respeitando cancelamento e prazo global do turno.
 
         A requisição HTTP subjacente não é interrompida à força pela stdlib; se o
-        usuário cancelar, sua thread daemon é abandonada e a resposta é ignorada.
-        Isso libera imediatamente o agente para aceitar uma nova instrução.
+        usuário cancelar ou o prazo vencer, sua thread daemon é abandonada e a
+        resposta tardia é ignorada. O agente e a interface, porém, são liberados.
         """
         completed = threading.Event()
         outcome: dict[str, Any] = {}
@@ -245,9 +252,15 @@ class AuroraAgent:
             name="AuroraCancellableLLMRequest",
         )
         worker.start()
-        while not completed.wait(0.05):
+        while not completed.is_set():
             if self.cancel_event.is_set():
                 return None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TaskDeadlineExceeded(
+                    "O prazo máximo da tarefa venceu enquanto aguardava resposta do provedor de IA."
+                )
+            completed.wait(min(0.05, remaining))
         if self.cancel_event.is_set():
             return None
         error = outcome.get("error")
@@ -266,6 +279,7 @@ class AuroraAgent:
 
         session_id = self.ensure_session()
         started = time.monotonic()
+        deadline = started + max(0.0, float(self.settings.limits.max_task_seconds))
         if self.cancel_event.is_set():
             return AgentReply(
                 text="Tarefa cancelada a pedido do usuário.",
@@ -398,7 +412,7 @@ class AuroraAgent:
                     final_text = "Tarefa cancelada a pedido do usuário."
                     task.transition(TaskStatus.CANCELLED)
                     break
-                if time.monotonic() - started > self.settings.limits.max_task_seconds:
+                if time.monotonic() >= deadline:
                     final_text = (
                         "Parei porque o limite de tempo desta tarefa foi atingido. "
                         "O que já foi executado está registrado na auditoria."
@@ -443,7 +457,7 @@ class AuroraAgent:
                     temperature=self.settings.llm.temperature,
                     max_tokens=self.settings.llm.max_output_tokens,
                 )
-                response = self._chat_with_cancel(request)
+                response = self._chat_with_cancel(request, deadline=deadline)
                 if response is None or self.cancel_event.is_set():
                     final_text = "Tarefa cancelada a pedido do usuário."
                     task.error = "cancelada pelo usuário"
@@ -623,6 +637,20 @@ class AuroraAgent:
                 if task.status in {TaskStatus.FAILED, TaskStatus.CANCELLED}:
                     break
 
+        except TaskDeadlineExceeded as exc:
+            elapsed_s = time.monotonic() - started
+            logger.warning(
+                "prazo global da tarefa excedido durante chamada ao modelo",
+                extra={"aurora": {"elapsed_s": round(elapsed_s, 2)}},
+            )
+            final_text = (
+                "Interrompi esta tarefa porque o limite total de tempo foi atingido "
+                "enquanto eu aguardava o modelo de IA. Nenhuma nova ação será iniciada "
+                "com uma resposta atrasada; tente novamente com um pedido mais curto."
+            )
+            task.error = f"prazo global excedido após {elapsed_s:.1f}s: {exc}"
+            if task.status not in {TaskStatus.COMPLETED, TaskStatus.CANCELLED, TaskStatus.FAILED}:
+                task.transition(TaskStatus.FAILED)
         except ProviderError as exc:
             logger.warning("falha do provedor", extra={"aurora": {"kind": exc.kind}})
             if self.cancel_event.is_set():
