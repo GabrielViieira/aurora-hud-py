@@ -394,6 +394,11 @@ class AuroraAgent:
         session_id = self.ensure_session()
         started = time.monotonic()
         deadline = started + max(0.0, float(self.settings.limits.max_task_seconds))
+        print(
+            "[Aurora agente] Limites efetivos: "
+            f"iterações={self.settings.limits.max_tool_iterations}; "
+            f"tempo_da_tarefa={self.settings.limits.max_task_seconds:.0f}s."
+        )
         if self.cancel_event.is_set():
             return AgentReply(
                 text="Tarefa cancelada a pedido do usuário.",
@@ -535,12 +540,17 @@ class AuroraAgent:
                     task.transition(TaskStatus.FAILED)
                     break
                 if iterations >= self.settings.limits.max_tool_iterations:
+                    configured_limit = self.settings.limits.max_tool_iterations
+                    print(
+                        f"[Aurora agente] Limite de iterações atingido: "
+                        f"executadas={iterations}; configurado={configured_limit}."
+                    )
                     final_text = (
-                        "Atingi o limite de passos com ferramentas sem concluir. "
+                        f"Atingi o limite configurado de {configured_limit} iterações com ferramentas sem concluir. "
                         f"Ferramentas usadas: {', '.join(tools_used) or 'nenhuma'}. "
                         "Veja a auditoria para o que já foi executado."
                     )
-                    task.error = "limite de iterações de ferramentas"
+                    task.error = f"limite de iterações de ferramentas ({configured_limit})"
                     task.transition(TaskStatus.FAILED)
                     break
 
