@@ -2130,6 +2130,20 @@ class SvgHologram(QMainWindow):
             return
         self.hide_inline_input()
 
+    def _update_cancel_button(self) -> None:
+        if not hasattr(self, "cancel_task_btn"):
+            return
+        with self._task_lock:
+            task_active = self._task_active
+        speech_active = self._speech_pending or self._speech_active
+        self.cancel_task_btn.setEnabled(task_active or speech_active)
+        if task_active:
+            self.cancel_task_btn.setText("■ Cancelar")
+        elif speech_active:
+            self.cancel_task_btn.setText("■ Parar fala")
+        else:
+            self.cancel_task_btn.setText("■ Cancelar")
+
     def _dispatch_local_control_command(self, text: str) -> bool:
         command = _classify_hud_control_command(text)
         if command == "cancel":
@@ -2155,10 +2169,12 @@ class SvgHologram(QMainWindow):
                     "'Aurora, cancele a tarefa' ou pressione Escape."
                 )
                 return
+            if self._speech_pending or self._speech_active:
+                self._cancel_speech_output()
+            self._agent.reset_cancel()
             self._task_active = True
 
-        self.cancel_task_btn.setText("■ Cancelar")
-        self.cancel_task_btn.setEnabled(True)
+        self._update_cancel_button()
         self.show_caption_requested.emit(f"Você: {message}")
         self.visual_state_requested.emit("thinking")
 
@@ -2191,40 +2207,49 @@ class SvgHologram(QMainWindow):
         except Exception as exc:
             with self._task_lock:
                 self._task_active = False
-            self.cancel_task_btn.setEnabled(False)
+            self._update_cancel_button()
             self.show_caption_requested.emit(f"Não consegui iniciar a tarefa: {exc}")
             self.visual_state_requested.emit("error")
 
     def cancel_current_task(self, show_feedback: bool = True) -> None:
         with self._task_lock:
-            active = self._task_active
-        if not active:
+            task_active = self._task_active
+        speech_active = self._speech_pending or self._speech_active
+        if not task_active and not speech_active:
             if show_feedback:
-                self.show_caption_requested.emit("Não há nenhuma tarefa em andamento para cancelar.")
+                self.show_caption_requested.emit("Não há tarefa nem fala em andamento para cancelar.")
             return
 
-        if self._agent is not None:
+        if task_active and self._agent is not None:
             self._agent.cancel()
+        if speech_active:
+            self._cancel_speech_output()
         dialog = self._active_approval_dialog
-        if dialog is not None:
+        if task_active and dialog is not None:
             try:
                 dialog.reject()
             except Exception:
                 pass
-        self.cancel_task_btn.setText("Cancelando…")
-        self.cancel_task_btn.setEnabled(False)
-        if show_feedback:
-            self.show_caption_requested.emit(
-                "Pedido de cancelamento enviado. Vou impedir novas ações assim que a operação atual retornar."
+
+        if task_active:
+            self.cancel_task_btn.setText("Cancelando…")
+            self.cancel_task_btn.setEnabled(False)
+            feedback = (
+                "Cancelamento solicitado. Não iniciarei novas ações; se o modelo estiver "
+                "respondendo, vou ignorar a resposta quando ela chegar."
             )
-            self.visual_state_requested.emit("idle")
+        else:
+            feedback = "Interrompi a fala para você continuar."
+        if show_feedback:
+            self.show_caption_requested.emit(feedback)
+        self.visual_state_requested.emit("idle")
+        self._update_cancel_button()
 
     def _on_agent_task_finished(self) -> None:
         with self._task_lock:
             self._task_active = False
         self._active_task_thread = None
-        self.cancel_task_btn.setText("■ Cancelar")
-        self.cancel_task_btn.setEnabled(False)
+        self._update_cancel_button()
         if self._exit_after_task:
             self._allow_close = True
             QTimer.singleShot(0, self.close)
@@ -2232,7 +2257,7 @@ class SvgHologram(QMainWindow):
     def _on_escape_shortcut(self) -> None:
         with self._task_lock:
             active = self._task_active
-        if active:
+        if active or self._speech_pending or self._speech_active:
             self.cancel_current_task()
         elif self.input_container.isVisible():
             self.hide_inline_input()
@@ -2251,7 +2276,6 @@ class SvgHologram(QMainWindow):
         self._start_agent_task(message)
 
     def show_recognized_text(self, text: str) -> None:
-        # Executado na thread principal por conexão de Signal.
         self.process_recognized_text(text)
 
     def process_recognized_text(self, text: str) -> None:
@@ -2260,7 +2284,6 @@ class SvgHologram(QMainWindow):
         message = text.strip()
         if not message:
             return
-        # Comandos de controle são resolvidos localmente, sem depender do LLM.
         if self._dispatch_local_control_command(message):
             return
         self._start_agent_task(message)
@@ -2294,18 +2317,31 @@ class SvgHologram(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if not self._allow_close:
-            answer = QMessageBox.question(
-                self,
-                "Aurora — encerrar",
+            question = QMessageBox(None)
+            question.setWindowTitle("Aurora — encerrar")
+            question.setIcon(QMessageBox.Icon.Question)
+            question.setText(
                 (
-                    "Há uma tarefa em andamento. Deseja solicitar o cancelamento e encerrar "
+                    "Há uma tarefa em andamento. Deseja cancelar a tarefa e encerrar "
                     "a Aurora assim que a operação atual retornar?"
                     if self._task_active
                     else "Deseja realmente encerrar a Aurora?"
-                ),
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
+                )
             )
+            question.setStandardButtons(
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            question.setDefaultButton(QMessageBox.StandardButton.No)
+            question.setWindowModality(Qt.WindowModality.ApplicationModal)
+            question.setWindowFlags(
+                question.windowFlags()
+                | Qt.WindowType.Dialog
+                | Qt.WindowType.WindowStaysOnTopHint
+            )
+            question.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+            question.raise_()
+            question.activateWindow()
+            answer = question.exec()
             if answer != QMessageBox.StandardButton.Yes:
                 event.ignore()
                 return
@@ -2317,6 +2353,8 @@ class SvgHologram(QMainWindow):
                 )
                 event.ignore()
                 return
+            if self._speech_pending or self._speech_active:
+                self._cancel_speech_output()
             self._allow_close = True
 
         self.animation_timer.stop()
