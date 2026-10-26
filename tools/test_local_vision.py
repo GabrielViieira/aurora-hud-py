@@ -119,7 +119,7 @@ def main() -> int:
         f"{base_url}/chat/completions",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         headers={
-            "Authorization": "Bearer ollama-local",
+            "Authorization": "Bearer ollama",
             "Content-Type": "application/json",
             "Accept": "application/json",
         },
