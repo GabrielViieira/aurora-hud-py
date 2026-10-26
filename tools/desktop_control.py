@@ -52,12 +52,12 @@ def _pyautogui():
             "Controle de mouse/teclado não instalado. Rode: py -m pip install -r requirements-desktop.txt"
         ) from exc
     pyautogui.FAILSAFE = True
-    # O padrão anterior de 120 ms era somado a cada chamada de PyAutoGUI.
-    # Mantém uma pausa curta e configurável para apps que precisam de mais tempo.
+    # Pausa pequena para reduzir a latência entre operações; ainda pode ser ajustada
+    # para aplicativos que precisam de mais tempo para processar entrada.
     try:
-        action_pause = float(os.environ.get("AURORA_DESKTOP_ACTION_PAUSE", "0.03"))
+        action_pause = float(os.environ.get("AURORA_DESKTOP_ACTION_PAUSE", "0.01"))
     except ValueError:
-        action_pause = 0.03
+        action_pause = 0.01
     pyautogui.PAUSE = max(0.0, min(action_pause, 0.5))
     return pyautogui
 
@@ -531,7 +531,7 @@ def control_mouse(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     del ctx
     try:
         action = str(args.get("acao", "")).strip().lower()
-        duration = float(args.get("duracao", 0.15))
+        duration = float(args.get("duracao", 0.08))
         if not 0 <= duration <= 2.0:
             return ToolResult.fail("duracao precisa estar entre 0 e 2 segundos")
 
@@ -725,7 +725,10 @@ def build_tools() -> list[ToolSpec]:
                         "description": "Coordenada Y absoluta do destino no desktop; use a mesma conversão e validação de y.",
                     },
                     "quantidade_scroll": {"type": "integer", "minimum": -20, "maximum": 20},
-                    "duracao": {"type": "number", "minimum": 0, "maximum": 2},
+                    "duracao": {
+                        "type": "number", "minimum": 0, "maximum": 2,
+                        "description": "Duração do movimento do cursor em segundos; padrão 0.08 para interação rápida. Aumente apenas se a interface exigir movimento mais lento.",
+                    },
                 },
                 "required": ["acao"],
                 "additionalProperties": False,
