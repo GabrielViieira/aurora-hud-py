@@ -482,6 +482,8 @@ def _perform_accessible_mouse_action(target: str, action: str) -> dict[str, Any]
                     control.click_input()
                 else:
                     raise
+        else:
+            control.click_input()
     elif action == "duplo_clique":
         control.double_click_input()
         method = "double_click_input"
