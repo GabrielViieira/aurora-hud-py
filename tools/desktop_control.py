@@ -513,9 +513,16 @@ def control_mouse(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         pyautogui = _pyautogui()
         accessible_target = str(args.get("controle", "") or "").strip()
         if accessible_target:
-            # Preserve the familiar emergency stop even though UIA can invoke a
-            # control without moving the physical cursor.
-            pyautogui.failSafeCheck()
+            # Preserve the emergency stop even though UIA can invoke a control
+            # without moving the physical cursor.
+            if getattr(pyautogui, "FAILSAFE", True):
+                position = pyautogui.position()
+                point = (int(position[0]), int(position[1]))
+                fail_points = getattr(pyautogui, "FAILSAFE_POINTS", [(0, 0)])
+                if point in {tuple(item) for item in fail_points}:
+                    raise RuntimeError(
+                        "Proteção de parada do mouse ativada: mova o cursor para fora dos cantos da tela."
+                    )
             if action not in {"clicar", "duplo_clique", "clique_direito"}:
                 return ToolResult.fail(
                     "controle nomeado aceita apenas clicar, duplo_clique ou clique_direito"
