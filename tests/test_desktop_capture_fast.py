@@ -20,6 +20,10 @@ else:
 
 sys.path.insert(0, str(_REPO_ROOT.parent))
 
+from aurora.core.agent import (
+    _should_use_accessibility_only_verification,
+    _verification_settle_seconds,
+)
 from aurora.tools import desktop_control
 from aurora.tools.base import ToolResult
 
@@ -116,6 +120,52 @@ class DesktopCaptureFastTests(unittest.TestCase):
         self.assertIn('"monitor": 1', content)
         self.assertNotIn("data:image/jpeg;base64", content)
         self.assertNotIn("A" * 200, content)
+
+
+class VerificationPolicyTests(unittest.TestCase):
+    """A verificação pós-ação deve preferir acessibilidade antes de gastar uma inferência visual."""
+
+    def test_key_press_is_verified_by_accessibility(self):
+        self.assertTrue(
+            _should_use_accessibility_only_verification(
+                "controlar_teclado", {"acao": "pressionar", "tecla": "enter"}
+            )
+        )
+
+    def test_typing_is_verified_by_accessibility(self):
+        self.assertTrue(
+            _should_use_accessibility_only_verification(
+                "controlar_teclado", {"acao": "digitar", "texto": "Counter Strike"}
+            )
+        )
+
+    def test_coordinate_click_is_verified_by_accessibility(self):
+        self.assertTrue(
+            _should_use_accessibility_only_verification(
+                "controlar_mouse", {"acao": "clicar", "x": 1500, "y": 240}
+            )
+        )
+
+    def test_mouse_move_is_not_verified_as_an_action(self):
+        self.assertFalse(
+            _should_use_accessibility_only_verification(
+                "controlar_mouse", {"acao": "mover", "x": 10, "y": 20}
+            )
+        )
+
+    def test_app_launch_still_uses_image_verification(self):
+        self.assertFalse(
+            _should_use_accessibility_only_verification("abrir_aplicativo", {"nome": "Steam"})
+        )
+
+    def test_click_settles_longer_than_typing_before_reading_state(self):
+        click = _verification_settle_seconds("controlar_mouse", {"acao": "clicar", "x": 1, "y": 2})
+        typing = _verification_settle_seconds("controlar_teclado", {"acao": "digitar"})
+        launch = _verification_settle_seconds("abrir_aplicativo", {"nome": "Steam"})
+
+        self.assertGreater(click, typing)
+        self.assertGreaterEqual(click, 0.10)
+        self.assertEqual(launch, 0.45)
 
 
 if __name__ == "__main__":

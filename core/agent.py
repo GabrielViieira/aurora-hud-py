@@ -350,15 +350,32 @@ def _is_action_tool(name: str, spec: Any) -> bool:
     )
 
 def _should_use_accessibility_only_verification(name: str, arguments: dict[str, Any]) -> bool:
-    """Escolhe verificação pós-ação rápida quando pixels não são necessários para o próximo passo."""
+    """Escolhe verificação pós-ação rápida quando pixels não são necessários para o próximo passo.
+
+    A ferramenta `capturar_tela` com `somente_acessibilidade` já captura a imagem
+    sozinha quando o UIA não devolve controles úteis, então preferir a árvore de
+    acessibilidade não é verificação cega: é tentar o caminho de 0,6s antes do de 13s.
+    """
     action = str(arguments.get("acao", "")).strip().lower()
-    if name == "controlar_teclado" and action == "digitar":
-        return True
-    return (
-        name == "controlar_mouse"
-        and action in {"clicar", "duplo_clique", "clique_direito"}
-        and bool(str(arguments.get("controle", "") or "").strip())
-    )
+    if name == "controlar_teclado":
+        # digitar e pressionar tecla mudam o estado que o UIA já expõe.
+        return action in {"digitar", "pressionar"}
+    if name == "controlar_mouse":
+        # Clique por coordenada também: se nada mudar na árvore, a ferramenta
+        # devolve imagem por conta própria.
+        return action in {"clicar", "duplo_clique", "clique_direito"}
+    return False
+
+
+def _verification_settle_seconds(name: str, arguments: dict[str, Any]) -> float:
+    """Espera antes de observar o resultado de uma ação que já foi executada."""
+    if name in {"abrir_aplicativo", "restaurar_aplicativo", "abrir_url"}:
+        return 0.45
+    if _should_use_accessibility_only_verification(name, arguments):
+        # Um clique dispara evento e a árvore leva alguns quadros para refletir;
+        # 40ms costumava ler o estado anterior à ação.
+        return 0.12 if name == "controlar_mouse" else 0.04
+    return 0.10
 
 
 def _should_auto_capture_after_action(
@@ -1230,19 +1247,13 @@ class AuroraAgent:
                         and self.registry.has("capturar_tela")
                         and _should_auto_capture_after_action(call.name, call.arguments, self.registry)
                     ):
-                        # Caminho rápido: para digitação e cliques por controle acessível,
-                        # tenta primeiro a UI Automation sem codificar uma imagem. A ferramenta
-                        # cai automaticamente para captura visual se UIA não retornar controles.
+                        # Caminho rápido: para teclas e cliques, tenta primeiro a UI Automation
+                        # sem codificar uma imagem. A ferramenta cai automaticamente para
+                        # captura visual se o UIA não devolver controles úteis.
                         fast_verification = _should_use_accessibility_only_verification(
                             call.name, call.arguments
                         )
-                        if call.name in {"abrir_aplicativo", "restaurar_aplicativo", "abrir_url"}:
-                            settle_seconds = 0.45
-                        elif fast_verification:
-                            settle_seconds = 0.04
-                        else:
-                            settle_seconds = 0.10
-                        time.sleep(settle_seconds)
+                        time.sleep(_verification_settle_seconds(call.name, call.arguments))
                         capture_args = {"monitor": 1, "largura_maxima": 640}
                         if fast_verification:
                             capture_args["somente_acessibilidade"] = True
