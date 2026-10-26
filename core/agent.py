@@ -286,6 +286,14 @@ class AuroraAgent:
                 model_used = response.model or model_used
                 _accumulate_usage(usage, response.usage)
 
+                # Cancelamento pode chegar enquanto a chamada de rede do modelo aguarda.
+                # Ignore qualquer resposta tardia antes que ela gere novas ações.
+                if self.cancel_event.is_set():
+                    final_text = "Tarefa cancelada a pedido do usuário."
+                    task.error = "cancelada pelo usuário"
+                    task.transition(TaskStatus.CANCELLED)
+                    break
+
                 if not response.tool_calls:
                     final_text = response.text.strip() or "(o modelo não devolveu texto)"
                     task.transition(TaskStatus.COMPLETED)
@@ -311,6 +319,14 @@ class AuroraAgent:
                 )
                 desktop_batch_requires_serial = len(desktop_calls) > 1
                 for call in response.tool_calls:
+                    # Uma única resposta do modelo pode conter várias chamadas; ao cancelar,
+                    # não inicie a próxima ferramenta do lote.
+                    if self.cancel_event.is_set():
+                        final_text = "Tarefa cancelada a pedido do usuário."
+                        task.error = "cancelada pelo usuário"
+                        if task.status not in {TaskStatus.CANCELLED, TaskStatus.COMPLETED, TaskStatus.FAILED}:
+                            task.transition(TaskStatus.CANCELLED)
+                        break
                     tool_call_count += 1
                     signature = _tool_call_signature(call)
                     deferred = (
@@ -363,6 +379,14 @@ class AuroraAgent:
                             name=call.name,
                         )
                     )
+                    # Se o usuário cancelou durante a execução da ferramenta, não faça
+                    # a captura seguinte nem continue com outras ações do mesmo lote.
+                    if self.cancel_event.is_set():
+                        final_text = "Tarefa cancelada a pedido do usuário."
+                        task.error = "cancelada pelo usuário"
+                        if task.status not in {TaskStatus.CANCELLED, TaskStatus.COMPLETED, TaskStatus.FAILED}:
+                            task.transition(TaskStatus.CANCELLED)
+                        break
 
                     # Não dependa do LLM lembrar de pedir outro print: após cada ação
                     # visual bem-sucedida, observe o estado real antes da próxima decisão.
@@ -547,6 +571,23 @@ class AuroraAgent:
             self.audit.record(
                 "approval.decided", task_id=task.id, tool=call.name, approved=approved
             )
+            if self.cancel_event.is_set():
+                task.transition(TaskStatus.CANCELLED)
+                task.error = "cancelada pelo usuário"
+                self.tasks.save(task)
+                result = ToolResult.fail("Tarefa cancelada; a ação protegida não foi executada.")
+                self.tasks.record_tool_run(
+                    task_id=task.id,
+                    tool=call.name,
+                    args=call.arguments,
+                    risk=spec.risk.label,
+                    status="cancelado",
+                    summary=result.summary,
+                    started_at=started_at,
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                )
+                self.audit.record("tool.cancelled", task_id=task.id, tool=call.name)
+                return result, False
             task.transition(TaskStatus.RUNNING)
             self.tasks.save(task)
             if not approved:
