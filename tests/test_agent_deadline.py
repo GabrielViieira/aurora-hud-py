@@ -23,7 +23,11 @@ else:
 
 sys.path.insert(0, str(_REPO_ROOT.parent))
 
-from aurora.core.agent import AuroraAgent, TaskDeadlineExceeded
+from aurora.core.agent import (
+    AuroraAgent,
+    TaskDeadlineExceeded,
+    _should_use_accessibility_only_verification,
+)
 from aurora.llm.provider import LLMRequest, LLMResponse
 
 
@@ -57,6 +61,34 @@ class AgentDeadlineTests(unittest.TestCase):
         threading.Thread(target=cancel_soon, daemon=True).start()
         self.assertIsNone(
             self.agent._chat_with_cancel(request, deadline=time.monotonic() + 1.0)
+        )
+
+    def test_typing_uses_accessibility_only_verification(self):
+        self.assertTrue(
+            _should_use_accessibility_only_verification(
+                "controlar_teclado", {"acao": "digitar", "texto": "Hollow Knight"}
+            )
+        )
+
+    def test_named_accessible_click_uses_accessibility_only_verification(self):
+        self.assertTrue(
+            _should_use_accessibility_only_verification(
+                "controlar_mouse", {"acao": "clicar", "controle": "Search"}
+            )
+        )
+
+    def test_coordinate_click_keeps_visual_verification(self):
+        self.assertFalse(
+            _should_use_accessibility_only_verification(
+                "controlar_mouse", {"acao": "clicar", "x": 420, "y": 250}
+            )
+        )
+
+    def test_enter_keeps_visual_verification(self):
+        self.assertFalse(
+            _should_use_accessibility_only_verification(
+                "controlar_teclado", {"acao": "pressionar", "tecla": "enter"}
+            )
         )
 
 
