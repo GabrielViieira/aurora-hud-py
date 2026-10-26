@@ -21,6 +21,7 @@ from aurora.core.task_state import Task, TaskStatus, TaskStore
 from aurora.llm.prompts import system_prompt
 from aurora.llm.provider import ChatMessage, LLMRequest, LLMResponse, ProviderError, ToolCall, Usage
 from aurora.llm.model_router import ModelRouter
+from aurora.llm.token_manager import estimate_tokens, truncate_to_tokens
 from aurora.memory.conversation_store import ConversationStore
 from aurora.memory.long_term import LongTermMemory
 from aurora.observability import get_logger
@@ -74,6 +75,165 @@ def _messages_contain_image(messages: list[ChatMessage]) -> bool:
             if part.get("type") in {"image", "image_url"}:
                 return True
     return False
+
+
+def _is_token_limit_error(exc: ProviderError) -> bool:
+    """Detecta recusas que parecem vir do limite de contexto/tokens do gateway."""
+    detail = f"{exc} {getattr(exc, 'body', '')}".casefold()
+    has_token_signal = any(term in detail for term in (
+        "token", "context window", "context length", "prompt length",
+    ))
+    has_limit_signal = any(term in detail for term in (
+        "limit", "maximum", "max_", "exceed", "too large", "too many",
+        "atingido", "limite", "ultrapass",
+    ))
+    return has_token_signal and has_limit_signal
+
+
+def _estimate_request_tokens(messages: list[ChatMessage], tools: list[dict[str, Any]]) -> int:
+    """Estima mensagens + schemas sem contar todo o base64 de imagens como tokens."""
+    total = estimate_tokens(json.dumps(tools, ensure_ascii=False, default=str)) + 64
+    for message in messages:
+        content = message.content
+        if isinstance(content, list):
+            visible_text: list[str] = []
+            image_count = 0
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") in {"image", "image_url"}:
+                    image_count += 1400
+                elif part.get("type") == "text":
+                    visible_text.append(str(part.get("text") or ""))
+                else:
+                    visible_text.append(json.dumps(part, ensure_ascii=False, default=str))
+            content_tokens = estimate_tokens("\\n".join(visible_text)) + image_count
+        else:
+            content_tokens = estimate_tokens(str(content or ""))
+        total += content_tokens + estimate_tokens(message.role) + 4
+        if message.tool_calls:
+            calls = [
+                {"id": call.id, "name": call.name, "arguments": call.arguments}
+                for call in message.tool_calls
+            ]
+            total += estimate_tokens(json.dumps(calls, ensure_ascii=False, default=str)) + 8
+    return total
+
+
+def _compact_tool_schemas(
+    tools: list[dict[str, Any]], description_tokens: int = 24
+) -> list[dict[str, Any]]:
+    """Encurta descrições sem alterar nomes, tipos, enums ou campos obrigatórios."""
+    compacted = json.loads(json.dumps(tools, ensure_ascii=False, default=str))
+
+    def shorten(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, item in list(value.items()):
+                if key == "description" and isinstance(item, str):
+                    value[key] = truncate_to_tokens(item, description_tokens, suffix=" […]")
+                else:
+                    shorten(item)
+        elif isinstance(value, list):
+            for item in value:
+                shorten(item)
+
+    shorten(compacted)
+    return compacted
+
+
+def _compact_messages_for_token_retry(
+    messages: list[ChatMessage],
+    user_text: str,
+    tools: list[dict[str, Any]],
+    *,
+    budget: int,
+    aggressive: bool = False,
+) -> list[ChatMessage]:
+    """Preserva instruções-base, pedido atual e ciclos recentes com resultados de ferramentas."""
+    if not messages:
+        return []
+
+    current_user_index = max(
+        (
+            index for index, message in enumerate(messages)
+            if message.role == "user"
+            and isinstance(message.content, str)
+            and message.content.strip() == user_text
+        ),
+        default=-1,
+    )
+    if current_user_index < 0:
+        return messages
+
+    system_message = next((message for message in messages if message.role == "system"), None)
+    current_user = messages[current_user_index]
+
+    def compact_message(message: ChatMessage) -> ChatMessage:
+        content = message.content
+        if isinstance(content, str):
+            if message.role == "tool":
+                content = truncate_to_tokens(
+                    content, 180 if aggressive else 420, suffix=" […]"
+                )
+            elif message.role == "user" and message is not current_user:
+                content = truncate_to_tokens(
+                    content, 280 if aggressive else 650, suffix=" […]"
+                )
+        elif isinstance(content, list):
+            copied_parts = [dict(part) if isinstance(part, dict) else part for part in content]
+            for part in copied_parts:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    part["text"] = truncate_to_tokens(
+                        str(part.get("text") or ""),
+                        220 if aggressive else 500,
+                        suffix=" […]",
+                    )
+            content = copied_parts
+        return ChatMessage(
+            role=message.role,
+            content=content,
+            tool_calls=list(message.tool_calls),
+            tool_call_id=message.tool_call_id,
+            name=message.name,
+        )
+
+    # Um assistant com tool_calls e os tool results seguintes precisam ficar juntos.
+    groups: list[list[ChatMessage]] = []
+    active_group: list[ChatMessage] = []
+    for message in messages[current_user_index + 1:]:
+        if message.role == "assistant" and message.tool_calls:
+            if active_group:
+                groups.append(active_group)
+            active_group = [message]
+        elif active_group:
+            active_group.append(message)
+        else:
+            groups.append([message])
+    if active_group:
+        groups.append(active_group)
+
+    base: list[ChatMessage] = []
+    if system_message is not None:
+        base.append(system_message)
+    base.append(current_user)
+
+    selected_groups: list[list[ChatMessage]] = []
+    max_groups = 2 if aggressive else 4
+    for group in reversed(groups):
+        if len(selected_groups) >= max_groups:
+            break
+        compact_group = [compact_message(message) for message in group]
+        candidate_groups = [compact_group] + selected_groups
+        candidate = base + [message for items in candidate_groups for message in items]
+        if _estimate_request_tokens(candidate, tools) <= budget:
+            selected_groups = candidate_groups
+        elif not selected_groups:
+            selected_groups = [[compact_message(message) for message in group]]
+            break
+        else:
+            break
+
+    return base + [message for items in selected_groups for message in items]
 
 
 def _is_action_tool(name: str, spec: Any) -> bool:
@@ -554,6 +714,7 @@ class AuroraAgent:
             cancel_event=self.cancel_event,
         )
         local_app_intent = _local_app_intent(text)
+        effective_max_output_tokens = self.settings.llm.max_output_tokens
 
         try:
             iterations = 0
@@ -610,7 +771,7 @@ class AuroraAgent:
                         "vision" if _messages_contain_image(messages) else "chat"
                     ),
                     temperature=self.settings.llm.temperature,
-                    max_tokens=self.settings.llm.max_output_tokens,
+                    max_tokens=effective_max_output_tokens,
                 )
                 llm_started = time.monotonic()
                 is_vision_request = _messages_contain_image(messages)
@@ -645,7 +806,64 @@ class AuroraAgent:
                     f"provedor={'visao-local' if uses_local_vision else 'principal'}; "
                     f"prazo_de_espera={request_deadline - llm_wait_started:.1f}s."
                 )
-                response = self._chat_with_cancel(request, deadline=request_deadline)
+                try:
+                    response = self._chat_with_cancel(request, deadline=request_deadline)
+                except ProviderError as call_error:
+                    if uses_local_vision or not _is_token_limit_error(call_error):
+                        raise
+                    recovery_error = call_error
+                    recovered = False
+                    configured_context = max(3000, int(self.settings.llm.context_window))
+                    recovery_budgets = (
+                        (min(10000, max(4000, configured_context - 1000)), False),
+                        (min(6500, max(3000, configured_context - 1500)), True),
+                    )
+                    for recovery_index, (budget, aggressive) in enumerate(recovery_budgets, start=1):
+                        compacted_messages = _compact_messages_for_token_retry(
+                            messages, text, tools, budget=budget, aggressive=aggressive
+                        )
+                        retry_tools = _compact_tool_schemas(tools) if aggressive else tools
+                        estimated = _estimate_request_tokens(compacted_messages, retry_tools)
+                        if compacted_messages == messages and retry_tools is tools:
+                            continue
+                        messages[:] = compacted_messages
+                        retry_max_tokens = min(
+                            effective_max_output_tokens, 300 if aggressive else 500
+                        )
+                        retry_request = LLMRequest(
+                            messages=messages,
+                            tools=retry_tools,
+                            model=request.model,
+                            temperature=request.temperature,
+                            max_tokens=retry_max_tokens,
+                            stream=False,
+                        )
+                        print(
+                            "[Aurora agente] Limite de tokens detectado; "
+                            f"tentativa de recuperação {recovery_index}/2; "
+                            f"contexto_estimado={estimated}; orçamento={budget}; "
+                            f"schemas_compactados={aggressive}."
+                        )
+                        try:
+                            response = self._chat_with_cancel(
+                                retry_request, deadline=request_deadline
+                            )
+                        except ProviderError as retry_error:
+                            if not _is_token_limit_error(retry_error):
+                                raise
+                            recovery_error = retry_error
+                            continue
+                        else:
+                            tools = retry_tools
+                            effective_max_output_tokens = retry_max_tokens
+                            recovered = True
+                            print(
+                                "[Aurora agente] Recuperação do limite de tokens concluída; "
+                                "o turno continuará com contexto compacto."
+                            )
+                            break
+                    if not recovered:
+                        raise recovery_error
                 print(
                     f"[Aurora agente] Modelo respondeu em {time.monotonic() - llm_wait_started:.1f}s; "
                     f"tool_calls={len(response.tool_calls) if response is not None else 0}; "
