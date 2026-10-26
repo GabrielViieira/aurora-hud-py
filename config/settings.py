@@ -95,6 +95,11 @@ class LLMSettings:
     planner_model: str = "auto"
     coder_model: str = "auto"
     vision_model: str = ""
+    # Endpoint OpenAI-compatible opcional para visão local (ex.: Ollama).
+    # Vazio mantém o mesmo provedor usado pelo chat.
+    vision_base_url: str = ""
+    vision_timeout_s: float = 120.0
+    vision_max_retries: int = 0
     temperature: float = 0.3
     max_output_tokens: int = 1200
     timeout_s: float = 60.0
@@ -219,6 +224,9 @@ class Settings:
             planner_model=_get(merged, "AURORA_LLM_PLANNER_MODEL", "auto"),
             coder_model=_get(merged, "AURORA_LLM_CODER_MODEL", "auto"),
             vision_model=_get(merged, "AURORA_LLM_VISION_MODEL", ""),
+            vision_base_url=_get(merged, "AURORA_LLM_VISION_BASE_URL", "").rstrip("/"),
+            vision_timeout_s=_get_float(merged, "AURORA_LLM_VISION_TIMEOUT_S", 120.0),
+            vision_max_retries=_get_int(merged, "AURORA_LLM_VISION_MAX_RETRIES", 0),
             temperature=_get_float(merged, "AURORA_LLM_TEMPERATURE", 0.3),
             max_output_tokens=_get_int(merged, "AURORA_LLM_MAX_OUTPUT_TOKENS", 1200),
             timeout_s=_get_float(merged, "AURORA_LLM_TIMEOUT_S", 60.0),
