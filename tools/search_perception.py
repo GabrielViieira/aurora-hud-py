@@ -162,27 +162,43 @@ def rank_search_candidates(
         item["evidencias_busca"] = evidence
         ranked.append(item)
 
-    # Ícones de lupa podem ser botões sem nome. A proximidade com um Edit
-    # horizontal ajuda a reconhecê-los sem depender do aplicativo.
+    # A lupa pode ser um ícone/botão sem nome, ou um botão chamado "Search".
+    # Em ambos os casos ela confirma a anatomia de barra de pesquisa ao lado
+    # (ou dentro) de um campo de entrada comprido — sem depender do aplicativo.
     for button in ranked:
         if button.get("tipo") not in {"Button", "Image"}:
             continue
-        if not str(button.get("nome") or "").startswith(("[Botão sem nome]", "[Imagem sem nome]")):
+        button_name = str(button.get("nome") or "")
+        unnamed = button_name.startswith(("[Botão sem nome]", "[Imagem sem nome]"))
+        looks_like_magnifier = (
+            unnamed
+            or _has_term(button_name, _SEARCH_TERMS)
+            or _has_term(button.get("ajuda"), _SEARCH_TERMS)
+        )
+        if not looks_like_magnifier:
             continue
-        if str(button.get("ajuda") or "").strip() or str(button.get("id_automacao") or "").strip():
+        if unnamed and (
+            str(button.get("ajuda") or "").strip() or str(button.get("id_automacao") or "").strip()
+        ):
             continue
         for field in ranked:
-            if field.get("tipo") != "Edit" or field is button:
+            if field.get("tipo") not in _INPUT_TYPES or field is button:
                 continue
             if field["pontuacao_busca"] < 25 or not _nearby(button, field):
                 continue
             field["pontuacao_busca"] = min(100, field["pontuacao_busca"] + 8)
-            if "há um botão próximo que pode ser a ação/ícone de busca" not in field["evidencias_busca"]:
-                field["evidencias_busca"].append("há um botão próximo que pode ser a ação/ícone de busca")
+            item_evidence = "há uma lupa (ícone ou botão de busca) dentro ou ao lado do campo; " \
+                            "é o padrão típico de barra de pesquisa"
+            if item_evidence not in field["evidencias_busca"]:
+                field["evidencias_busca"].append(item_evidence)
             button["pontuacao_busca"] = min(100, max(20, button["pontuacao_busca"]) + 18)
-            button["evidencias_busca"].append(
+            button_evidence = (
                 "controle visual sem nome alinhado a um campo editável comprido; pode ser uma lupa"
+                if unnamed
+                else "botão rotulado como busca encostado a um campo comprido; é a ação da barra"
             )
+            if button_evidence not in button["evidencias_busca"]:
+                button["evidencias_busca"].append(button_evidence)
             break
 
     for item in ranked:

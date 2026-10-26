@@ -101,6 +101,25 @@ class SearchPerceptionTests(unittest.TestCase):
         self.assertGreaterEqual(result[0]["pontuacao_busca"], 30)
         self.assertEqual(result[0]["papel_sugerido"], "possível campo de busca")
 
+    def test_unnamed_combo_box_next_to_named_search_button_gets_magnifier_evidence(self):
+        # Anatomia genérica: campo comprido de uma linha + lupa encostada nele.
+        # Vale mesmo quando o botão tem nome ("Search") e o campo não.
+        field = element("ComboBox", "", 150, 70, 700, 106)
+        button = element("Button", "Search", 701, 70, 737, 106)
+        result = rank_search_candidates([button, field], window_width=1000)
+        by_type = {item["tipo"]: item for item in result}
+
+        self.assertEqual(by_type["ComboBox"]["papel_sugerido"], "possível campo de busca")
+        self.assertTrue(any("lupa" in clue for clue in by_type["ComboBox"]["evidencias_busca"]))
+
+    def test_magnifier_inside_the_field_is_detected(self):
+        field = element("ComboBox", "", 150, 70, 700, 106)
+        icon = element("Image", "[Imagem sem nome]", 660, 74, 690, 102)
+        result = rank_search_candidates([field, icon], window_width=1000)
+        by_type = {item["tipo"]: item for item in result}
+
+        self.assertTrue(any("lupa" in clue for clue in by_type["ComboBox"]["evidencias_busca"]))
+
     def test_categories_is_not_a_search_candidate(self):
         categories = element("TabItem", "Categories", 20, 40, 130, 72)
         result = rank_search_candidates([categories], window_width=1000)

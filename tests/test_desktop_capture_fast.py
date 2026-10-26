@@ -185,6 +185,151 @@ class FastScanCollectionTests(unittest.TestCase):
         self.assertIn(shallow, controls)
 
 
+class _StrictWindow:
+    """Simula o backend UIA real: `descendants()` só aceita os critérios suportados.
+
+    O código antigo passava `title=`, que o pywinauto 1.0 rejeita com TypeError;
+    o erro era engolido e o controle "não existia".
+    """
+
+    def __init__(self, controls=(), calls: list | None = None) -> None:
+        self.controls = list(controls)
+        self.calls = calls if calls is not None else []
+
+    def window_text(self) -> str:
+        return "Steam"
+
+    def rectangle(self):
+        return _FakeRect(0, 0, 1920, 1040)
+
+    def set_focus(self):
+        self.calls.append("window.set_focus")
+
+    def descendants(self, auto_id: str | None = None, name: str | None = None):
+        for control in self.controls:
+            info = control.element_info
+            if auto_id is not None and str(getattr(info, "auto_id", "")) == auto_id:
+                yield_control = True
+            elif name is not None and control.window_text() == name:
+                yield_control = True
+            else:
+                yield_control = False
+            if yield_control:
+                yield_from = [control]
+                break
+        else:
+            yield_from = []
+        return yield_from
+
+
+class _ClickableControl(_FakeControl):
+    def __init__(
+        self,
+        control_type: str,
+        name: str = "",
+        auto_id: str = "",
+        calls: list | None = None,
+    ) -> None:
+        super().__init__(control_type, name)
+        self.element_info.auto_id = auto_id
+        self.element_info.legacy_help = ""
+        self.element_info.class_name = ""
+        self.calls = calls if calls is not None else []
+        self._clickable_rect = _FakeRect(954, 98, 1396, 132)
+
+    def rectangle(self):
+        return self._clickable_rect
+
+    def is_visible(self) -> bool:
+        return True
+
+    def is_enabled(self) -> bool:
+        return True
+
+    def set_focus(self):
+        self.calls.append("control.set_focus")
+
+    def click_input(self):
+        self.calls.append("control.click_input")
+
+
+class AccessibleControlLookupTests(unittest.TestCase):
+    def test_finds_control_by_exact_name(self):
+        combo = _ClickableControl("ComboBox", "Search the store")
+        window = _StrictWindow([combo])
+
+        found = desktop_control._match_accessible_controls(window, "Search the store")
+
+        self.assertEqual(list(found.values()), [combo])
+
+    def test_finds_control_by_auto_id(self):
+        field = _ClickableControl("Edit", "", auto_id="search_input")
+        window = _StrictWindow([field])
+
+        found = desktop_control._match_accessible_controls(window, "search_input")
+
+        self.assertEqual(list(found.values()), [field])
+
+    def test_ignores_controls_with_other_names(self):
+        other = _ClickableControl("Button", "Browse")
+        window = _StrictWindow([other])
+
+        self.assertEqual(desktop_control._match_accessible_controls(window, "Search the store"), {})
+
+    def test_focuses_window_and_control_before_clicking(self):
+        calls: list[str] = []
+        combo = _ClickableControl("ComboBox", "Search the store", calls=calls)
+        window = _StrictWindow([combo], calls=calls)
+
+        desktop_control._perform_accessible_mouse_action("Search the store", "clicar", window=window)
+
+        self.assertLess(calls.index("window.set_focus"), calls.index("control.set_focus"))
+        self.assertLess(calls.index("control.set_focus"), calls.index("control.click_input"))
+
+    def test_reads_real_pywinauto_attribute_names(self):
+        combo = _ClickableControl("ComboBox", "Search the store", auto_id="search_box")
+        combo.element_info.legacy_help = "Type to search"
+
+        details = desktop_control._control_details(combo)
+
+        self.assertEqual(details["auto_id"], "search_box")
+        self.assertEqual(details["ajuda"], "Type to search")
+
+
+class TypingConfirmationTests(unittest.TestCase):
+    def test_confirms_text_that_reached_the_field(self):
+        confirmed, message = desktop_control._typing_confirmation(
+            "counter strike",
+            {"nome": "Search the store", "tipo": "ComboBox", "valor": "counter strike"},
+        )
+
+        self.assertTrue(confirmed)
+        self.assertIn("counter strike", message)
+
+    def test_flags_empty_field_after_typing(self):
+        confirmed, message = desktop_control._typing_confirmation(
+            "counter strike", {"nome": "Search the store", "tipo": "ComboBox", "valor": ""}
+        )
+
+        self.assertFalse(confirmed)
+        self.assertIn("vazio", message)
+
+    def test_focus_outside_an_input_is_reported_as_uncertain(self):
+        # O Steam devolve o documento inteiro quando nada está focado.
+        confirmed, message = desktop_control._typing_confirmation(
+            "counter strike",
+            {"nome": "Steam", "tipo": "Document", "valor": "https://steamloopback.host/"},
+        )
+
+        self.assertIsNone(confirmed)
+        self.assertIn("não em um campo de entrada", message)
+
+    def test_is_neutral_when_the_field_value_is_unreadable(self):
+        confirmed, _ = desktop_control._typing_confirmation("counter strike", None)
+
+        self.assertIsNone(confirmed)
+
+
 class VerificationPolicyTests(unittest.TestCase):
     """A verificação pós-ação deve preferir acessibilidade antes de gastar uma inferência visual."""
 

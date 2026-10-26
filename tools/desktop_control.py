@@ -27,7 +27,14 @@ _TOOL_DESCRIPTION_CAPTURE = (
     "Para encontrar campos, botões ou controles de texto em tarefas interativas, prefira "
     "somente_acessibilidade=true na primeira tentativa; se não houver controles úteis, a ferramenta "
     "captura pixels automaticamente. Para pedidos puramente visuais (descrever imagem/ícone/layout), "
-    "use somente_imagem=true para omitir UIA. Use captura normal quando precisar de imagem e controles."
+    "use somente_imagem=true para omitir UIA. Use captura normal quando precisar de imagem e controles. "
+    "Como reconhecer uma barra de pesquisa em qualquer aplicativo, sem decorar nomes: "
+    "(1) é um campo de entrada de uma linha, largo e horizontal, quase sempre no topo ou no cabeçalho; "
+    "(2) o rótulo, o placeholder, o texto de ajuda ou o id costuma conter search/pesquisar/busca/buscar/find/filtro; "
+    "(3) há uma lupa — ícone ou botão — dentro do campo ou encostada nele. "
+    "O campo pode aparecer como Edit (campo de texto) ou ComboBox (o Chromium/Electron expõe assim). "
+    "resumo_pesquisa traz pontuacao_busca, confianca_busca e evidencias_busca desses indícios: "
+    "decida pelos indícios (rótulo + lupa + geometria), nunca pelo nome do aplicativo."
 )
 _TOOL_DESCRIPTION_MOUSE = (
     "Controla o mouse na área de trabalho virtual. Faça capturar_tela antes. Se houver um controle acessível "
@@ -42,6 +49,9 @@ _TOOL_DESCRIPTION_MOUSE = (
 _TOOL_DESCRIPTION_KEYBOARD = (
     "Digita texto, pressiona uma tecla ou envia um atalho ao aplicativo em primeiro plano. "
     "Use capturar_tela para confirmar qual janela está ativa e verificar o resultado. "
+    "Depois de digitar, o retorno traz 'confirmado' e o valor lido no campo em foco: "
+    "se confirmado=false, o texto não entrou — clique no campo (de preferência pelo controle acessível) "
+    "e digite de novo antes de anunciar sucesso. confirmado=null significa que o campo não pôde ser lido. "
     "Atalhos de encerramento/segurança são bloqueados por proteção."
 )
 
@@ -225,21 +235,10 @@ def _active_window_snapshot(limit: int = 35) -> dict[str, Any]:
                 name = str(control.window_text() or getattr(info, "name", "") or "").strip()
                 # Campos Edit sem nome acessível são comuns em interfaces Chromium/Electron.
                 # Ainda assim podem ser o campo de pesquisa; mantenha o tipo e a posição.
-                automation_id = ""
-                help_text = ""
-                class_name = ""
-                try:
-                    automation_id = str(getattr(info, "automation_id", "") or "").strip()[:120]
-                except Exception:
-                    pass
-                try:
-                    help_text = str(getattr(info, "help_text", "") or "").strip()[:180]
-                except Exception:
-                    pass
-                try:
-                    class_name = str(getattr(info, "class_name", "") or "").strip()[:120]
-                except Exception:
-                    pass
+                details = _control_details(control)
+                automation_id = details["auto_id"]
+                help_text = details["ajuda"]
+                class_name = details["classe"]
                 if not name:
                     # Botões sem rótulo podem ser ícones (por exemplo, uma lupa).
                     # Mantê-los permite usar geometria e proximidade para classificá-los.
@@ -472,14 +471,42 @@ def capture_screen(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         return ToolResult.fail(f"Falha ao capturar a tela: {type(exc).__name__}: {exc}")
 
 
-def _perform_accessible_mouse_action(target: str, action: str) -> dict[str, Any]:
-    """Atinge um controle UIA por nome/AutomationId, sem inferir coordenadas da imagem."""
+def _control_details(control: Any) -> dict[str, str]:
+    """Lê nome, tipo, id de automação, ajuda e classe com os nomes reais do pywinauto.
+
+    O pywinauto 1.0 expõe `auto_id` e `legacy_help` no `element_info`. Ler
+    `automation_id`/`help_text` devolvia sempre vazio, o que cegava o classificador
+    de busca e impedia distinguir alvos ambíguos pelo id.
+    """
+    info = getattr(control, "element_info", None)
+
+    def _field(*attributes: str, limit: int = 180) -> str:
+        for attribute in attributes:
+            try:
+                value = str(getattr(info, attribute, "") or "").strip()
+            except Exception:
+                continue
+            if value:
+                return value[:limit]
+        return ""
+
+    try:
+        name = str(control.window_text() or "").strip()
+    except Exception:
+        name = ""
+    return {
+        "nome": (name or _field("name"))[:180],
+        "tipo": _field("control_type", limit=40),
+        "auto_id": _field("auto_id", "automation_id", limit=120),
+        "ajuda": _field("legacy_help", "help_text", limit=180),
+        "classe": _field("class_name", limit=120),
+    }
+
+
+def _active_uia_window() -> Any:
+    """Janela em primeiro plano como wrapper UIA."""
     if os.name != "nt":
         raise RuntimeError("Ação por controle acessível só está disponível no Windows.")
-    normalized_target = re.sub(r"\s+", " ", target).strip().casefold()
-    if not normalized_target:
-        raise ValueError("controle precisa conter um nome ou id de automação exato.")
-
     import ctypes
     from pywinauto import Desktop
 
@@ -489,32 +516,55 @@ def _perform_accessible_mouse_action(target: str, action: str) -> dict[str, Any]
     window = Desktop(backend="uia").window(handle=hwnd)
     if not window.exists(timeout=0.5):
         raise RuntimeError("A janela ativa não está acessível pela UI Automation.")
+    return window
 
+
+def _match_accessible_controls(window: Any, target: str) -> dict[tuple[Any, ...], Any]:
+    """Controles cujo nome ou auto_id coincida exatamente com o alvo.
+
+    O backend UIA do pywinauto rejeita `title=` em `descendants()` com TypeError.
+    Como esse erro era engolido, a ação por nome nunca encontrava nada e o agente
+    caía sempre em coordenadas estimadas.
+    """
+    normalized_target = re.sub(r"\s+", " ", str(target or "")).strip().casefold()
     found: dict[tuple[Any, ...], Any] = {}
-    # Tenta pelo AutomationId (normalmente mais barato) e depois pelo nome exato.
-    for criterion in ({"auto_id": target}, {"title": target}):
+    if not normalized_target:
+        return found
+    for criterion in ({"auto_id": target}, {"name": target}):
         try:
             candidates = window.descendants(**criterion)
         except Exception:
-            candidates = []
+            continue
         for control in candidates:
             try:
-                info = getattr(control, "element_info", None)
-                name = str(control.window_text() or getattr(info, "name", "") or "").strip()
-                automation_id = str(getattr(info, "automation_id", "") or "").strip()
+                details = _control_details(control)
                 matched_values = {
                     re.sub(r"\s+", " ", value).strip().casefold()
-                    for value in (name, automation_id) if value
+                    for value in (details["nome"], details["auto_id"]) if value
                 }
                 if normalized_target not in matched_values:
                     continue
                 bounds = control.rectangle()
-                control_type = str(getattr(info, "control_type", "") or "")
-                key = (control_type, name.casefold(), automation_id, int(bounds.left), int(bounds.top),
-                       int(bounds.right), int(bounds.bottom))
+                key = (
+                    details["tipo"], details["nome"].casefold(), details["auto_id"],
+                    int(bounds.left), int(bounds.top), int(bounds.right), int(bounds.bottom),
+                )
                 found[key] = control
             except Exception:
                 continue
+    return found
+
+
+def _perform_accessible_mouse_action(
+    target: str, action: str, window: Any | None = None
+) -> dict[str, Any]:
+    """Atinge um controle UIA por nome/AutomationId, sem inferir coordenadas da imagem."""
+    if not str(target or "").strip():
+        raise ValueError("controle precisa conter um nome ou id de automação exato.")
+    if window is None:
+        window = _active_uia_window()
+
+    found = _match_accessible_controls(window, target)
 
     if not found:
         raise ValueError(
@@ -528,6 +578,24 @@ def _perform_accessible_mouse_action(target: str, action: str) -> dict[str, Any]
         )
 
     control = next(iter(found.values()))
+    try:
+        if not control.is_visible():
+            raise ValueError(f"controle {target!r} não está visível.")
+        if not control.is_enabled():
+            raise ValueError(f"controle {target!r} está desabilitado.")
+    except AttributeError:
+        pass
+
+    # Ativar a janela antes de clicar: numa janela inativa o primeiro clique costuma
+    # apenas trazê-la para frente, sem focar o campo, e o texto digitado se perde.
+    try:
+        window.set_focus()
+    except Exception:
+        pass
+    try:
+        control.set_focus()
+    except Exception:
+        pass
     try:
         if not control.is_visible():
             raise ValueError(f"controle {target!r} não está visível.")
@@ -564,10 +632,11 @@ def _perform_accessible_mouse_action(target: str, action: str) -> dict[str, Any]
         raise ValueError("controle nomeado só aceita clicar, duplo_clique ou clique_direito.")
 
     bounds = control.rectangle()
+    details = _control_details(control)
     return {
-        "controle": str(control.window_text() or target)[:180],
-        "id_automacao": str(getattr(getattr(control, "element_info", None), "automation_id", "") or "")[:120],
-        "tipo": str(getattr(getattr(control, "element_info", None), "control_type", "") or ""),
+        "controle": details["nome"][:180] or target,
+        "id_automacao": details["auto_id"][:120],
+        "tipo": details["tipo"],
         "metodo": method,
         "centro_x": (int(bounds.left) + int(bounds.right)) // 2,
         "centro_y": (int(bounds.top) + int(bounds.bottom)) // 2,
@@ -641,6 +710,57 @@ def control_mouse(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         return ToolResult.fail(f"Ação de mouse não executada: {type(exc).__name__}: {exc}")
 
 
+def _focused_field_state() -> dict[str, str] | None:
+    """Nome, tipo e valor do campo que está com o foco de teclado."""
+    if os.name != "nt":
+        return None
+    try:
+        from pywinauto.windows.uia_defines import IUIA
+        from pywinauto.windows.uia_element_info import UIAElementInfo
+
+        info = UIAElementInfo(IUIA().iuia.GetFocusedElement())
+        name = str(getattr(info, "name", "") or "").strip()
+        value = str(getattr(info, "value", "") or "").strip()
+        control_type = str(getattr(info, "control_type", "") or "").strip()
+        if not (name or value or control_type):
+            return None
+        return {"nome": name[:180], "tipo": control_type, "valor": value[:180]}
+    except Exception:
+        return None
+
+
+def _typing_confirmation(typed: str, state: dict[str, str] | None) -> tuple[bool | None, str]:
+    """Compara o que foi digitado com o valor lido no campo em foco.
+
+    Retorna None quando não há como ler o campo (não afirma nem nega), True quando
+    o texto chegou e False quando o campo em foco mostra outra coisa.
+    """
+    if state is None:
+        return None, "Não foi possível ler o campo em foco para confirmar o texto."
+    name = state.get("nome") or "campo em foco"
+    control_type = str(state.get("tipo") or "")
+    value = str(state.get("valor") or "").strip()
+    wanted = re.sub(r"\s+", " ", str(typed or "")).strip().casefold()
+    if not wanted:
+        return None, f"{name!r}: nada a confirmar."
+    if control_type not in {"Edit", "ComboBox"}:
+        # Chromium às vezes devolve o documento inteiro como elemento focado mesmo
+        # com um campo ativo; afirmar "não entrou" aqui geraria falso negativo.
+        return None, (
+            f"O foco está em {control_type or 'um elemento'} {name!r}, não em um campo de entrada; "
+            "o texto pode não ter entrado. Clique no campo antes de digitar."
+        )
+    normalized_value = re.sub(r"\s+", " ", value).strip().casefold()
+    if wanted in normalized_value:
+        return True, f"Confirmei {value!r} em {name!r}."
+    if not value:
+        return False, (
+            f"{name!r} continua vazio: o texto não entrou. "
+            "Clique no campo (ou use o controle acessível) antes de digitar de novo."
+        )
+    return False, f"{name!r} contém {value!r}, não {typed!r}; confira onde o foco estava."
+
+
 _BLOCKED_HOTKEYS = {
     ("alt", "f4"),
     ("ctrl", "alt", "delete"),
@@ -693,7 +813,20 @@ def control_keyboard(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
                         clipboard_module.copy(old_clipboard or "")
                     except Exception:
                         pass
-            return ToolResult(ok=True, summary=f"Texto enviado ao aplicativo em foco ({len(text)} caracteres).", data={"acao": action, "caracteres": len(text)})
+            # Lê o campo em foco depois de digitar: sem isso o agente anunciava
+            # sucesso mesmo quando o texto não entrava em lugar nenhum.
+            state = _focused_field_state()
+            confirmed, message = _typing_confirmation(text, state)
+            return ToolResult(
+                ok=confirmed is not False,
+                summary=f"Texto enviado ao aplicativo em foco ({len(text)} caracteres). {message}",
+                data={
+                    "acao": action,
+                    "caracteres": len(text),
+                    "confirmado": confirmed,
+                    "campo_em_foco": state,
+                },
+            )
 
         if action == "pressionar":
             raw_key = str(args.get("tecla", "")).strip().lower()
