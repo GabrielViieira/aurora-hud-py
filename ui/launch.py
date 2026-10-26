@@ -2208,7 +2208,10 @@ class SvgHologram(QMainWindow):
                     self.show_caption_requested.emit("Tarefa cancelada.")
                     self.visual_state_requested.emit("idle")
                 elif reply_text:
-                    self.speak_with_caption(f"Aurora: {reply_text}", reply_text)
+                    final_state = "error" if status.endswith(("FAILED", "ERROR")) else "completed"
+                    self.speak_with_caption(
+                        f"Aurora: {reply_text}", reply_text, final_state=final_state
+                    )
                 else:
                     self.visual_state_requested.emit("completed")
             except Exception as exc:
