@@ -2592,13 +2592,18 @@ class SvgHologram(QMainWindow):
                 question.show()
                 question.raise_()
                 question.activateWindow()
-                answer = question.exec()
+                question.exec()
+                # A decisão é baseada no botão clicado; fechar pelo X retorna None.
+                accepted = (
+                    question.clickedButton()
+                    is question.button(QMessageBox.StandardButton.Yes)
+                )
             finally:
                 question.hide()
                 question.deleteLater()
                 self._close_prompt_active = False
 
-            if answer != QMessageBox.StandardButton.Yes:
+            if not accepted:
                 event.ignore()
                 return
             if self._task_active:
