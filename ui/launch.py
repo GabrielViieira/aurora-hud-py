@@ -83,6 +83,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QVBoxLayout,
+    QTextBrowser,
     QWidget,
 )
 
@@ -628,7 +629,68 @@ class _GuiApprover:
         return bool(ticket.approved)
 
 
+class ResponsePanel(QDialog):
+    """Painel de leitura para respostas longas, com rolagem automática suave."""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent, Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
+        self.setWindowTitle("Aurora — resposta completa")
+        self.resize(440, 560)
+        self.setMinimumSize(320, 260)
+        self.setStyleSheet(
+            "QDialog { background: #07131d; color: #c8faff; }"
+            "QLabel { color: #9dffff; font-weight: bold; }"
+            "QTextBrowser { background: #091c29; color: #d9faff; "
+            "border: 1px solid #176078; border-radius: 6px; padding: 10px; "
+            "font-family: 'Segoe UI', sans-serif; font-size: 10pt; }"
+            "QPushButton { color: #9dffff; background: #103447; "
+            "border: 1px solid #1685a5; border-radius: 5px; padding: 6px 10px; }"
+            "QPushButton:hover { background: #15516a; }"
+        )
+        layout = QVBoxLayout(self)
+        heading = QLabel("RESPOSTA DA AURORA", self)
+        layout.addWidget(heading)
+        self.text_view = QTextBrowser(self)
+        self.text_view.setOpenExternalLinks(True)
+        layout.addWidget(self.text_view, 1)
+        self.resume_button = QPushButton("Retomar rolagem automática", self)
+        self.resume_button.clicked.connect(self.start_auto_scroll)
+        layout.addWidget(self.resume_button)
+        self._auto_scrolling = False
+        self._auto_scroll_timer = QTimer(self)
+        self._auto_scroll_timer.setInterval(30)
+        self._auto_scroll_timer.timeout.connect(self._advance_auto_scroll)
+        self.text_view.verticalScrollBar().valueChanged.connect(self._on_scroll_changed)
+
+    def set_response(self, text: str) -> None:
+        self._auto_scroll_timer.stop()
+        self._auto_scrolling = False
+        self.text_view.setPlainText(text)
+        self.text_view.verticalScrollBar().setValue(0)
+        QTimer.singleShot(2200, self.start_auto_scroll)
+
+    def start_auto_scroll(self) -> None:
+        bar = self.text_view.verticalScrollBar()
+        if bar.value() >= bar.maximum():
+            bar.setValue(0)
+        self._auto_scrolling = True
+        self._auto_scroll_timer.start()
+
+    def _advance_auto_scroll(self) -> None:
+        bar = self.text_view.verticalScrollBar()
+        if bar.value() >= bar.maximum():
+            self._auto_scroll_timer.stop()
+            self._auto_scrolling = False
+            return
+        self._auto_scrolling = True
+        bar.setValue(min(bar.maximum(), bar.value() + 1))
+
+    def _on_scroll_changed(self, _value: int) -> None:
+        if not self._auto_scrolling:
+            self._auto_scroll_timer.stop()
+
 class SvgHologram(QMainWindow):
+    response_requested = Signal(str)
     recognized_text = Signal(str)
     voice_status = Signal(str)
     show_caption_requested = Signal(str)
@@ -683,6 +745,8 @@ class SvgHologram(QMainWindow):
         self._active_speech_stop_event: Optional[threading.Event] = None
         self._active_speech_done = None
         self._allow_close = False
+        self._close_prompt_active = False
+        self._response_panel: Optional[ResponsePanel] = None
         self.approval_requested.connect(
             self._show_approval_dialog, Qt.ConnectionType.QueuedConnection
         )
@@ -717,6 +781,7 @@ class SvgHologram(QMainWindow):
         self.recognized_text.connect(self.show_recognized_text)
         self.voice_status.connect(self.show_voice_status)
         self.show_caption_requested.connect(self.show_caption, Qt.ConnectionType.QueuedConnection)
+        self.response_requested.connect(self._show_response_panel, Qt.ConnectionType.QueuedConnection)
         self.speak_requested.connect(self._speak_text, Qt.ConnectionType.QueuedConnection)
         self.speech_ready.connect(self._play_prepared_speech, Qt.ConnectionType.QueuedConnection)
         self.speech_preparation_failed.connect(self._speech_preparation_failed, Qt.ConnectionType.QueuedConnection)
@@ -912,6 +977,18 @@ class SvgHologram(QMainWindow):
 
         if listen_on_start:
             QTimer.singleShot(600, self.start_listening)
+
+    @Slot(str)
+    def _show_response_panel(self, text: str) -> None:
+        if not text or not self.isVisible():
+            return
+        if self._response_panel is None:
+            self._response_panel = ResponsePanel(self)
+        self._response_panel.set_response(text)
+        target = self.frameGeometry().topRight() + QPoint(12, 0)
+        self._response_panel.move(target)
+        self._response_panel.show()
+        self._response_panel.raise_()
 
     @Slot(str)
     def set_visual_state(self, state: str) -> None:
@@ -2093,7 +2170,13 @@ class SvgHologram(QMainWindow):
     def speak_with_caption(
         self, caption: str, speech_text: str, *, final_state: Optional[str] = None,
     ) -> None:
-        # Publica balão e voz sincronizados após o áudio estar pronto.
+        # Respostas longas usam painel rolável; a legenda sobre o HUD fica compacta.
+        if len(speech_text) > 420 or speech_text.count("\n") >= 5:
+            panel_text = caption
+            if panel_text.casefold().startswith("aurora:"):
+                panel_text = panel_text.split(":", 1)[1].strip()
+            self.response_requested.emit(panel_text or speech_text)
+            caption = "Aurora: resposta completa aberta no painel lateral."
         if final_state is None:
             final_state = "error" if "エラーが発生しました" in speech_text else "completed"
         self._queue_speech(caption, speech_text, final_state)
@@ -2452,7 +2535,11 @@ class SvgHologram(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if not self._allow_close:
-            question = QMessageBox(None)
+            if self._close_prompt_active:
+                event.ignore()
+                return
+            self._close_prompt_active = True
+            question = QMessageBox(self)
             question.setWindowTitle("Aurora — encerrar")
             question.setIcon(QMessageBox.Icon.Question)
             question.setText(
@@ -2473,10 +2560,15 @@ class SvgHologram(QMainWindow):
                 | Qt.WindowType.WindowStaysOnTopHint
             )
             question.setWindowModality(Qt.WindowModality.ApplicationModal)
-            question.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-            question.raise_()
-            question.activateWindow()
-            answer = question.exec()
+            # Fechar pelo X rejeita o diálogo como Não.
+            try:
+                question.raise_()
+                question.activateWindow()
+                answer = question.exec()
+            finally:
+                question.deleteLater()
+                self._close_prompt_active = False
+
             if answer != QMessageBox.StandardButton.Yes:
                 event.ignore()
                 return
