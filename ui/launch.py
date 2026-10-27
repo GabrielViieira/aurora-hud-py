@@ -957,7 +957,7 @@ class SvgHologram(QMainWindow):
         self.cancel_shortcut.activated.connect(self._on_escape_shortcut)
         self.exit_shortcut = QShortcut(QKeySequence("Ctrl+Shift+Q"), self)
         self.exit_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
-        self.exit_shortcut.activated.connect(self.close)
+        self.exit_shortcut.activated.connect(self.request_exit)
 
         # Controles sempre visíveis no HUD, independentes do campo de texto.
         self.control_strip = QWidget(self)
@@ -973,7 +973,7 @@ class SvgHologram(QMainWindow):
         self.close_aurora_btn = QPushButton("× Sair", self.control_strip)
         self.close_aurora_btn.setToolTip("Encerrar a Aurora (Ctrl+Shift+Q)")
         self.close_aurora_btn.setFixedSize(62, 28)
-        self.close_aurora_btn.clicked.connect(self.close)
+        self.close_aurora_btn.clicked.connect(self.request_exit)
         control_style = (
             "QPushButton { color: #9dffff; background-color: rgba(8, 28, 42, 225); "
             "border: 1px solid rgba(0, 200, 255, 190); border-radius: 6px; "
@@ -2548,75 +2548,85 @@ class SvgHologram(QMainWindow):
         else:
             self.start_listening()
 
-    def closeEvent(self, event) -> None:  # noqa: N802
-        if not self._allow_close:
-            if self._close_prompt_active:
-                event.ignore()
-                return
-            self._close_prompt_active = True
-            question = QMessageBox()
-            question.setWindowTitle("Aurora — encerrar")
-            question.setIcon(QMessageBox.Icon.Question)
-            question.setText(
-                (
-                    "Há uma tarefa em andamento. Deseja cancelar a tarefa e encerrar "
-                    "a Aurora assim que a operação atual retornar?"
-                    if self._task_active
-                    else "Deseja realmente encerrar a Aurora?"
-                )
-            )
-            question.setStandardButtons(
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-            )
-            question.setDefaultButton(QMessageBox.StandardButton.No)
-            question.setEscapeButton(QMessageBox.StandardButton.No)
-            question.setWindowFlags(
-                Qt.WindowType.Dialog
-                | Qt.WindowType.WindowStaysOnTopHint
-                | Qt.WindowType.CustomizeWindowHint
-                | Qt.WindowType.WindowTitleHint
-                | Qt.WindowType.WindowCloseButtonHint
-            )
-            question.setWindowModality(Qt.WindowModality.ApplicationModal)
-            question.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-            # Usa caixa independente e posicionamento explícito no centro do monitor da HUD.
-            question.adjustSize()
-            screen = self.screen()
-            if screen is not None:
-                area = screen.availableGeometry()
-                question.move(
-                    area.center().x() - question.width() // 2,
-                    area.center().y() - question.height() // 2,
-                )
-            try:
-                question.show()
-                question.raise_()
-                question.activateWindow()
-                question.exec()
-                # A decisão é baseada no botão clicado; fechar pelo X retorna None.
-                accepted = (
-                    question.clickedButton()
-                    is question.button(QMessageBox.StandardButton.Yes)
-                )
-            finally:
-                question.hide()
-                question.deleteLater()
-                self._close_prompt_active = False
+    def request_exit(self) -> None:
+        """Solicita encerramento sem reabrir a confirmação quando o usuário cancela."""
+        if self._allow_close or self._close_prompt_active:
+            return
 
-            if not accepted:
-                event.ignore()
-                return
-            if self._task_active:
-                self._exit_after_task = True
-                self.cancel_current_task(show_feedback=False)
-                self.show_caption_requested.emit(
-                    "Cancelando a tarefa antes de encerrar a Aurora…"
-                )
-                event.ignore()
-                return
-            if self._speech_pending or self._speech_active:
-                self._cancel_speech_output()
-            self._allow_close = True
+        self._close_prompt_active = True
+        question = QMessageBox()
+        question.setWindowTitle("Aurora — encerrar")
+        question.setIcon(QMessageBox.Icon.Question)
+        question.setText(
+            (
+                "Há uma tarefa em andamento. Deseja cancelar a tarefa e encerrar "
+                "a Aurora assim que a operação atual retornar?"
+                if self._task_active
+                else "Deseja realmente encerrar a Aurora?"
+            )
+        )
+        question.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        question.setDefaultButton(QMessageBox.StandardButton.No)
+        question.setEscapeButton(QMessageBox.StandardButton.No)
+        question.setWindowFlags(
+            Qt.WindowType.Dialog
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.CustomizeWindowHint
+            | Qt.WindowType.WindowTitleHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
+        question.setWindowModality(Qt.WindowModality.ApplicationModal)
+        question.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        question.adjustSize()
+        screen = self.screen()
+        if screen is not None:
+            area = screen.availableGeometry()
+            question.move(
+                area.center().x() - question.width() // 2,
+                area.center().y() - question.height() // 2,
+            )
+
+        try:
+            question.show()
+            question.raise_()
+            question.activateWindow()
+            question.exec()
+            accepted = (
+                question.clickedButton()
+                is question.button(QMessageBox.StandardButton.Yes)
+            )
+        finally:
+            question.hide()
+            question.deleteLater()
+            self._close_prompt_active = False
+
+        # Não/X apenas cancela este pedido; não chama close() nem agenda outro diálogo.
+        if not accepted:
+            return
+
+        if self._task_active:
+            self._exit_after_task = True
+            self.cancel_current_task(show_feedback=False)
+            self.show_caption_requested.emit(
+                "Cancelando a tarefa antes de encerrar a Aurora…"
+            )
+            return
+
+        if self._speech_pending or self._speech_active:
+            self._cancel_speech_output()
+        self._allow_close = True
+        self.close()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        # O evento do X da janela é recusado primeiro; a confirmação é aberta
+        # separadamente no próximo ciclo do Qt, evitando recursão do closeEvent.
+        if not self._allow_close:
+            event.ignore()
+            if not self._close_prompt_active:
+                QTimer.singleShot(0, self.request_exit)
+            return
 
         self.animation_timer.stop()
         self.stop_listening()
