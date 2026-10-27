@@ -629,6 +629,14 @@ class _GuiApprover:
         return bool(ticket.approved)
 
 
+class ResponseTextBrowser(QTextBrowser):
+    user_scrolled = Signal()
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        self.user_scrolled.emit()
+        super().wheelEvent(event)
+
+
 class ResponsePanel(QDialog):
     """Painel de leitura para respostas longas, com rolagem automática suave."""
 
@@ -650,8 +658,9 @@ class ResponsePanel(QDialog):
         layout = QVBoxLayout(self)
         heading = QLabel("RESPOSTA DA AURORA", self)
         layout.addWidget(heading)
-        self.text_view = QTextBrowser(self)
+        self.text_view = ResponseTextBrowser(self)
         self.text_view.setOpenExternalLinks(True)
+        self.text_view.user_scrolled.connect(self._pause_auto_scroll)
         layout.addWidget(self.text_view, 1)
         self.resume_button = QPushButton("Retomar rolagem automática", self)
         self.resume_button.clicked.connect(self.start_auto_scroll)
@@ -661,6 +670,12 @@ class ResponsePanel(QDialog):
         self._auto_scroll_timer.setInterval(30)
         self._auto_scroll_timer.timeout.connect(self._advance_auto_scroll)
         self.text_view.verticalScrollBar().valueChanged.connect(self._on_scroll_changed)
+        self.text_view.verticalScrollBar().sliderPressed.connect(self._pause_auto_scroll)
+        self.text_view.verticalScrollBar().actionTriggered.connect(self._pause_auto_scroll)
+
+    def _pause_auto_scroll(self, *_args) -> None:
+        self._auto_scrolling = False
+        self._auto_scroll_timer.stop()
 
     def set_response(self, text: str) -> None:
         self._auto_scroll_timer.stop()
