@@ -25,6 +25,10 @@ APP_ROOT = Path(__file__).resolve().parents[2]
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
+# Tamanho base da janela do HUD (frameless). Era 500x500; a composição é
+# desenhada por QPainter em coordenadas normalizadas, então escala sozinha.
+HUD_BASE_SIZE = (300, 300)
+
 try:
     from aurora.config.settings import Settings
     from aurora.runtime import build_runtime
@@ -648,7 +652,7 @@ class SvgHologram(QMainWindow):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAutoFillBackground(False)
         self.setStyleSheet("QMainWindow, QWidget { background: transparent; }")
-        self.resize(500, 500)
+        self.resize(*HUD_BASE_SIZE)
         self.move(100, 100)
         self._drag_offset: Optional[QPoint] = None
         self._base_size = self.size()
@@ -801,7 +805,7 @@ class SvgHologram(QMainWindow):
         self.caption_label = QLabel(self)
         self.caption_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.caption_label.setWordWrap(True)
-        self.caption_label.setMaximumWidth(420)
+        self.caption_label.setMaximumWidth(max(160, HUD_BASE_SIZE[0] - 40))
         self.caption_label.hide()
 
         self._caption_alpha = 0
@@ -2183,7 +2187,7 @@ class SvgHologram(QMainWindow):
 
             label_rect = self.caption_label.sizeHint()
             x = (self.width() - label_rect.width()) // 2
-            y = self.height() - label_rect.height() - 40
+            y = self.height() - label_rect.height() - max(16, int(self.height() * 0.08))
             self.caption_label.move(max(10, x), max(10, y))
             self.caption_label.show()
 
@@ -2207,11 +2211,11 @@ class SvgHologram(QMainWindow):
         self.caption_hide_timer.stop()
         self._start_caption_fade_out()
         self.message_input.clear()
-        container_width = max(320, self.width() - 80)
+        container_width = max(180, self.width() - 40)
         self.input_container.setFixedWidth(container_width)
         self.input_container.adjustSize()
         x = (self.width() - self.input_container.width()) // 2
-        y = self.height() - self.input_container.height() - 90
+        y = self.height() - self.input_container.height() - max(20, int(self.height() * 0.18))
         self.input_container.move(max(10, x), max(10, y))
         self.input_container.show()
         self.message_input.setFocus()

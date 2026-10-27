@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from aurora.config.permissions import PermissionPolicy, Risk
-from aurora.config.settings import ConfigError, Settings
+from aurora.config.settings import Settings
 from aurora.core.agent import AuroraAgent
 from aurora.core.context_manager import Summarizer
 from aurora.core.events import EventBus
@@ -117,17 +117,24 @@ def build_runtime(
     vision_provider: FreeLLMClient | None = None
     if provider_override is not None:
         provider = provider_override
-    elif settings.has_api_key():
-        try:
-            provider = FreeLLMClient(
-                settings.llm.base_url,
-                settings.api_key(),
-                timeout_s=settings.llm.timeout_s,
-                max_retries=settings.llm.max_retries,
-                on_metrics=_metrics_recorder(metrics),
+    else:
+        # A chave é resolvida a cada requisição (`settings.api_key`): se o
+        # usuário regenerar a chave no painel do FreeLLM, a Aurora se recupera
+        # sozinha, inclusive de um 401, sem reiniciar o HUD.
+        provider = FreeLLMClient(
+            settings.llm.base_url,
+            settings.api_key,
+            timeout_s=settings.llm.timeout_s,
+            max_retries=settings.llm.max_retries,
+            on_metrics=_metrics_recorder(metrics),
+            key_env_hint=settings.llm.api_key_env,
+        )
+        if not settings.has_api_key():
+            logger.warning(
+                "Chave do FreeLLM ainda não configurada; a Aurora tentará de novo "
+                "a cada requisição e aceitará %s definida no .env em tempo de execução.",
+                settings.llm.api_key_env,
             )
-        except ConfigError:
-            provider = None
 
     # O endpoint de visão é independente para manter chat/planner/summarizer
     # no provedor existente e enviar imagens somente ao backend local configurado.

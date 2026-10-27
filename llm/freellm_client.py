@@ -6,7 +6,9 @@ Verificado nesta máquina em 2026-10-22:
   - tool calling no formato OpenAI, `usage` e `_routed_via` na resposta
   - a superfície OpenAI não reconhece os slots `claude-*`; `auto` é o padrão seguro
 
-Nenhuma chave é logada. O cliente recebe a chave já resolvida pelo chamador.
+Nenhuma chave é logada. O cliente recebe a chave já resolvida pelo chamador ou
+uma função que a resolve a cada requisição, permitindo recarregar uma chave
+regenerada no painel do FreeLLM sem reiniciar a Aurora.
 """
 
 from __future__ import annotations
@@ -51,24 +53,50 @@ class FreeLLMClient:
     def __init__(
         self,
         base_url: str,
-        api_key: str,
+        api_key: str | Callable[[], str] = "",
         *,
         timeout_s: float = 60.0,
         max_retries: int = 2,
         on_metrics: Callable[[dict[str, Any]], None] | None = None,
+        key_env_hint: str = "",
     ) -> None:
         if not base_url:
             raise ValueError("base_url obrigatória")
         self.base_url = base_url.rstrip("/")
-        self._api_key = api_key
+        # A chave pode ser fixa (str) ou uma função resolvida a cada requisição.
+        # Com função, regenerar a chave no painel do FreeLLM não exige reiniciar.
+        self._key_provider: Callable[[], str] | None = (
+            None if isinstance(api_key, str) else api_key
+        )
+        self._static_key = api_key.strip() if isinstance(api_key, str) else ""
+        self.key_env_hint = key_env_hint
         self.timeout_s = timeout_s
         self.max_retries = max(0, max_retries)
         self.on_metrics = on_metrics
 
     # --------------------------------------------------------------- helpers
-    def _headers(self) -> dict[str, str]:
+    def _resolve_key(self) -> str:
+        if self._key_provider is None:
+            return self._static_key
+        try:
+            value = self._key_provider()
+        except Exception:  # configuração ausente não derruba o cliente
+            logger.debug("falha ao resolver a chave do FreeLLM", exc_info=True)
+            return ""
+        return str(value or "").strip()
+
+    def _missing_key_error(self) -> ProviderError:
+        hint = self.key_env_hint or "a variável de ambiente da chave"
+        return ProviderError(
+            f"chave do FreeLLM ausente; defina {hint} no .env ou no ambiente",
+            kind=ErrorKind.AUTH,
+            retryable=False,
+        )
+
+    def _headers(self, api_key: str | None = None) -> dict[str, str]:
+        key = self._resolve_key() if api_key is None else api_key
         return {
-            "Authorization": f"Bearer {self._api_key}",
+            "Authorization": f"Bearer {key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
             "User-Agent": "aurora-hud/0.1",
@@ -89,7 +117,12 @@ class FreeLLMClient:
 
         for attempt in range(1, attempts + 1):
             started = time.perf_counter()
-            request = urllib.request.Request(url, data=data, headers=self._headers(), method=method)
+            api_key = self._resolve_key()
+            if not api_key:
+                raise self._missing_key_error()
+            request = urllib.request.Request(
+                url, data=data, headers=self._headers(api_key), method=method
+            )
             try:
                 with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
                     body = response.read()
@@ -102,6 +135,20 @@ class FreeLLMClient:
                 latency = int((time.perf_counter() - started) * 1000)
                 last_error = self._http_error(exc.code, body)
                 self._record(method, path, exc.code, latency, attempt, error=last_error.kind)
+                if (
+                    last_error.kind == ErrorKind.AUTH
+                    and self._key_provider is not None
+                    and attempt < attempts
+                ):
+                    # A chave pode ter sido regenerada no painel do gateway.
+                    # Recarrega e repete uma vez antes de desistir.
+                    reloaded = self._resolve_key()
+                    if reloaded and reloaded != api_key:
+                        logger.warning(
+                            "chave do FreeLLM recarregada após HTTP %s; repetindo a requisição",
+                            exc.code,
+                        )
+                        continue
                 if not last_error.retryable or attempt >= attempts:
                     raise last_error from exc
             except (urllib.error.URLError, socket.timeout, TimeoutError) as exc:
@@ -366,13 +413,21 @@ class FreeLLMClient:
 
         parsed = urllib.parse.urlsplit(self.base_url)
         path_base = parsed.path or ""
+        api_key = self._resolve_key()
+        if not api_key:
+            raise self._missing_key_error()
         connection_cls = (
             http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
         )
         connection = connection_cls(parsed.hostname, parsed.port, timeout=self.timeout_s)
         try:
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            connection.request("POST", f"{path_base}/chat/completions", body=body, headers=self._headers())
+            connection.request(
+                "POST",
+                f"{path_base}/chat/completions",
+                body=body,
+                headers=self._headers(api_key),
+            )
             response = connection.getresponse()
             if response.status != 200:
                 raw = response.read().decode("utf-8", errors="replace")
@@ -399,4 +454,5 @@ class FreeLLMClient:
             connection.close()
 
     def close(self) -> None:
-        self._api_key = ""
+        self._static_key = ""
+        self._key_provider = None

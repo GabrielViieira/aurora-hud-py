@@ -166,6 +166,7 @@ class Settings:
     user_name: str = ""
     _api_key: str = field(default="", repr=False, compare=False)
     _read_environ: bool = field(default=True, repr=False, compare=False)
+    _dotenv_path: Path | None = field(default=None, repr=False, compare=False)
 
     # ------------------------------------------------------------------ load
     @classmethod
@@ -175,7 +176,8 @@ class Settings:
         dotenv_path: Path | None = None,
         app_dir: Path | None = None,
     ) -> "Settings":
-        base_file = parse_dotenv(dotenv_path or DEFAULT_ENV_FILE)
+        env_path = dotenv_path or DEFAULT_ENV_FILE
+        base_file = parse_dotenv(env_path)
         merged: dict[str, str] = dict(base_file)
         merged.update(os.environ if env is None else env)
 
@@ -292,6 +294,7 @@ class Settings:
             ),
             # `env` explícito (ex.: testes) isola a configuração do ambiente real.
             _read_environ=env is None,
+            _dotenv_path=env_path,
         )
 
     # --------------------------------------------------------------- helpers
@@ -307,9 +310,20 @@ class Settings:
         self.paths.audit_path.parent.mkdir(parents=True, exist_ok=True)
 
     def api_key(self) -> str:
+        """Resolve a chave no momento da chamada, não no início do processo.
+
+        Ordem: ambiente do processo, depois o `.env` (relido a cada chamada, para
+        aceitar uma chave nova sem reiniciar a Aurora) e por fim o valor capturado
+        em `Settings.load`. Assim, regenerar a chave no painel do FreeLLM deixa de
+        exigir reinício do HUD.
+        """
         if self._read_environ:
             for name in (self.llm.api_key_env, self.llm.fallback_api_key_env):
                 value = os.environ.get(name, "").strip()
+                if value:
+                    return value
+            for name in (self.llm.api_key_env, self.llm.fallback_api_key_env):
+                value = self._dotenv_value(name)
                 if value:
                     return value
         if self._api_key:
@@ -318,6 +332,15 @@ class Settings:
             f"Chave do FreeLLM ausente. Defina {self.llm.api_key_env} no ambiente "
             f"ou no arquivo .env (veja .env.example)."
         )
+
+    def _dotenv_value(self, key: str) -> str:
+        path = self._dotenv_path
+        if path is None:
+            return ""
+        try:
+            return (parse_dotenv(path).get(key) or "").strip()
+        except OSError:
+            return ""
 
     def has_api_key(self) -> bool:
         try:

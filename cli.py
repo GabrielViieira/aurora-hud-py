@@ -83,7 +83,7 @@ def print_status(settings: Settings, runtime: Runtime | None = None) -> int:
 
             client = FreeLLMClient(
                 settings.llm.base_url,
-                settings.api_key(),
+                settings.api_key,
                 timeout_s=min(settings.llm.timeout_s, 15),
                 max_retries=0,
             )

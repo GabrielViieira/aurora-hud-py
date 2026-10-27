@@ -179,6 +179,18 @@ def _is_vision_token_limit_error(exc: ProviderError) -> bool:
     return has_token_or_context and has_limit and (status is None or int(status) >= 400)
 
 
+def _is_vision_backend_unreachable(exc: ProviderError) -> bool:
+    """Falha de transporte com o backend visual local (Ollama desligado, porta fechada).
+
+    Diferente de erro de modelo ou de imagem ruim, aqui não há resposta para
+    analisar: insistir na chamada só gasta tempo. Nesse caso o agente remove os
+    pixels e segue com os controles de acessibilidade.
+    """
+    kind = str(getattr(exc, "kind", "") or "")
+    status = getattr(exc, "status", None)
+    return status is None and kind in {"unavailable", "timeout"}
+
+
 def _is_token_limit_error(exc: ProviderError) -> bool:
     """Detecta recusas que parecem vir do limite de contexto/tokens do gateway."""
     detail = f"{exc} {getattr(exc, 'body', '')}".casefold()
@@ -715,6 +727,54 @@ class AuroraAgent:
         )
         return True
 
+    def _handoff_local_vision_outage(
+        self, messages: list[ChatMessage], error: ProviderError
+    ) -> bool:
+        """Remove pixels quando o backend visual local está fora do ar.
+
+        Sem Ollama (ou outro endpoint local de visão) não há como descrever a
+        imagem. Em vez de derrubar o turno inteiro, o agente perde a imagem e
+        continua com os dados de acessibilidade, que é o que o modelo principal
+        sabe usar sem inventar elementos.
+        """
+        image_indexes = [
+            index for index, message in enumerate(messages)
+            if _messages_contain_image([message])
+        ]
+        if not image_indexes:
+            return False
+
+        note = (
+            "A visão local está fora do ar: o modelo visual não pôde ser consultado "
+            f"({str(error)[:180]}). Não descreva a imagem nem invente elementos. "
+            "Use capturar_tela com somente_acessibilidade=True para obter os controles "
+            "estruturados e siga por eles; se não bastarem, explique a limitação ao "
+            "usuário e sugira iniciar o Ollama."
+        )
+        for index in image_indexes:
+            message = messages[index]
+            parts = message.content if isinstance(message.content, list) else []
+            text_parts = [
+                str(part.get("text", "")).strip()
+                for part in parts
+                if isinstance(part, dict) and part.get("type") == "text" and part.get("text")
+            ]
+            content = "\n".join(text_parts).strip()
+            if index == image_indexes[-1]:
+                content = (content + "\n" + note).strip()
+            elif content:
+                content += "\n(Pixels desta captura removidos; a visão local está indisponível.)"
+            else:
+                content = "(Pixels desta captura indisponíveis; a visão local está indisponível.)"
+            messages[index] = ChatMessage(role=message.role, content=content)
+
+        print(
+            "[Aurora agente] Visão local indisponível; "
+            f"tipo={getattr(error, 'kind', None)}; detalhe={str(error)[:220]}. "
+            "Removi as imagens e continuarei com os controles UIA disponíveis."
+        )
+        return True
+
     def _chat_with_cancel(
         self, request: LLMRequest, *, deadline: float
     ) -> LLMResponse | None:
@@ -1044,6 +1104,10 @@ class AuroraAgent:
                 except ProviderError as call_error:
                     if uses_local_vision:
                         if self._handoff_local_vision_failure_to_accessibility(messages, call_error):
+                            continue
+                        if _is_vision_backend_unreachable(call_error) and (
+                            self._handoff_local_vision_outage(messages, call_error)
+                        ):
                             continue
                         raise
                     if not _is_token_limit_error(call_error):

@@ -82,7 +82,8 @@ Essa linha confirma que a mensagem com imagem foi encaminhada ao endpoint local.
 
 ## Limitações do primeiro teste
 
-- O modelo precisa estar baixado e o serviço Ollama em execução.
+- O modelo precisa estar baixado e o serviço Ollama em execução. Se aparecer `WinError 10061` / "conexão recusada" em `127.0.0.1:11434`, o servidor não está escutando (o ícone da bandeja pode estar aberto mesmo assim). Inicie com `ollama serve` e confirme com `(Invoke-RestMethod "http://127.0.0.1:11434/api/tags").models`. Nesse caso o agente remove as imagens e continua com os controles de acessibilidade em vez de falhar o turno inteiro.
+
 - A resposta visual pode ser mais lenta na primeira inferência, enquanto o modelo carrega para a memória. O exemplo configura 120 segundos para a chamada HTTP; o prazo externo da Aurora acrescenta uma pequena margem, com teto de segurança de 150 segundos.
 - O endpoint está configurado para o modelo Qwen. Não mantenha o nome de um modelo de nuvem nessa variável.
 - Este teste valida o caminho de visão; a capacidade do modelo de emitir chamadas de ferramenta de maneira confiável precisa ser verificada na tarefa real.
