@@ -2355,7 +2355,7 @@ class SvgHologram(QMainWindow):
             self.cancel_current_task()
             return True
         if command == "exit":
-            self.close()
+            self.request_exit()
             return True
         return False
 
@@ -2620,12 +2620,11 @@ class SvgHologram(QMainWindow):
         self.close()
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        # O evento do X da janela é recusado primeiro; a confirmação é aberta
-        # separadamente no próximo ciclo do Qt, evitando recursão do closeEvent.
+        # O closeEvent nunca abre diálogos nem agenda novos pedidos de saída.
+        # A confirmação é iniciada somente por ações explícitas (botão/atalho/
+        # comando), evitando que eventos de fechamento repetidos reabram o diálogo.
         if not self._allow_close:
             event.ignore()
-            if not self._close_prompt_active:
-                QTimer.singleShot(0, self.request_exit)
             return
 
         self.animation_timer.stop()
