@@ -2554,7 +2554,7 @@ class SvgHologram(QMainWindow):
                 event.ignore()
                 return
             self._close_prompt_active = True
-            question = QMessageBox(self)
+            question = QMessageBox()
             question.setWindowTitle("Aurora — encerrar")
             question.setIcon(QMessageBox.Icon.Question)
             question.setText(
@@ -2569,18 +2569,32 @@ class SvgHologram(QMainWindow):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             question.setDefaultButton(QMessageBox.StandardButton.No)
+            question.setEscapeButton(QMessageBox.StandardButton.No)
             question.setWindowFlags(
-                question.windowFlags()
-                | Qt.WindowType.Dialog
+                Qt.WindowType.Dialog
                 | Qt.WindowType.WindowStaysOnTopHint
+                | Qt.WindowType.CustomizeWindowHint
+                | Qt.WindowType.WindowTitleHint
+                | Qt.WindowType.WindowCloseButtonHint
             )
             question.setWindowModality(Qt.WindowModality.ApplicationModal)
-            # Fechar pelo X rejeita o diálogo como Não.
+            question.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+            # Usa caixa independente e posicionamento explícito no centro do monitor da HUD.
+            question.adjustSize()
+            screen = self.screen()
+            if screen is not None:
+                area = screen.availableGeometry()
+                question.move(
+                    area.center().x() - question.width() // 2,
+                    area.center().y() - question.height() // 2,
+                )
             try:
+                question.show()
                 question.raise_()
                 question.activateWindow()
                 answer = question.exec()
             finally:
+                question.hide()
                 question.deleteLater()
                 self._close_prompt_active = False
 
