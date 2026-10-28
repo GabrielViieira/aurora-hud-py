@@ -121,9 +121,15 @@ class AgentDeadlineTests(unittest.TestCase):
                 "capturar_tela", {"somente_acessibilidade": True}, False, True
             )
         )
-        # UIA alone is not enough to skip a normal capture that could add pixels.
-        self.assertFalse(
+        # Captura genérica é redundante quando qualquer observação recente já está disponível.
+        # Para adquirir a modalidade que falta, o modelo deve especificá-la.
+        self.assertTrue(
             _should_reuse_recent_capture("capturar_tela", {}, False, True)
+        )
+        self.assertFalse(
+            _should_reuse_recent_capture(
+                "capturar_tela", {"somente_imagem": True}, False, True
+            )
         )
         self.assertFalse(
             _should_reuse_recent_capture("controlar_mouse", {}, True, True)
