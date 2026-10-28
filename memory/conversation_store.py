@@ -90,6 +90,26 @@ class ConversationStore:
         )
         return [dict(row) for row in rows]
 
+    def messages(self, session_id: str) -> list[StoredMessage]:
+        """Retorna todas as mensagens de uma sessão em ordem cronológica."""
+        rows = self.db.query(
+            "SELECT id, role, content, created_at FROM messages "
+            "WHERE session_id = ? ORDER BY id",
+            (session_id,),
+        )
+        return [
+            StoredMessage(int(r["id"]), str(r["role"]), str(r["content"]), str(r["created_at"]))
+            for r in rows
+        ]
+
+    def delete_session(self, session_id: str) -> None:
+        """Apaga uma sessão e suas mensagens (ON DELETE CASCADE)."""
+        self.db.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+
+    def clear_sessions(self) -> None:
+        """Limpa o histórico de conversas sem apagar memórias nem auditoria."""
+        self.db.execute("DELETE FROM sessions")
+
     def count_messages(self, session_id: str) -> int:
         row = self.db.query_one(
             "SELECT COUNT(*) AS n FROM messages WHERE session_id = ?", (session_id,)

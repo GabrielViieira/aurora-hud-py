@@ -17,6 +17,7 @@ import tempfile
 import threading
 import time
 import unicodedata
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional, Callable
 
@@ -65,6 +66,9 @@ except Exception:
 from animation import D20Animation
 from efeitos import HologramEffects
 from aurora.core.streaming import StreamingSpeechSession
+from aurora.core.control_commands import classify_hud_control_command
+from aurora.ui.assistant_panel import AssistantPanelDialog
+from aurora.ui.hud_preferences import load_hud_preferences, save_hud_preferences
 from PySide6.QtCore import (
     QPoint,
     QRectF,
@@ -92,32 +96,6 @@ _JA_RE = re.compile(r"[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]")
 # Para validar tradução, exija hiragana/katakana; kanji isolado também pode ser chinês.
 _JA_KANA_RE = re.compile(r"[\u3040-\u309F\u30A0-\u30FF]")
 FREELLM_URL = os.environ.get("AURORA_FREELLM_URL", "http://localhost:3001")
-
-def _classify_hud_control_command(text: str) -> str:
-    """Reconhece comandos locais explícitos de cancelar tarefa ou encerrar a Aurora."""
-    value = unicodedata.normalize("NFKD", str(text or "").casefold())
-    value = "".join(ch for ch in value if not unicodedata.combining(ch))
-    value = re.sub(r"[^a-z0-9]+", " ", value).strip()
-    value = re.sub(r"^(?:(?:ei|hey) )?aurora(?:\s+|$)", "", value).strip()
-
-    cancel_patterns = (
-        r"(?:cancele|cancelar|cancel|pare|parar|interrompa|interromper|stop)(?: (?:a|o|the))?(?: (?:tarefa|instrucao|comando|execucao|processo|isso|task|instruction|command))?(?: (?:atual|current))?(?: agora| now)?",
-        r"(?:cancel|stop) (?:the )?(?:current )?(?:task|instruction|command)",
-        r"(?:pare|parar|interrompa|interromper|cancele|cancelar|stop|cancel)(?: (?:de|a|o|the))? (?:falar|fala|voz|audio|speaking|talking|voice|speech)(?: (?:agora|now))?",
-    )
-    if any(re.fullmatch(pattern, value) for pattern in cancel_patterns):
-        return "cancel"
-
-    close_patterns = (
-        r"(?:feche|fecha|fechar|encerre|encerra|encerrar|desligue|desliga|desligar|close|quit|exit) (?:a |o )?aurora",
-        r"(?:saia|sair|exit|quit) (?:da|de) aurora",
-        r"(?:feche|fecha|fechar|encerre|encerrar|close|quit|exit) (?:o |a )?(?:app|aplicativo) aurora",
-        r"(?:close|quit|exit) aurora",
-    )
-    if any(re.fullmatch(pattern, value) for pattern in close_patterns):
-        return "exit"
-    return ""
-
 
 def _tts_gateway_config() -> tuple[str, dict[str, str]]:
     # Resolve endpoint e autenticação usando a mesma configuração do runtime.
@@ -791,6 +769,18 @@ class SvgHologram(QMainWindow):
             self._on_agent_task_finished, Qt.ConnectionType.QueuedConnection
         )
         self._init_runtime()
+        preferences_dir = (
+            self._runtime.settings.paths.data_dir
+            if self._runtime is not None
+            else Path(__file__).resolve().parents[1] / "data"
+        )
+        self._hud_preferences_path = preferences_dir / "hud_preferences.json"
+        stream_default = bool(self._runtime.settings.llm.stream) if self._runtime is not None else True
+        self._hud_preferences = load_hud_preferences(
+            self._hud_preferences_path, streaming_default=stream_default
+        )
+        self._assistant_panel: Optional[AssistantPanelDialog] = None
+        self._apply_hud_preferences()
 
         central = QWidget(self)
         central.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
@@ -988,6 +978,9 @@ class SvgHologram(QMainWindow):
         self.exit_shortcut = QShortcut(QKeySequence("Ctrl+Shift+Q"), self)
         self.exit_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
         self.exit_shortcut.activated.connect(self.request_exit)
+        self.history_shortcut = QShortcut(QKeySequence("Ctrl+H"), self)
+        self.history_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self.history_shortcut.activated.connect(self.open_assistant_panel)
 
         # Controles sempre visíveis no HUD, independentes do campo de texto.
         self.control_strip = QWidget(self)
@@ -1004,6 +997,10 @@ class SvgHologram(QMainWindow):
         self.close_aurora_btn.setToolTip("Encerrar a Aurora (Ctrl+Shift+Q)")
         self.close_aurora_btn.setFixedSize(62, 28)
         self.close_aurora_btn.clicked.connect(self.request_exit)
+        self.assistant_panel_btn = QPushButton("⚙", self.control_strip)
+        self.assistant_panel_btn.setToolTip("Histórico, diagnóstico e preferências (Ctrl+H)")
+        self.assistant_panel_btn.setFixedSize(32, 28)
+        self.assistant_panel_btn.clicked.connect(self.open_assistant_panel)
         control_style = (
             "QPushButton { color: #9dffff; background-color: rgba(8, 28, 42, 225); "
             "border: 1px solid rgba(0, 200, 255, 190); border-radius: 6px; "
@@ -1014,9 +1011,11 @@ class SvgHologram(QMainWindow):
         )
         self.cancel_task_btn.setStyleSheet(control_style)
         self.close_aurora_btn.setStyleSheet(control_style)
+        self.assistant_panel_btn.setStyleSheet(control_style)
         control_layout.addWidget(self.cancel_task_btn)
         control_layout.addWidget(self.close_aurora_btn)
-        self.control_strip.setFixedSize(172, 34)
+        control_layout.addWidget(self.assistant_panel_btn)
+        self.control_strip.setFixedSize(208, 34)
         self.control_strip.move(self.width() - self.control_strip.width() - 8, 8)
         self.control_strip.raise_()
 
@@ -1035,9 +1034,23 @@ class SvgHologram(QMainWindow):
         self._response_panel.show()
         self._response_panel.raise_()
 
+    def _response_panel_threshold(self) -> int:
+        try:
+            return max(160, min(600, int(self._hud_preferences.get("response_panel_threshold", 260))))
+        except (TypeError, ValueError):
+            return 260
+
+    def _compact_caption_text(self, text: str, limit: int | None = None) -> str:
+        max_chars = max(80, int(limit or min(180, self._response_panel_threshold())))
+        normalized = str(text or "").strip()
+        if len(normalized) <= max_chars:
+            return normalized
+        preview = normalized[:max_chars].rsplit(" ", 1)[0].rstrip()
+        return f"{preview}…\nResposta completa em Histórico (⚙ / Ctrl+H)."
+
     @Slot(str)
     def _show_streamed_text(self, fragment: str) -> None:
-        """Mostra a resposta na HUD e abre o painel lateral apenas para textos longos."""
+        """Mostra respostas curtas na HUD e usa painel separado só quando configurado."""
         if not fragment or not self.isVisible():
             return
 
@@ -1047,9 +1060,11 @@ class SvgHologram(QMainWindow):
                 self._response_panel.append_streamed_text(fragment)
             return
 
-        # Mantém o comportamento de leitura rolável para respostas realmente longas,
-        # mas não abre uma janela separada para cada resposta curta.
-        if len(self._streamed_display_text) > 420 or self._streamed_display_text.count("\n") >= 5:
+        long_enough = (
+            len(self._streamed_display_text) > self._response_panel_threshold()
+            or self._streamed_display_text.count("\n") >= 4
+        )
+        if long_enough and self._hud_preferences.get("long_responses_in_panel", True):
             self._streamed_display_in_panel = True
             self.caption_hide_timer.stop()
             self.caption_anim_timer.stop()
@@ -1060,7 +1075,8 @@ class SvgHologram(QMainWindow):
         self._update_streamed_main_caption()
 
     def _update_streamed_main_caption(self) -> None:
-        text = f"Aurora: {self._streamed_display_text}"
+        display_text = self._compact_caption_text(self._streamed_display_text)
+        text = f"Aurora: {display_text}"
         self.caption_hide_timer.stop()
 
         was_visible = self.caption_label.isVisible()
@@ -1068,7 +1084,7 @@ class SvgHologram(QMainWindow):
             self.show_caption(text, duration_ms=60_000)
             return
 
-        # Atualiza o texto sem reiniciar o fade a cada token recebido.
+        # Atualiza sem reiniciar o fade a cada token, mantendo a legenda limitada.
         self._caption_fading_out = False
         self.caption_label.setText(text)
         self.caption_label.adjustSize()
@@ -1135,6 +1151,8 @@ class SvgHologram(QMainWindow):
     def _enqueue_streamed_speech_segments(
         self, session: StreamingSpeechSession, segments: list[str]
     ) -> None:
+        if not self._hud_preferences.get("speech_enabled", True):
+            return
         for segment in segments:
             segment = segment.strip()
             if not segment or session.stop_event.is_set():
@@ -1393,6 +1411,94 @@ class SvgHologram(QMainWindow):
         finally:
             self._active_approval_dialog = None
             ticket.event.set()
+
+    def _apply_hud_preferences(self) -> None:
+        """Aplica as preferências persistidas à UI e à configuração do agente."""
+        if self._runtime is None or self._agent is None:
+            return
+        try:
+            settings = self._runtime.settings
+            updated = replace(
+                settings,
+                llm=replace(
+                    settings.llm,
+                    stream=bool(self._hud_preferences.get("streaming_enabled", settings.llm.stream)),
+                ),
+            )
+            self._runtime.settings = updated
+            self._agent.settings = updated
+        except Exception as exc:
+            print(f"[Aurora preferências] Não foi possível aplicar configuração de streaming: {exc}")
+
+    def _save_hud_preferences(self, values: dict) -> dict:
+        self._hud_preferences = save_hud_preferences(self._hud_preferences_path, values)
+        self._apply_hud_preferences()
+        if self._assistant_panel is not None:
+            self._assistant_panel.set_preferences(self._hud_preferences)
+        return self._hud_preferences
+
+    def _on_history_session_deleted(self, session_id: str | None) -> None:
+        if self._agent is None:
+            return
+        if session_id is None or getattr(self._agent, "session_id", None) == session_id:
+            # A próxima mensagem cria uma nova sessão válida, sem reutilizar um ID excluído.
+            self._agent.session_id = ""
+
+    def _assistant_diagnostics(self) -> dict:
+        runtime = self._runtime
+        preferences = self._hud_preferences
+        if runtime is None:
+            return {
+                "summary": "Runtime não iniciado. Confira a chave do provedor e as dependências do projeto.",
+                "endpoints": [],
+            }
+
+        settings = runtime.settings
+        try:
+            model = runtime.router.model_for("chat")
+        except Exception:
+            model = settings.llm.model
+        vision_model = (settings.llm.vision_model or model) if settings.llm.vision_base_url else "não configurado"
+        lines = [
+            "Runtime: conectado" if self._agent is not None else "Runtime: agente indisponível",
+            f"Modelo principal: {model}",
+            f"Modelo de visão: {vision_model}",
+            f"URL do provedor: {settings.llm.base_url}",
+            f"Chave de API: {'configurada' if settings.has_api_key() else 'ausente'} (o valor nunca é exibido)",
+            f"Streaming de texto: {'ativo' if preferences.get('streaming_enabled', True) else 'inativo'}",
+            f"Fala: {'ativa' if preferences.get('speech_enabled', True) else 'desativada nas preferências'}",
+            f"Backend TTS: {AURORA_TTS_BACKEND}",
+            f"Voz SAPI detectada: {'sim' if self._tts_engine is not None and self._tts_voice_ja else 'não'}",
+            f"GPT-SoVITS direto: {'disponível' if self._gpt_sovits_enabled else 'não configurado'}",
+            f"Piper: {'modelo encontrado' if PIPER_MODEL_PATH.is_file() else 'modelo não encontrado'}",
+            f"Dados locais: {settings.paths.data_dir}",
+        ]
+        endpoints = [{"label": "Provedor de chat", "url": settings.llm.base_url}]
+        if settings.llm.vision_base_url:
+            endpoints.append({"label": "Provedor de visão", "url": settings.llm.vision_base_url})
+        if VOICEVOX_AVAILABLE:
+            endpoints.append({"label": "Voicevox", "url": VOICEVOX_URL})
+        return {"summary": "\n".join(lines), "endpoints": endpoints}
+
+    def open_assistant_panel(self) -> None:
+        if self._assistant_panel is None:
+            self._assistant_panel = AssistantPanelDialog(
+                self,
+                runtime=self._runtime,
+                preferences=self._hud_preferences,
+                preferences_path=self._hud_preferences_path,
+                on_preferences_saved=self._save_hud_preferences,
+                diagnostics_provider=self._assistant_diagnostics,
+                is_busy=lambda: bool(self._task_active),
+                on_session_deleted=self._on_history_session_deleted,
+            )
+        else:
+            self._assistant_panel.set_preferences(self._hud_preferences)
+            self._assistant_panel._load_history()
+            self._assistant_panel.refresh_diagnostics()
+        self._assistant_panel.show()
+        self._assistant_panel.raise_()
+        self._assistant_panel.activateWindow()
 
     def _init_runtime(self) -> None:
         if not AURORA_AVAILABLE or Settings is None or build_runtime is None:
@@ -2114,7 +2220,7 @@ class SvgHologram(QMainWindow):
                 "--text-file", str(text_path),
                 "--output", str(out_wav),
                 "--voice-id", str(self._tts_voice_ja),
-                "--rate", "165",
+                "--rate", str(int(self._hud_preferences.get("speech_rate", 165))),
                 "--volume", "0.5",
             ]
             sapi_started = time.monotonic()
@@ -2325,22 +2431,27 @@ class SvgHologram(QMainWindow):
         stop_event = threading.Event()
         self._active_speech_stop_event = stop_event
         self._active_speech_done = done
-        if caption:
+        if caption and final_state != "streaming":
             self.show_caption(caption)
         self._set_speech_visual_state("speaking")
         self._update_cancel_button()
 
         audio_name = Path(audio_path).name
-        if audio_name == "aurora_piper.wav":
-            if not _lower_wav_volume(audio_path, gain=PIPER_OUTPUT_GAIN):
-                print("[Aurora TTS] Não foi possível reduzir o volume da voz Piper; WAV mantido.")
-        elif audio_name == "aurora_nanami.wav":
+        volume_scale = max(
+            0.25, min(1.25, float(self._hud_preferences.get("speech_volume_percent", 100)) / 100.0)
+        )
+        if audio_name == "aurora_nanami.wav":
             if not _add_short_echo_wav(audio_path, delay_ms=38, decay=0.14):
                 print("[Aurora TTS] Não foi possível aplicar o eco da Nanami; WAV seco mantido.")
-            if not _lower_wav_volume(audio_path, gain=0.4):
-                print("[Aurora TTS] WAV Nanami mantido no volume original.")
-        elif audio_name != "aurora_raphael_tts.wav" and not _lower_wav_volume(audio_path, gain=0.4):
-            print("[Aurora TTS] WAV mantido no volume original.")
+        if audio_name == "aurora_piper.wav":
+            base_gain = PIPER_OUTPUT_GAIN
+        elif audio_name == "aurora_raphael_tts.wav":
+            base_gain = 1.0
+        else:
+            base_gain = 0.4
+        effective_gain = min(1.0, base_gain * volume_scale)
+        if effective_gain < 0.999 and not _lower_wav_volume(audio_path, gain=effective_gain):
+            print("[Aurora TTS] WAV mantido no volume anterior.")
 
         import wave
         wav_frames = 0
@@ -2413,7 +2524,7 @@ class SvgHologram(QMainWindow):
         stop_event = self._active_speech_stop_event
         self._active_speech_done = done
         self._speech_active = True
-        if caption:
+        if caption and final_state != "streaming":
             self.show_caption(caption)
         self._set_speech_visual_state("speaking")
         self._update_cancel_button()
@@ -2427,7 +2538,9 @@ class SvgHologram(QMainWindow):
                         and self._tts_engine and self._tts_voice_ja and spoken_text.strip()
                     ):
                         self._tts_engine.setProperty("voice", self._tts_voice_ja)
-                        self._tts_engine.setProperty("rate", 165)
+                        self._tts_engine.setProperty("rate", int(self._hud_preferences.get("speech_rate", 165)))
+                        base_volume = max(0.0, min(1.0, 0.5 * float(self._hud_preferences.get("speech_volume_percent", 100)) / 100.0))
+                        self._tts_engine.setProperty("volume", base_volume)
                         self._tts_engine.say(spoken_text)
                         self._tts_engine.runAndWait()
             except Exception as exc:
@@ -2531,19 +2644,32 @@ class SvgHologram(QMainWindow):
     def speak_with_caption(
         self, caption: str, speech_text: str, *, final_state: Optional[str] = None,
     ) -> None:
-        # Respostas longas usam painel rolável; a legenda sobre o HUD fica compacta.
-        if len(speech_text) > 420 or speech_text.count("\n") >= 5:
+        long_response = (
+            len(speech_text) > self._response_panel_threshold()
+            or speech_text.count("\n") >= 4
+        )
+        panel_enabled = bool(self._hud_preferences.get("long_responses_in_panel", True))
+        if long_response and panel_enabled:
             panel_text = caption
             if panel_text.casefold().startswith("aurora:"):
                 panel_text = panel_text.split(":", 1)[1].strip()
             self.response_requested.emit(panel_text or speech_text)
             caption = "Aurora: resposta completa aberta no painel lateral."
+
+        if not self._hud_preferences.get("speech_enabled", True):
+            # Preferência sem voz: mantém o texto visível e não inicia um worker de TTS.
+            display = caption if long_response and panel_enabled else self._compact_caption_text(speech_text or caption)
+            if display and not display.casefold().startswith("aurora:"):
+                display = f"Aurora: {display}"
+            self.show_caption_requested.emit(display)
+            return
+
         if final_state is None:
             final_state = "error" if "エラーが発生しました" in speech_text else "completed"
         self._queue_speech(caption, speech_text, final_state)
 
     def _speak_text(self, text: str) -> None:
-        if not text:
+        if not text or not self._hud_preferences.get("speech_enabled", True):
             return
         final_state = "error" if "エラーが発生しました" in text else "completed"
         self._queue_speech("", text, final_state)
@@ -2696,7 +2822,7 @@ class SvgHologram(QMainWindow):
             self.cancel_task_btn.setText("■ Cancelar")
 
     def _dispatch_local_control_command(self, text: str) -> bool:
-        command = _classify_hud_control_command(text)
+        command = classify_hud_control_command(text)
         if command == "cancel":
             self.cancel_current_task()
             return True

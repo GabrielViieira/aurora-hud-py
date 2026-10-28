@@ -18,3 +18,8 @@ Se o gateway responder `401`/`403` e a chave tiver mudado, o cliente recarrega e
 
 Se o endpoint de visão local recusar conexão (Ollama parado, porta fechada), o agente remove as imagens do contexto e continua apenas com os controles de UI Automation, orientando o modelo a usar `capturar_tela(somente_acessibilidade=true)`. O turno não é mais abortado por causa disso.
 
+## Painel da HUD
+
+Clique no botão ⚙ ou use **Ctrl+H** para abrir o painel da Aurora. Ele reúne o histórico local, o diagnóstico de conectividade e preferências da interface. No histórico é possível consultar, excluir uma sessão ou limpar as conversas salvas; essa limpeza não apaga memórias semânticas nem a auditoria.
+
+As preferências da HUD ficam em \`data/hud_preferences.json\`, sem credenciais. Elas controlam a fala, o streaming, a abertura automática do painel para respostas longas, o volume e a velocidade de SAPI. O volume é aplicado ao áudio sintetizado. **Escape** continua cancelando a tarefa/fala; por voz, diga **“Aurora, para”** ou **“Aurora, pare de falar”**.

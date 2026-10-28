@@ -34,3 +34,6 @@ Thumbs.db
 .ruff_cache/
 .coverage
 htmlcov/
+
+# Preferências locais da HUD
+data/hud_preferences.json
