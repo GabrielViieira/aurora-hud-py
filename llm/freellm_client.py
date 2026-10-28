@@ -245,6 +245,8 @@ class _OpenAIStreamCollector:
             result["usage"] = self._usage
         if self.error is not None:
             result["error"] = self.error
+            if not self._text and not self._tool_calls:
+                result["choices"] = []
         return result
 
 
@@ -324,8 +326,11 @@ class FreeLLMClient:
             api_key = self._resolve_key()
             if not api_key:
                 raise self._missing_key_error()
+            headers = self._headers(api_key)
+            if on_chunk is not None:
+                headers["Accept"] = "text/event-stream"
             request = urllib.request.Request(
-                url, data=data, headers=self._headers(api_key), method=method
+                url, data=data, headers=headers, method=method
             )
             try:
                 with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
@@ -333,8 +338,11 @@ class FreeLLMClient:
                         body = response.read()
                     else:
                         chunks: list[bytes] = []
+                        # read1 não tenta preencher o buffer inteiro: libera o primeiro
+                        # evento SSE assim que o socket entregar bytes disponíveis.
+                        reader = getattr(response, "read1", response.read)
                         while True:
-                            chunk = response.read(4096)
+                            chunk = reader(4096)
                             if not chunk:
                                 break
                             chunks.append(chunk)
