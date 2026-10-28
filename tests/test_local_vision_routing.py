@@ -27,7 +27,12 @@ else:
 sys.path.insert(0, str(_REPO_ROOT.parent))
 
 from aurora.config.settings import Settings
-from aurora.core.agent import AuroraAgent, _is_vision_token_limit_error
+from aurora.core.agent import (
+    AuroraAgent,
+    _is_primary_vision_input_unsupported,
+    _is_vision_token_limit_error,
+    _compact_primary_vision_request,
+)
 from aurora.llm.provider import ChatMessage, LLMRequest, LLMResponse, ProviderError
 
 
@@ -76,6 +81,67 @@ class LocalVisionRoutingTests(unittest.TestCase):
         )
 
         self.assertIs(agent._provider_for_request(request), local)
+
+    def test_image_request_can_bypass_local_vision_after_failure(self):
+        local = object()
+        agent = self._agent(vision_provider=local)
+        request = LLMRequest(
+            messages=[
+                ChatMessage(
+                    role="user",
+                    content=[{"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}],
+                )
+            ],
+        )
+
+        self.assertIs(agent._provider_for_request(request), local)
+        self.assertIs(agent._provider_for_request(request, prefer_primary=True), agent.provider)
+
+    def test_primary_provider_image_rejection_is_detected(self):
+        rejected = ProviderError(
+            "HTTP 400: model does not support image_url input",
+            kind="bad_request",
+            status=400,
+        )
+        unrelated = ProviderError(
+            "HTTP 401: invalid API key",
+            kind="auth",
+            status=401,
+        )
+
+        self.assertTrue(_is_primary_vision_input_unsupported(rejected))
+        self.assertFalse(_is_primary_vision_input_unsupported(unrelated))
+
+    def test_primary_vision_fallback_keeps_only_latest_image(self):
+        old = ChatMessage(
+            role="user",
+            content=[
+                {"type": "text", "text": "Captura antiga."},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,OLD"}},
+            ],
+        )
+        latest = ChatMessage(
+            role="user",
+            content=[
+                {"type": "text", "text": "Estado atual."},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,NEW"}},
+            ],
+        )
+        request = LLMRequest(messages=[ChatMessage(role="user", content="Instale ProxOS."), old, latest])
+
+        compacted = _compact_primary_vision_request(request)
+
+        self.assertFalse(any(
+            isinstance(m.content, list) and any(
+                isinstance(part, dict) and part.get("image_url", {}).get("url", "").endswith("OLD")
+                for part in m.content
+            )
+            for m in compacted.messages
+        ))
+        image_messages = [m for m in compacted.messages if isinstance(m.content, list)]
+        self.assertEqual(len(image_messages), 1)
+        self.assertIn("NEW", str(image_messages[0].content))
+        self.assertIn("Captura antiga omitida", str(compacted.messages[1].content))
 
     def test_local_vision_request_omits_tools_and_keeps_image(self):
         local = object()
@@ -228,6 +294,7 @@ class LocalVisionRoutingTests(unittest.TestCase):
         self.assertTrue(all(not (isinstance(message.content, list)) for message in messages))
         self.assertIn("controles estruturados", messages[-1].content)
         self.assertIn("não finja ter visto", messages[-1].content)
+        self.assertIn("diálogo/alvo", messages[-1].content)
         self.assertIn("Search", messages[0].content)
 
     def test_local_vision_token_limit_error_is_detected(self):

@@ -27,6 +27,7 @@ from aurora.core.agent import (
     AuroraAgent,
     TaskDeadlineExceeded,
     _local_app_intent,
+    _should_recover_unresolved_desktop_response,
     _should_reuse_recent_capture,
     _should_use_accessibility_only_verification,
     _unknown_tool_names,
@@ -167,6 +168,33 @@ class AgentDeadlineTests(unittest.TestCase):
         self.assertEqual(
             _unknown_tool_names(calls, {"pesquisar", "controlar_teclado"}),
             [],
+        )
+
+    def test_speculative_desktop_reply_gets_one_recovery(self):
+        self.assertTrue(
+            _should_recover_unresolved_desktop_response(
+                "Aurora, instale ProxOS no armazenamento S:",
+                "Maybe I should click Play Now again; the visual model is unavailable.",
+                ["capturar_tela", "controlar_mouse"],
+            )
+        )
+
+    def test_desktop_command_without_any_mutating_action_gets_recovery(self):
+        self.assertTrue(
+            _should_recover_unresolved_desktop_response(
+                "Aurora, instale ProxOS no armazenamento S:",
+                "Vou verificar isso.",
+                ["capturar_tela"],
+            )
+        )
+
+    def test_informational_question_does_not_trigger_desktop_recovery(self):
+        self.assertFalse(
+            _should_recover_unresolved_desktop_response(
+                "Como instalar um jogo na Steam?",
+                "Talvez você precise selecionar uma biblioteca.",
+                [],
+            )
         )
 
     def test_non_steam_search_is_not_routed_without_llm(self):

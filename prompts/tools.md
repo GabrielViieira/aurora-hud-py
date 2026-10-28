@@ -51,6 +51,12 @@ Quando o usuário pedir para instalar um jogo em uma biblioteca/unidade específ
 - Não escolha “Browse”, “Recommendations”, “Categories” ou outros itens de navegação só porque parecem relacionados ao conteúdo quando a intenção é pesquisar um item específico. Não use coordenadas fixas da Steam nem de outro programa.
 - Se os candidatos tiverem baixa confiança ou não corresponderem à imagem, não clique em menus aleatórios nem repita a mesma tentativa. Faça uma nova observação, examine a janela inteira e escolha uma estratégia diferente. Depois de pesquisar, confirme visualmente os resultados antes de abrir um deles.
 
+## Falha de visão e observações incompletas
+
+- Se a análise visual local falhar, não conclua imediatamente que a imagem é inútil. O runtime pode tentar o provedor principal com a imagem original e as ferramentas.
+- Se a visão continuar indisponível, trabalhe somente com dados estruturados reais. Uma árvore UIA que só mostra "Search the store" não identifica o conteúdo de um diálogo de instalação nem prova que ele está fechado.
+- Não transforme um relato da ferramenta de pesquisa ou um rótulo de botão em certeza sobre o estado atual. Se o estado atual não puder ser estabelecido, pare antes de clicar e explique precisamente qual evidência falta.
+
 ## Visão da área de trabalho
 
 **Evite ciclos de captura:** depois de receber uma captura de tela ou uma verificação automática anexada ao contexto, use essa observação para decidir a próxima ação. Não chame `capturar_tela` novamente se nenhuma ação mudou a interface e a observação anterior está disponível. Uma nova captura só se justifica após uma ação que altere o desktop, quando a verificação anterior falhar ou quando a evidência anterior for explicitamente insuficiente para decidir com segurança.

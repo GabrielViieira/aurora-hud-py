@@ -71,6 +71,102 @@ def _unknown_tool_names(calls: list[ToolCall], available_names: set[str]) -> lis
     return sorted({call.name for call in calls if call.name not in available_names})
 
 
+_DESKTOP_ACTION_REQUEST_RE = re.compile(
+    r"\\b(?:instale|instala|instalar|baixe|baixa|baixar|clique|clica|clicar|"
+    r"abra|abre|abrir|pesquise|pesquisa|pesquisar|selecione|seleciona|selecionar|"
+    r"digite|digita|digitar|execute|executa|executar|open|install|click|select|"
+    r"type|press|launch|download)\\b",
+    re.IGNORECASE,
+)
+_INFORMATIONAL_REQUEST_RE = re.compile(
+    r"^\\s*(?:como|por que|porque|pq|why|how|what|explique|explique-me|"
+    r"me explique|tem como|d[aá] para|can you explain|how do i)\\b",
+    re.IGNORECASE,
+)
+_UNRESOLVED_DESKTOP_RESPONSE_RE = re.compile(
+    r"\\b(?:maybe|perhaps|let me try|i think|i should|could try|not sure|"
+    r"unavailable|can['’]?t see|cannot see|visual model|i need to|i['’]?ll try|"
+    r"might be|maybe i should|try a different approach|"
+    r"talvez|pode ser|acho que|preciso tentar|vou tentar|não sei|nao sei|"
+    r"não consigo|nao consigo|indisponível|indisponivel|modelo visual|"
+    r"não tenho certeza|nao tenho certeza|não está claro|nao esta claro|"
+    r"não dá para confirmar|nao da para confirmar|manualmente|peça ao usuário|"
+    r"peca ao usuario|vamos tentar)\\b",
+    re.IGNORECASE,
+)
+_DESKTOP_MUTATING_TOOLS = frozenset({
+    "controlar_mouse", "controlar_teclado", "pesquisar",
+    "abrir_aplicativo", "restaurar_aplicativo", "abrir_url",
+})
+
+
+def _looks_like_unresolved_desktop_response(text: str) -> bool:
+    """Detecta narração especulativa que não comprova a conclusão de uma ação."""
+    return bool(_UNRESOLVED_DESKTOP_RESPONSE_RE.search(text or ""))
+
+
+def _should_recover_unresolved_desktop_response(
+    user_text: str, response_text: str, tools_used: list[str]
+) -> bool:
+    """Permite uma única recuperação quando um comando de desktop termina sem agir."""
+    if _INFORMATIONAL_REQUEST_RE.search(user_text or ""):
+        return False
+    if not _DESKTOP_ACTION_REQUEST_RE.search(user_text or ""):
+        return False
+    no_mutating_action = not any(name in _DESKTOP_MUTATING_TOOLS for name in tools_used)
+    return no_mutating_action or _looks_like_unresolved_desktop_response(response_text)
+
+
+def _is_primary_vision_input_unsupported(exc: ProviderError) -> bool:
+    """Reconhece respostas que indicam que o provedor principal não aceita imagens."""
+    detail = f"{exc} {getattr(exc, 'body', '')}".casefold()
+    image_terms = ("image", "image_url", "vision", "multimodal", "imagem", "visão", "visao")
+    unsupported_terms = (
+        "not support", "does not support", "doesn't support", "unsupported",
+        "not accepted", "cannot process", "can't process", "invalid image",
+        "image input", "not enabled", "não suporta", "nao suporta",
+        "não aceita", "nao aceita", "não é suportado", "nao e suportado",
+    )
+    return any(term in detail for term in image_terms) and any(
+        term in detail for term in unsupported_terms
+    )
+
+
+def _compact_primary_vision_request(request: LLMRequest) -> LLMRequest:
+    """Envia ao provedor principal só a captura mais recente, preservando o histórico textual."""
+    image_messages = [
+        index for index, message in enumerate(request.messages)
+        if _messages_contain_image([message])
+    ]
+    if len(image_messages) <= 1:
+        return request
+    latest_image = image_messages[-1]
+    compact_messages: list[ChatMessage] = []
+    for index, message in enumerate(request.messages):
+        if index not in image_messages[:-1]:
+            compact_messages.append(message)
+            continue
+        parts = message.content if isinstance(message.content, list) else []
+        text_parts = [
+            str(part.get("text", "")).strip()
+            for part in parts
+            if isinstance(part, dict) and part.get("type") == "text" and part.get("text")
+        ]
+        content = "\\n".join(text_parts).strip()
+        content = (content + "\\n(Captura antiga omitida no fallback visual; use a captura mais recente.)").strip()
+        compact_messages.append(ChatMessage(
+            role=message.role, content=content, tool_call_id=message.tool_call_id, name=message.name
+        ))
+    return LLMRequest(
+        messages=compact_messages,
+        tools=request.tools,
+        model=request.model,
+        temperature=request.temperature,
+        max_tokens=request.max_tokens,
+        stream=request.stream,
+    )
+
+
 _MAX_REDUNDANT_CAPTURE_REQUESTS = 2
 
 
@@ -593,9 +689,11 @@ class AuroraAgent:
         """Limpa um cancelamento anterior antes de iniciar explicitamente um novo turno."""
         self.cancel_event.clear()
 
-    def _provider_for_request(self, request: LLMRequest):
-        """Escolhe a visão local para pedidos com imagens; o chat segue no provedor principal."""
-        if _messages_contain_image(request.messages):
+    def _provider_for_request(
+        self, request: LLMRequest, *, prefer_primary: bool = False
+    ):
+        """Escolhe a visão local primeiro; permite fallback multimodal no provedor principal."""
+        if not prefer_primary and _messages_contain_image(request.messages):
             vision_provider = getattr(self, "vision_provider", None)
             if vision_provider is not None:
                 return vision_provider
@@ -729,10 +827,10 @@ class AuroraAgent:
             return False
 
         note = (
-            "A análise de pixels pelo modelo visual local falhou. Use somente os controles "
+            "A captura não pôde ser analisada por um modelo visual. Use somente os controles "
             "estruturados retornados pela ferramenta capturar_tela; não finja ter visto a "
-            "imagem nem invente posições. Se esses dados não forem suficientes para uma ação "
-            "segura, informe a limitação."
+            "imagem nem invente posições. Se os controles UIA não mostrarem o diálogo/alvo "
+            "necessário, não clique em elementos de outra janela; informe essa limitação."
         )
         for index in image_indexes:
             message = messages[index]
@@ -807,7 +905,7 @@ class AuroraAgent:
         return True
 
     def _chat_with_cancel(
-        self, request: LLMRequest, *, deadline: float
+        self, request: LLMRequest, *, deadline: float, prefer_primary: bool = False
     ) -> LLMResponse | None:
         """Espera o provedor respeitando cancelamento e prazo global do turno.
 
@@ -817,8 +915,10 @@ class AuroraAgent:
         """
         completed = threading.Event()
         outcome: dict[str, Any] = {}
-        request_provider = self._provider_for_request(request)
+        request_provider = self._provider_for_request(request, prefer_primary=prefer_primary)
         provider_request = self._prepare_provider_request(request, request_provider)
+        if prefer_primary and _messages_contain_image(provider_request.messages):
+            provider_request = _compact_primary_vision_request(provider_request)
 
         def request_worker() -> None:
             try:
@@ -1030,6 +1130,10 @@ class AuroraAgent:
         failures: dict[str, int] = {}
         # Um nome de ferramenta inválido recebe uma única oportunidade de correção pelo modelo.
         unknown_tool_recovery_used = False
+        # Se a visão local falhar ou devolver narração especulativa, tente o provedor principal
+        # com a imagem e as ferramentas antes de degradar para UIA.
+        primary_vision_fallback_used = False
+        desktop_no_tool_recovery_used = False
         # Rastreamento por modalidade: UIA rápida não substitui uma imagem quando os pixels são necessários.
         has_fresh_desktop_image = False
         has_fresh_accessibility_attempt = False
@@ -1098,7 +1202,9 @@ class AuroraAgent:
                     messages=messages,
                     tools=tools,
                     model=self.router.model_for(
-                        "vision" if _messages_contain_image(messages) else "chat"
+                        "chat" if primary_vision_fallback_used else (
+                            "vision" if _messages_contain_image(messages) else "chat"
+                        )
                     ),
                     temperature=self.settings.llm.temperature,
                     max_tokens=effective_max_output_tokens,
@@ -1106,7 +1212,9 @@ class AuroraAgent:
                 llm_started = time.monotonic()
                 is_vision_request = _messages_contain_image(messages)
                 uses_local_vision = (
-                    is_vision_request and getattr(self, "vision_provider", None) is not None
+                    is_vision_request
+                    and getattr(self, "vision_provider", None) is not None
+                    and not primary_vision_fallback_used
                 )
                 configured_timeout = max(
                     1.0,
@@ -1137,16 +1245,38 @@ class AuroraAgent:
                     f"prazo_de_espera={request_deadline - llm_wait_started:.1f}s."
                 )
                 try:
-                    response = self._chat_with_cancel(request, deadline=request_deadline)
+                    response = self._chat_with_cancel(
+                        request,
+                        deadline=request_deadline,
+                        prefer_primary=primary_vision_fallback_used,
+                    )
                 except ProviderError as call_error:
-                    if uses_local_vision:
+                    if uses_local_vision and not primary_vision_fallback_used:
+                        # Não descarte a imagem imediatamente: UIA pode mostrar apenas a janela
+                        # principal do Steam e esconder justamente o diálogo nativo de instalação.
+                        # Tente uma vez o modelo principal com a captura e as ferramentas.
+                        primary_vision_fallback_used = True
+                        messages.append(ChatMessage(
+                            role="user",
+                            content=(
+                                "A análise da imagem pelo módulo visual local falhou. A captura original "
+                                "continua disponível: tente interpretá-la diretamente com o provedor principal "
+                                "e use as ferramentas para agir. Não invente elementos ou coordenadas; se o "
+                                "provedor principal também não aceitar a imagem, use apenas dados UIA reais."
+                            ),
+                        ))
+                        print(
+                            "[Aurora agente] Visão local falhou; preservando pixels e tentando "
+                            "o provedor principal com visão e ferramentas."
+                        )
+                        continue
+                    if (
+                        primary_vision_fallback_used
+                        and is_vision_request
+                        and _is_primary_vision_input_unsupported(call_error)
+                    ):
                         if self._handoff_local_vision_failure_to_accessibility(messages, call_error):
                             continue
-                        if _is_vision_backend_unreachable(call_error) and (
-                            self._handoff_local_vision_outage(messages, call_error)
-                        ):
-                            continue
-                        raise
                     if not _is_token_limit_error(call_error):
                         raise
                     recovery_error = call_error
@@ -1184,7 +1314,9 @@ class AuroraAgent:
                         )
                         try:
                             response = self._chat_with_cancel(
-                                retry_request, deadline=request_deadline
+                                retry_request,
+                                deadline=request_deadline,
+                                prefer_primary=primary_vision_fallback_used,
                             )
                         except ProviderError as retry_error:
                             if not _is_token_limit_error(retry_error):
@@ -1218,8 +1350,27 @@ class AuroraAgent:
 
                 if uses_local_vision:
                     # O modelo visual é apenas percepção: não tem schemas de ferramentas.
-                    # Encaminhe suas observações ao agente principal, que decide ações reais.
+                    # Não trate narração especulativa como observação da tela.
                     observation = (response.text or "").strip()
+                    if (
+                        observation
+                        and _looks_like_unresolved_desktop_response(observation)
+                        and not primary_vision_fallback_used
+                    ):
+                        primary_vision_fallback_used = True
+                        messages.append(ChatMessage(
+                            role="user",
+                            content=(
+                                "A observação visual local contém hipóteses em vez de fatos verificáveis. "
+                                "Não a trate como estado da tela. Use a imagem atual diretamente com o "
+                                "provedor principal e ferramentas; não adivinhe coordenadas."
+                            ),
+                        ))
+                        print(
+                            "[Aurora agente] Observação visual especulativa; tentando interpretação "
+                            "multimodal pelo provedor principal."
+                        )
+                        continue
                     if observation and self._handoff_local_vision_observation(messages, observation):
                         print(
                             "[Aurora agente] Percepção visual local encaminhada ao provedor principal; "
@@ -1234,6 +1385,41 @@ class AuroraAgent:
                     break
 
                 if not response.tool_calls:
+                    if (
+                        not desktop_no_tool_recovery_used
+                        and _should_recover_unresolved_desktop_response(
+                            text, response.text or "", tools_used
+                        )
+                    ):
+                        desktop_no_tool_recovery_used = True
+                        messages.append(ChatMessage(role="assistant", content=response.text))
+                        messages.append(ChatMessage(
+                            role="user",
+                            content=(
+                                "RECUPERAÇÃO DE EXECUÇÃO (uma única tentativa): o pedido original é uma "
+                                "ação no desktop, mas sua resposta anterior narrou hipóteses sem demonstrar "
+                                "que a tarefa foi concluída. Não repita o raciocínio nem invente coordenadas. "
+                                "Reavalie a evidência mais recente e execute a próxima ação segura com as "
+                                "ferramentas disponíveis. Se a imagem não puder ser analisada, faça uma captura "
+                                "de acessibilidade e use somente controles realmente retornados. Se não houver "
+                                "evidência suficiente, identifique o bloqueio específico sem afirmar sucesso."
+                            ),
+                        ))
+                        print(
+                            "[Aurora agente] Resposta especulativa sem chamada de ferramenta; "
+                            "solicitando uma única recuperação orientada à execução."
+                        )
+                        continue
+                    if desktop_no_tool_recovery_used:
+                        final_text = (
+                            "Não consegui concluir nem confirmar a ação solicitada: após uma tentativa "
+                            "de recuperação, o modelo voltou a responder sem executar uma ferramenta. "
+                            "Nenhuma conclusão de instalação foi confirmada; parei para evitar cliques "
+                            "ou coordenadas inventadas."
+                        )
+                        task.error = "resposta sem execução após recuperação de tarefa de desktop"
+                        task.transition(TaskStatus.FAILED)
+                        break
                     final_text = response.text.strip() or "(o modelo não devolveu texto)"
                     task.transition(TaskStatus.COMPLETED)
                     break
