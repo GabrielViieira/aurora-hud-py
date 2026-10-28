@@ -1398,9 +1398,10 @@ class AuroraAgent:
                             ok=True,
                             summary=(
                                 "Captura nova ignorada: já existe uma observação recente da tela no contexto. "
-                                "Nenhuma captura foi executada. Use a observação anterior e prossiga. Se precisar de pixels "
-                                "que ainda não foram anexados, solicite capturar_tela com somente_imagem=true; se precisar "
-                                "da árvore de controles que falta, use somente_acessibilidade=true. Não repita uma chamada genérica."
+                                "Nenhuma captura foi executada. Use a observação anterior e prossiga. Se faltam pixels, "
+                                "solicite capturar_tela com somente_imagem=true. Só use somente_acessibilidade=true se "
+                                "UIA ainda não foi tentada desde a última ação; se a leitura anterior informou UIA indisponível "
+                                "ou sem controles úteis, não repita a mesma tentativa sem mudança na interface."
                             ),
                             data={
                                 "reused_recent_capture": True,
@@ -1467,8 +1468,6 @@ class AuroraAgent:
                     if call.name == "capturar_tela" and result.ok and not result.data.get("adiada"):
                         if not result.data.get("reused_recent_capture"):
                             image_url = result.data.pop("data_url", "")
-                            snapshot = result.data.get("interface_acessivel", {})
-                            elements = snapshot.get("elementos", []) if isinstance(snapshot, dict) else []
                             captured_image = (
                                 isinstance(image_url, str) and image_url.startswith("data:image/")
                             )
