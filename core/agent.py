@@ -1605,7 +1605,11 @@ class AuroraAgent:
                             )
                             verification_kind = (
                                 f"imagem+UIA/{len(ui_elements)} controles"
-                                if has_fresh_accessibility_attempt and ui_snapshot.get("disponivel")
+                                if (
+                                    has_fresh_accessibility_attempt
+                                    and isinstance(ui_snapshot, dict)
+                                    and ui_snapshot.get("disponivel")
+                                )
                                 else "imagem"
                             )
                         elif (
