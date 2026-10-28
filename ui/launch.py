@@ -2723,6 +2723,7 @@ class SvgHologram(QMainWindow):
                             f"Aurora: {reply_text}", reply_text, final_state=final_state
                         )
                 else:
+                    self._cancel_streamed_speech_session(stream_session)
                     self.visual_state_requested.emit("completed")
             except Exception as exc:
                 print(
