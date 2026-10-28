@@ -87,9 +87,9 @@ def _should_reuse_recent_capture(
         return has_fresh_image
     if arguments.get("somente_acessibilidade") is True:
         return has_fresh_accessibility
-    # A captura padrão inclui pixels; quando já há imagem recente, repeti-la é redundante.
-    # Se só houver UIA, uma captura padrão pode acrescentar a imagem que ainda falta.
-    return has_fresh_image
+    # Uma chamada genérica não declara qual modalidade está faltando: reutilize
+    # qualquer observação recente e peça ao modelo para escolher pixels ou UIA explicitamente.
+    return has_fresh_image or has_fresh_accessibility
 
 
 def _messages_contain_image(messages: list[ChatMessage]) -> bool:
@@ -1398,8 +1398,9 @@ class AuroraAgent:
                             ok=True,
                             summary=(
                                 "Captura nova ignorada: já existe uma observação recente da tela no contexto. "
-                                "Nenhuma captura foi executada. Use a observação anterior e prossiga com a ação "
-                                "necessária; só peça outra captura depois de mudar a interface ou se a anterior falhou."
+                                "Nenhuma captura foi executada. Use a observação anterior e prossiga. Se precisar de pixels "
+                                "que ainda não foram anexados, solicite capturar_tela com somente_imagem=true; se precisar "
+                                "da árvore de controles que falta, use somente_acessibilidade=true. Não repita uma chamada genérica."
                             ),
                             data={
                                 "reused_recent_capture": True,
