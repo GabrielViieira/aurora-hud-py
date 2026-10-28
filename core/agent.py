@@ -78,7 +78,7 @@ def _should_reuse_recent_capture(
     tool_name: str,
     arguments: dict[str, Any],
     has_fresh_image: bool,
-    has_fresh_accessibility: bool,
+    has_fresh_accessibility_attempt: bool,
 ) -> bool:
     """Reutiliza evidência já fresca sem impedir a aquisição de um tipo de observação ausente."""
     if tool_name != "capturar_tela":
@@ -86,7 +86,7 @@ def _should_reuse_recent_capture(
     if arguments.get("somente_imagem") is True:
         return has_fresh_image
     if arguments.get("somente_acessibilidade") is True:
-        return has_fresh_accessibility
+        return has_fresh_accessibility_attempt
     # A chamada genérica normalmente inclui pixels e UIA: quando só houver UIA,
     # permita que ela acrescente a imagem. Se a imagem já estiver fresca, evite duplicá-la.
     return has_fresh_image
@@ -1604,7 +1604,7 @@ class AuroraAgent:
                                     "Verificação rápida após a ação via UI Automation (sem imagem). "
                                     "Use os controles e seus limites como evidência estruturada. "
                                     "Se o resultado exigir interpretar ícones, layout ou conteúdo não acessível, "
-                                    "peça capturar_tela antes de agir novamente. Dados: "
+                                    "peça capturar_tela com somente_imagem=true antes de agir novamente. Dados: "
                                     + json.dumps(observation, ensure_ascii=False, default=str)
                                 ),
                             ))
