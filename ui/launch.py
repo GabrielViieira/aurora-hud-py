@@ -64,6 +64,7 @@ except Exception:
 
 from animation import D20Animation
 from efeitos import HologramEffects
+from aurora.core.streaming import StreamingSpeechSession
 from PySide6.QtCore import (
     QPoint,
     QRectF,
@@ -727,6 +728,8 @@ class SvgHologram(QMainWindow):
     speech_preparation_failed = Signal(str, str, str, int, object)
     speech_playback_finished = Signal(str, str, int, object)
     speech_queue_state_changed = Signal(int, bool)
+    streamed_speech_finished_requested = Signal(int, str)
+    streamed_speech_reset_requested = Signal(int)
     visual_state_requested = Signal(str)
     approval_requested = Signal(object)
     agent_task_finished = Signal()
@@ -772,6 +775,9 @@ class SvgHologram(QMainWindow):
         self._active_speech_generation: Optional[int] = None
         self._active_speech_stop_event: Optional[threading.Event] = None
         self._active_speech_done = None
+        self._stream_turn_counter = 0
+        self._stream_session_lock = threading.Lock()
+        self._stream_speech_session: Optional[StreamingSpeechSession] = None
         self._allow_close = False
         self._close_prompt_active = False
         self._response_panel: Optional[ResponsePanel] = None
@@ -812,6 +818,12 @@ class SvgHologram(QMainWindow):
         self.response_requested.connect(self._show_response_panel, Qt.ConnectionType.QueuedConnection)
         self.streamed_text_requested.connect(self._show_streamed_text, Qt.ConnectionType.QueuedConnection)
         self.streamed_text_reset_requested.connect(self._reset_streamed_text, Qt.ConnectionType.QueuedConnection)
+        self.streamed_speech_finished_requested.connect(
+            self._finish_streamed_speech_ui, Qt.ConnectionType.QueuedConnection
+        )
+        self.streamed_speech_reset_requested.connect(
+            self._reset_streamed_speech_ui, Qt.ConnectionType.QueuedConnection
+        )
         self.speak_requested.connect(self._speak_text, Qt.ConnectionType.QueuedConnection)
         self.speech_ready.connect(self._play_prepared_speech, Qt.ConnectionType.QueuedConnection)
         self.speech_preparation_failed.connect(self._speech_preparation_failed, Qt.ConnectionType.QueuedConnection)
@@ -1038,6 +1050,231 @@ class SvgHologram(QMainWindow):
     def _reset_streamed_text(self) -> None:
         if self._response_panel is not None:
             self._response_panel.hide()
+
+    def _stream_session_for_token(self, token: int) -> Optional[StreamingSpeechSession]:
+        with self._stream_session_lock:
+            session = self._stream_speech_session
+        return session if session is not None and session.token == token else None
+
+    def _receive_agent_stream_delta(self, token: int, fragment: str) -> None:
+        """Entrega texto à HUD e encaminha frases completas à fila de voz."""
+        session = self._stream_session_for_token(token)
+        if session is None or not session.is_accepting or not fragment:
+            return
+        self.streamed_text_requested.emit(fragment)
+        segments = session.feed(fragment)
+        if segments:
+            self._enqueue_streamed_speech_segments(session, segments)
+
+    def _reset_agent_stream_session(self, token: int) -> None:
+        """Descarta prévia/voz parcial quando o agente muda para execução de ferramentas."""
+        session = self._stream_session_for_token(token)
+        if session is not None:
+            session.cancel()
+            self.streamed_text_reset_requested.emit()
+            self.streamed_speech_reset_requested.emit(token)
+
+    def _enqueue_streamed_speech_segments(
+        self, session: StreamingSpeechSession, segments: list[str]
+    ) -> None:
+        for segment in segments:
+            segment = segment.strip()
+            if not segment or session.stop_event.is_set():
+                continue
+            if not self._start_streamed_speech_worker(session):
+                return
+            session.segments.put(segment)
+
+    def _start_streamed_speech_worker(self, session: StreamingSpeechSession) -> bool:
+        """Abre uma única geração de voz para todos os segmentos da mesma resposta."""
+        with session.lock:
+            if session.cancelled or session.stop_event.is_set():
+                return False
+            if session.started:
+                return True
+            with self._speech_generation_lock:
+                self._speech_generation += 1
+                generation = self._speech_generation
+                self._speech_pending = True
+            session.generation = generation
+            session.started = True
+            self.speech_queue_state_changed.emit(generation, True)
+            worker = threading.Thread(
+                target=self._prepare_streamed_speech_job,
+                args=(session,),
+                daemon=True,
+                name=f"AuroraStreamSpeech-{session.token}",
+            )
+            try:
+                worker.start()
+            except Exception as exc:
+                session.cancelled = True
+                session.closed = True
+                session.stop_event.set()
+                session.segments.put(None)
+                with self._speech_generation_lock:
+                    if generation == self._speech_generation:
+                        self._speech_pending = False
+                self.speech_queue_state_changed.emit(generation, False)
+                print(f"[Aurora TTS] Não consegui iniciar fala incremental: {exc}")
+                return False
+        return True
+
+    def _synthesize_streamed_speech_segment(
+        self, text: str, generation: int, job_dir: Path
+    ) -> tuple[str, Optional[Path]]:
+        """Traduz e sintetiza um segmento sem bloquear a thread gráfica."""
+        spoken_text = text
+        audio_path: Optional[Path] = None
+        with self._tts_lock:
+            if not self._is_speech_generation_current(generation):
+                return spoken_text, None
+            spoken_text = self._translate_to_japanese(text)
+            if (
+                not self._is_speech_generation_current(generation)
+                or not spoken_text
+                or not _JA_KANA_RE.search(spoken_text)
+            ):
+                return spoken_text, None
+
+            if AURORA_TTS_BACKEND == "piper":
+                audio_path = self._speak_with_piper_plus(
+                    spoken_text, job_dir / "aurora_piper.wav"
+                )
+            elif AURORA_TTS_BACKEND == "gpt_sovits":
+                audio_path = self._speak_with_gpt_sovits(spoken_text)
+            elif AURORA_TTS_BACKEND == "nanami_rvc" and self._applio_available:
+                audio_path = self._speak_with_applio(spoken_text)
+            elif AURORA_TTS_BACKEND == "nanami":
+                audio_path = self._prepare_sapi_audio(
+                    spoken_text, job_dir / "aurora_nanami.wav"
+                )
+
+            if AURORA_TTS_BACKEND != "nanami":
+                if not audio_path and self._voicevox_enabled:
+                    candidate = job_dir / "aurora_voicevox.wav"
+                    if self._speak_with_voicevox_to_file(spoken_text, candidate):
+                        audio_path = candidate
+                if not audio_path:
+                    candidate = job_dir / "aurora_sapi.wav"
+                    audio_path = self._prepare_sapi_audio(spoken_text, candidate)
+        return spoken_text, audio_path
+
+    def _prepare_streamed_speech_job(self, session: StreamingSpeechSession) -> None:
+        """Consome frases à medida que chegam; cada áudio termina antes do próximo."""
+        generation = session.generation
+        if generation is None:
+            return
+        try:
+            with self._speech_sequence_lock:
+                while not session.stop_event.is_set() and self._is_speech_generation_current(generation):
+                    try:
+                        segment = session.segments.get(timeout=0.2)
+                    except queue.Empty:
+                        # finish() enfileira o sentinel depois do último fragmento.
+                        # Não sair apenas porque a entrada foi fechada: podem estar
+                        # chegando os fragmentos de flush antes do sentinel.
+                        continue
+                    if segment is None:
+                        break
+
+                    job_dir = Path(tempfile.mkdtemp(prefix="aurora_stream_speech_"))
+                    audio_path: Optional[Path] = None
+                    spoken_text = segment
+                    done = threading.Event()
+                    try:
+                        try:
+                            spoken_text, audio_path = self._synthesize_streamed_speech_segment(
+                                segment, generation, job_dir
+                            )
+                        except Exception as exc:
+                            print(
+                                f"[Aurora TTS] Segmento incremental falhou: "
+                                f"{type(exc).__name__}: {exc}"
+                            )
+                            audio_path = None
+
+                        if session.stop_event.is_set() or not self._is_speech_generation_current(generation):
+                            break
+                        caption = f"Aurora: {segment}"
+                        if audio_path and audio_path.is_file() and audio_path.stat().st_size > 44:
+                            self.speech_ready.emit(
+                                caption, spoken_text, str(audio_path), "streaming", generation, done
+                            )
+                        else:
+                            self.speech_preparation_failed.emit(
+                                caption, spoken_text, "streaming", generation, done
+                            )
+                        if not done.wait(timeout=900):
+                            print(
+                                f"[Aurora TTS] Timeout esperando segmento de voz "
+                                f"da geração={generation}."
+                            )
+                    finally:
+                        try:
+                            if audio_path:
+                                shutil.rmtree(Path(audio_path).parent, ignore_errors=True)
+                            shutil.rmtree(job_dir, ignore_errors=True)
+                        except Exception:
+                            pass
+        except Exception as exc:
+            print(f"[Aurora TTS] Worker de fala incremental terminou com erro: {exc}")
+        finally:
+            if (
+                not session.cancelled
+                and not session.stop_event.is_set()
+                and self._is_speech_generation_current(generation)
+            ):
+                self.streamed_speech_finished_requested.emit(
+                    generation, session.final_state
+                )
+
+    def _finish_streamed_speech_session(
+        self, session: StreamingSpeechSession, final_state: str
+    ) -> bool:
+        """Fecha a segmentação e indica se a resposta já está sendo falada por partes."""
+        tail = session.finish(final_state)
+        if session.cancelled or session.stop_event.is_set():
+            return False
+        if tail:
+            self._enqueue_streamed_speech_segments(session, tail)
+        if session.started and not session.cancelled and not session.stop_event.is_set():
+            session.segments.put(None)
+            return True
+        return False
+
+    @Slot(int, str)
+    def _finish_streamed_speech_ui(self, generation: int, final_state: str) -> None:
+        session = self._stream_speech_session
+        if (
+            session is None
+            or session.generation != generation
+            or session.cancelled
+            or not self._is_speech_generation_current(generation)
+        ):
+            return
+        self._speech_active = False
+        if self._active_speech_generation == generation:
+            self._active_speech_generation = None
+            self._active_speech_stop_event = None
+            self._active_speech_done = None
+        with self._speech_generation_lock:
+            if generation == self._speech_generation:
+                self._speech_pending = False
+        if self.caption_label.isVisible():
+            words = len(self.caption_label.text().split())
+            self.caption_hide_timer.start(max(2500, min(5000, 1700 + words * 100)))
+        self._set_speech_visual_state(final_state)
+        self._update_cancel_button()
+        self.speech_queue_state_changed.emit(generation, False)
+
+    @Slot(int)
+    def _reset_streamed_speech_ui(self, token: int) -> None:
+        session = self._stream_session_for_token(token)
+        if session is not None and session.started and session.generation is not None:
+            if self._is_speech_generation_current(session.generation):
+                self._cancel_speech_output()
+        self._reset_streamed_text()
 
     @Slot(str)
     def set_visual_state(self, state: str) -> None:
