@@ -72,7 +72,7 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import QMouseEvent, QPainter, QKeySequence, QShortcut
+from PySide6.QtGui import QMouseEvent, QPainter, QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -684,6 +684,17 @@ class ResponsePanel(QDialog):
         self.text_view.verticalScrollBar().setValue(0)
         QTimer.singleShot(2200, self.start_auto_scroll)
 
+    def append_streamed_text(self, text: str) -> None:
+        """Acrescenta um fragmento sem substituir todo o texto já recebido."""
+        if not text:
+            return
+        cursor = self.text_view.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.insertText(text)
+        self.text_view.setTextCursor(cursor)
+        if self._auto_scrolling:
+            self.text_view.ensureCursorVisible()
+
     def start_auto_scroll(self) -> None:
         bar = self.text_view.verticalScrollBar()
         if bar.value() >= bar.maximum():
@@ -706,6 +717,8 @@ class ResponsePanel(QDialog):
 
 class SvgHologram(QMainWindow):
     response_requested = Signal(str)
+    streamed_text_requested = Signal(str)
+    streamed_text_reset_requested = Signal()
     recognized_text = Signal(str)
     voice_status = Signal(str)
     show_caption_requested = Signal(str)
@@ -797,6 +810,8 @@ class SvgHologram(QMainWindow):
         self.voice_status.connect(self.show_voice_status)
         self.show_caption_requested.connect(self.show_caption, Qt.ConnectionType.QueuedConnection)
         self.response_requested.connect(self._show_response_panel, Qt.ConnectionType.QueuedConnection)
+        self.streamed_text_requested.connect(self._show_streamed_text, Qt.ConnectionType.QueuedConnection)
+        self.streamed_text_reset_requested.connect(self._reset_streamed_text, Qt.ConnectionType.QueuedConnection)
         self.speak_requested.connect(self._speak_text, Qt.ConnectionType.QueuedConnection)
         self.speech_ready.connect(self._play_prepared_speech, Qt.ConnectionType.QueuedConnection)
         self.speech_preparation_failed.connect(self._speech_preparation_failed, Qt.ConnectionType.QueuedConnection)
@@ -1004,6 +1019,25 @@ class SvgHologram(QMainWindow):
         self._response_panel.move(target)
         self._response_panel.show()
         self._response_panel.raise_()
+
+    @Slot(str)
+    def _show_streamed_text(self, fragment: str) -> None:
+        if not fragment or not self.isVisible():
+            return
+        if self._response_panel is None:
+            self._response_panel = ResponsePanel(self)
+        if not self._response_panel.isVisible():
+            self._response_panel.set_response("")
+            target = self.frameGeometry().topRight() + QPoint(12, 0)
+            self._response_panel.move(target)
+            self._response_panel.show()
+            self._response_panel.raise_()
+        self._response_panel.append_streamed_text(fragment)
+
+    @Slot()
+    def _reset_streamed_text(self) -> None:
+        if self._response_panel is not None:
+            self._response_panel.hide()
 
     @Slot(str)
     def set_visual_state(self, state: str) -> None:
@@ -2381,6 +2415,7 @@ class SvgHologram(QMainWindow):
             self._task_active = True
 
         self._update_cancel_button()
+        self._reset_streamed_text()
         self.show_caption_requested.emit(f"Você: {message}")
         self.visual_state_requested.emit("thinking")
 
@@ -2388,7 +2423,15 @@ class SvgHologram(QMainWindow):
             task_started = time.monotonic()
             print(f"[Aurora tarefa] Início do turno; tamanho da mensagem={len(message)} caracteres.")
             try:
-                reply = self._agent.handle(message)
+                # A callback é consumida no worker; sinais Qt fazem a atualização
+                # do painel na thread principal sem bloquear a chamada do modelo.
+                self._agent.on_text_delta = self.streamed_text_requested.emit
+                self._agent.on_stream_reset = self.streamed_text_reset_requested.emit
+                try:
+                    reply = self._agent.handle(message)
+                finally:
+                    self._agent.on_text_delta = None
+                    self._agent.on_stream_reset = None
                 reply_text = getattr(reply, "text", "") or ""
                 status = str(getattr(reply, "status", "") or "").upper()
                 tools_used = getattr(reply, "tools_used", []) or []
@@ -2399,6 +2442,7 @@ class SvgHologram(QMainWindow):
                     f"resposta={len(reply_text)} caracteres."
                 )
                 if status.endswith("CANCELLED"):
+                    self.streamed_text_reset_requested.emit()
                     self.show_caption_requested.emit("Tarefa cancelada.")
                     self.visual_state_requested.emit("idle")
                 elif reply_text:
@@ -2413,6 +2457,7 @@ class SvgHologram(QMainWindow):
                     f"[Aurora tarefa] Exceção após {time.monotonic() - task_started:.1f}s: "
                     f"{type(exc).__name__}: {exc}"
                 )
+                self.streamed_text_reset_requested.emit()
                 if self._agent is not None and self._agent.cancel_event.is_set():
                     self.show_caption_requested.emit("Tarefa cancelada.")
                     self.visual_state_requested.emit("idle")

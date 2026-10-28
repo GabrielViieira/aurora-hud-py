@@ -12,7 +12,7 @@ from io import BytesIO
 from urllib.parse import quote_plus
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from aurora.config.settings import Settings
 from aurora.config.permissions import PermissionPolicy
@@ -200,6 +200,16 @@ def _messages_contain_image(messages: list[ChatMessage]) -> bool:
             if part.get("type") in {"image", "image_url"}:
                 return True
     return False
+
+
+def _should_stream_response_preview(
+    enabled: bool, user_text: str, messages: list[ChatMessage]
+) -> bool:
+    """Evita transmitir prévias de imagem/ações de desktop para a HUD."""
+    if not enabled or _messages_contain_image(messages):
+        return False
+    return not bool(_DESKTOP_ACTION_REQUEST_RE.search(user_text or ""))
+
 
 def _has_useful_accessibility_snapshot(messages: list[ChatMessage]) -> bool:
     """Retorna True se uma mensagem de ferramenta contém controles UIA utilizáveis."""
@@ -660,6 +670,9 @@ class AuroraAgent:
         self.events = events
         self.metrics = metrics
         self.policy = policy
+        # Callbacks opcionais ligados pela HUD para mostrar texto gerado em tempo real.
+        self.on_text_delta: Callable[[str], None] | None = None
+        self.on_stream_reset: Callable[[], None] | None = None
         self.context_manager = ContextManager(settings)
         self.session_id = ""
         self.cancel_event = threading.Event()
@@ -680,6 +693,24 @@ class AuroraAgent:
         if not self.session_id:
             self.new_session()
         return self.session_id
+
+    def _emit_text_delta(self, delta: str) -> None:
+        if not delta or self.cancel_event.is_set():
+            return
+        callback = getattr(self, "on_text_delta", None)
+        if callback is not None:
+            try:
+                callback(delta)
+            except Exception:
+                logger.debug("callback de streaming da HUD falhou", exc_info=True)
+
+    def _reset_stream_preview(self) -> None:
+        callback = getattr(self, "on_stream_reset", None)
+        if callback is not None:
+            try:
+                callback()
+            except Exception:
+                logger.debug("callback de reset do streaming da HUD falhou", exc_info=True)
 
     def cancel(self) -> None:
         self.cancel_event.set()
@@ -1198,16 +1229,27 @@ class AuroraAgent:
                         task.error = final_text
                         task.transition(TaskStatus.FAILED)
                     break
+                is_vision_input = _messages_contain_image(messages)
+                # Não expor texto parcial de decisões de desktop/visão: o streaming
+                # interativo fica restrito a turnos de conversa sem pedido de ação.
+                stream_preview_allowed = (
+                    _should_stream_response_preview(
+                        bool(getattr(self.settings.llm, "stream", False)), text, messages
+                    )
+                    and not self.cancel_event.is_set()
+                )
                 request = LLMRequest(
                     messages=messages,
                     tools=tools,
                     model=self.router.model_for(
                         "chat" if primary_vision_fallback_used else (
-                            "vision" if _messages_contain_image(messages) else "chat"
+                            "vision" if is_vision_input else "chat"
                         )
                     ),
                     temperature=self.settings.llm.temperature,
                     max_tokens=effective_max_output_tokens,
+                    stream=stream_preview_allowed,
+                    on_text_delta=self._emit_text_delta if stream_preview_allowed else None,
                 )
                 llm_started = time.monotonic()
                 is_vision_request = _messages_contain_image(messages)
@@ -1251,6 +1293,10 @@ class AuroraAgent:
                         prefer_primary=primary_vision_fallback_used,
                     )
                 except ProviderError as call_error:
+                    # A recuperação pode responder com JSON completo (sem deltas).
+                    # Esconda qualquer prévia parcial para não parecer uma resposta final.
+                    if stream_preview_allowed:
+                        self._reset_stream_preview()
                     if uses_local_vision and not primary_vision_fallback_used:
                         # Não descarte a imagem imediatamente: UIA pode mostrar apenas a janela
                         # principal do Steam e esconder justamente o diálogo nativo de instalação.
@@ -1383,6 +1429,11 @@ class AuroraAgent:
                     task.error = final_text
                     task.transition(TaskStatus.FAILED)
                     break
+
+                if response.tool_calls:
+                    # O texto anterior era apenas uma prévia; não mantê-lo visível
+                    # enquanto o agente decide/executa ferramentas.
+                    self._reset_stream_preview()
 
                 if not response.tool_calls:
                     if (
