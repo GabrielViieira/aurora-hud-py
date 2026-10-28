@@ -2426,8 +2426,8 @@ class SvgHologram(QMainWindow):
             done.set()
 
     def _cancel_speech_output(self) -> bool:
-        previous_generation = self._speech_generation
         with self._speech_generation_lock:
+            previous_generation = self._speech_generation
             was_pending = self._speech_pending
             self._speech_generation += 1
             generation = self._speech_generation
