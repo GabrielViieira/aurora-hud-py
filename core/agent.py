@@ -1548,10 +1548,8 @@ class AuroraAgent:
                         capture_args = {"monitor": 1, "largura_maxima": 640}
                         if fast_verification:
                             capture_args["somente_acessibilidade"] = True
-                        else:
-                            # A próxima decisão já vai usar a imagem localmente; evite gastar
-                            # mais tempo percorrendo UIA em paralelo à captura de pixels.
-                            capture_args["somente_imagem"] = True
+                        # Para navegação/cliques/Enter, a verificação automática é completa:
+                        # imagem + UIA na mesma chamada, evitando uma segunda captura logo depois.
                         capture_call = ToolCall(
                             id=f"auto-capture-{call.id}",
                             name="capturar_tela",
@@ -1566,16 +1564,50 @@ class AuroraAgent:
                         ui_snapshot = capture_result.data.get("interface_acessivel", {}) if capture_result.ok else {}
                         ui_elements = ui_snapshot.get("elementos", []) if isinstance(ui_snapshot, dict) else []
                         if isinstance(image_url, str) and image_url.startswith("data:image/"):
+                            accessibility_note = ""
+                            if (
+                                isinstance(ui_snapshot, dict)
+                                and ui_snapshot.get("disponivel")
+                                and isinstance(ui_elements, list)
+                                and ui_elements
+                            ):
+                                element_fields = (
+                                    "tipo", "nome", "centro_x", "centro_y", "esquerda", "topo",
+                                    "direita", "base", "id_automacao", "ajuda", "pontuacao_busca",
+                                    "confianca_busca", "evidencias_busca",
+                                )
+                                compact_elements = [
+                                    {key: item[key] for key in element_fields if key in item}
+                                    for item in ui_elements[:25] if isinstance(item, dict)
+                                ]
+                                observation = {
+                                    "janela_ativa": ui_snapshot.get("janela_ativa", ""),
+                                    "retangulo_janela": ui_snapshot.get("retangulo_janela", {}),
+                                    "total_elementos_lidos": ui_snapshot.get("total_elementos_lidos", len(ui_elements)),
+                                    "elementos": compact_elements,
+                                    "resumo_pesquisa": ui_snapshot.get("resumo_pesquisa", [])[:8],
+                                    "nota_coordenadas": ui_snapshot.get("nota_coordenadas", ""),
+                                    "area_trabalho_virtual": capture_result.data.get("area_trabalho_virtual"),
+                                }
+                                accessibility_note = (
+                                    " Dados estruturados de UI Automation (mesma captura): "
+                                    + json.dumps(observation, ensure_ascii=False, default=str)
+                                )
                             vision_attachments.append((
                                 image_url,
                                 f"Captura automática após ação {call.name}. Examine a imagem para recalcular o próximo passo; "
-                                f"o sucesso da chamada não significa, por si só, que o objetivo final foi concluído. {capture_result.summary}",
+                                f"o sucesso da chamada não significa, por si só, que o objetivo final foi concluído. "
+                                f"{capture_result.summary}{accessibility_note}",
                             ))
                             has_fresh_desktop_image = True
                             has_fresh_accessibility_attempt = (
                                 capture_result.data.get("modo_uia") != "omitida_captura_rapida"
                             )
-                            verification_kind = "imagem"
+                            verification_kind = (
+                                f"imagem+UIA/{len(ui_elements)} controles"
+                                if has_fresh_accessibility_attempt and ui_snapshot.get("disponivel")
+                                else "imagem"
+                            )
                         elif (
                             capture_result.ok
                             and isinstance(ui_snapshot, dict)
