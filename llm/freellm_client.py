@@ -13,6 +13,7 @@ regenerada no painel do FreeLLM sem reiniciar a Aurora.
 
 from __future__ import annotations
 
+import codecs
 import http.client
 import json
 import re
@@ -158,6 +159,7 @@ class _OpenAIStreamCollector:
     def __init__(self, on_text_delta: Callable[[str], None] | None = None) -> None:
         self.on_text_delta = on_text_delta
         self._buffer = ""
+        self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self._text: list[str] = []
         self._tool_calls: dict[int, dict[str, Any]] = {}
         self._model = ""
@@ -167,13 +169,14 @@ class _OpenAIStreamCollector:
         self.error: Any = None
 
     def feed(self, chunk: bytes) -> None:
-        self._buffer += chunk.decode("utf-8", errors="replace")
+        self._buffer += self._decoder.decode(chunk, final=False)
         lines = self._buffer.split("\n")
         self._buffer = lines.pop()
         for line in lines:
             self._consume_line(line.rstrip("\r"))
 
     def finish(self) -> None:
+        self._buffer += self._decoder.decode(b"", final=True)
         if self._buffer.strip():
             self._consume_line(self._buffer.rstrip("\r"))
             self._buffer = ""
