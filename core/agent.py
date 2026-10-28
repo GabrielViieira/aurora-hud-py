@@ -1377,6 +1377,12 @@ class AuroraAgent:
                         )
                         fatal = False
                         tool_elapsed_ms = 0
+                        self.audit.record(
+                            "tool.capture_reused",
+                            task_id=task.id,
+                            tool=call.name,
+                            redundant_requests=redundant_capture_requests,
+                        )
                         print(
                             "[Aurora agente] Captura redundante ignorada; "
                             f"solicitações repetidas={redundant_capture_requests}."
@@ -1437,7 +1443,8 @@ class AuroraAgent:
                                     redundant_capture_requests = 0
                                 else:
                                     has_fresh_desktop_observation = False
-                    tools_used.append(call.name)
+                    if not result.data.get("capture_skipped"):
+                        tools_used.append(call.name)
                     messages.append(
                         ChatMessage(
                             role="tool",
