@@ -816,7 +816,7 @@ class AuroraAgent:
     def _handoff_local_vision_failure_to_accessibility(
         self, messages: list[ChatMessage], error: ProviderError
     ) -> bool:
-        """Remove pixels after local vision failure when structured UIA data is available."""
+        """Remove pixels only after image-capable provider fallback also fails and UIA is usable."""
         if not _has_useful_accessibility_snapshot(messages):
             return False
         image_indexes = [
@@ -850,9 +850,9 @@ class AuroraAgent:
             messages[index] = ChatMessage(role=message.role, content=content)
 
         print(
-            "[Aurora agente] Visão local falhou; "
+            "[Aurora agente] Análise visual indisponível mesmo após fallback; "
             f"HTTP={getattr(error, 'status', None)}; detalhe={str(error)[:220]}. "
-            "Removi as imagens e continuarei com os controles UIA disponíveis."
+            "Removi as imagens e continuarei somente com os controles UIA disponíveis."
         )
         return True
 
