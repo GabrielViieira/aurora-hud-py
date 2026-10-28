@@ -75,12 +75,12 @@ _DESKTOP_ACTION_REQUEST_RE = re.compile(
     r"\b(?:instale|instala|instalar|baixe|baixa|baixar|clique|clica|clicar|"
     r"abra|abre|abrir|pesquise|pesquisa|pesquisar|selecione|seleciona|selecionar|"
     r"digite|digita|digitar|execute|executa|executar|open|install|click|select|"
-    r"type|press|launch|download)\\b",
+    r"type|press|launch|download)\b",
     re.IGNORECASE,
 )
 _INFORMATIONAL_REQUEST_RE = re.compile(
-    r"^\\s*(?:como|por que|porque|pq|why|how|what|explique|explique-me|"
-    r"me explique|tem como|d[aá] para|can you explain|how do i)\\b",
+    r"^\s*(?:como|por que|porque|pq|why|how|what|explique|explique-me|"
+    r"me explique|tem como|d[aá] para|can you explain|how do i)\b",
     re.IGNORECASE,
 )
 _UNRESOLVED_DESKTOP_RESPONSE_RE = re.compile(
@@ -91,7 +91,7 @@ _UNRESOLVED_DESKTOP_RESPONSE_RE = re.compile(
     r"não consigo|nao consigo|indisponível|indisponivel|modelo visual|"
     r"não tenho certeza|nao tenho certeza|não está claro|nao esta claro|"
     r"não dá para confirmar|nao da para confirmar|manualmente|peça ao usuário|"
-    r"peca ao usuario|vamos tentar)\\b",
+    r"peca ao usuario|vamos tentar)\b",
     re.IGNORECASE,
 )
 _DESKTOP_MUTATING_TOOLS = frozenset({
