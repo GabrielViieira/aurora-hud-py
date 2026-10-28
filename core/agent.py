@@ -694,23 +694,21 @@ class AuroraAgent:
             self.new_session()
         return self.session_id
 
-    def _emit_text_delta(self, delta: str) -> None:
-        if not delta or self.cancel_event.is_set():
+    def _emit_text_delta(self, delta: str, callback: Callable[[str], None] | None) -> None:
+        if not delta or self.cancel_event.is_set() or callback is None:
             return
-        callback = getattr(self, "on_text_delta", None)
-        if callback is not None:
-            try:
-                callback(delta)
-            except Exception:
-                logger.debug("callback de streaming da HUD falhou", exc_info=True)
+        try:
+            callback(delta)
+        except Exception:
+            logger.debug("callback de streaming da HUD falhou", exc_info=True)
 
-    def _reset_stream_preview(self) -> None:
-        callback = getattr(self, "on_stream_reset", None)
-        if callback is not None:
-            try:
-                callback()
-            except Exception:
-                logger.debug("callback de reset do streaming da HUD falhou", exc_info=True)
+    def _reset_stream_preview(self, callback: Callable[[], None] | None = None) -> None:
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception:
+            logger.debug("callback de reset do streaming da HUD falhou", exc_info=True)
 
     def cancel(self) -> None:
         self.cancel_event.set()
@@ -1037,6 +1035,11 @@ class AuroraAgent:
         if not text:
             return AgentReply(text="", status=TaskStatus.CANCELLED.value)
 
+        # Captura callbacks por turno: respostas atrasadas de uma requisição cancelada
+        # nunca devem escrever na sessão de streaming de uma mensagem futura.
+        turn_text_callback = getattr(self, "on_text_delta", None)
+        turn_stream_reset_callback = getattr(self, "on_stream_reset", None)
+
         session_id = self.ensure_session()
         started = time.monotonic()
         deadline = started + max(0.0, float(self.settings.limits.max_task_seconds))
@@ -1249,7 +1252,9 @@ class AuroraAgent:
                     temperature=self.settings.llm.temperature,
                     max_tokens=effective_max_output_tokens,
                     stream=stream_preview_allowed,
-                    on_text_delta=self._emit_text_delta if stream_preview_allowed else None,
+                    on_text_delta=(
+                        lambda delta, callback=turn_text_callback: self._emit_text_delta(delta, callback)
+                    ) if stream_preview_allowed and turn_text_callback is not None else None,
                 )
                 llm_started = time.monotonic()
                 is_vision_request = _messages_contain_image(messages)
@@ -1296,7 +1301,7 @@ class AuroraAgent:
                     # A recuperação pode responder com JSON completo (sem deltas).
                     # Esconda qualquer prévia parcial para não parecer uma resposta final.
                     if stream_preview_allowed:
-                        self._reset_stream_preview()
+                        self._reset_stream_preview(turn_stream_reset_callback)
                     if uses_local_vision and not primary_vision_fallback_used:
                         # Não descarte a imagem imediatamente: UIA pode mostrar apenas a janela
                         # principal do Steam e esconder justamente o diálogo nativo de instalação.
@@ -1433,7 +1438,7 @@ class AuroraAgent:
                 if response.tool_calls:
                     # O texto anterior era apenas uma prévia; não mantê-lo visível
                     # enquanto o agente decide/executa ferramentas.
-                    self._reset_stream_preview()
+                    self._reset_stream_preview(turn_stream_reset_callback)
 
                 if not response.tool_calls:
                     if (
