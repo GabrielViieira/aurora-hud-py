@@ -1074,6 +1074,11 @@ class SvgHologram(QMainWindow):
             self.streamed_text_reset_requested.emit()
             self.streamed_speech_reset_requested.emit(token)
 
+    def _cancel_streamed_speech_session(self, session: StreamingSpeechSession) -> None:
+        session.cancel()
+        self.streamed_text_reset_requested.emit()
+        self.streamed_speech_reset_requested.emit(session.token)
+
     def _enqueue_streamed_speech_segments(
         self, session: StreamingSpeechSession, segments: list[str]
     ) -> None:
@@ -2389,6 +2394,7 @@ class SvgHologram(QMainWindow):
         try:
             if not self._is_speech_generation_current(generation):
                 return
+            streaming_segment = final_state == "streaming"
             self._speech_active = False
             if self._active_speech_generation == generation:
                 self._active_speech_generation = None
@@ -2396,7 +2402,7 @@ class SvgHologram(QMainWindow):
                 self._active_speech_done = None
             with self._speech_generation_lock:
                 if generation == self._speech_generation:
-                    self._speech_pending = False
+                    self._speech_pending = streaming_segment
             cancelled = final_state == "cancelled"
             if caption:
                 if cancelled:
@@ -2407,6 +2413,12 @@ class SvgHologram(QMainWindow):
                     words = len(caption.split())
                     hold_ms = max(2500, min(5000, 1700 + words * 100))
                     self.caption_hide_timer.start(hold_ms)
+            if streaming_segment and not cancelled:
+                # O worker emitirá o estado final somente depois do último segmento.
+                self._set_speech_visual_state("speaking")
+                self._update_cancel_button()
+                self.speech_queue_state_changed.emit(generation, True)
+                return
             self._set_speech_visual_state("idle" if cancelled else final_state)
             self._update_cancel_button()
             self.speech_queue_state_changed.emit(generation, False)
@@ -2414,11 +2426,20 @@ class SvgHologram(QMainWindow):
             done.set()
 
     def _cancel_speech_output(self) -> bool:
+        previous_generation = self._speech_generation
         with self._speech_generation_lock:
             was_pending = self._speech_pending
             self._speech_generation += 1
             generation = self._speech_generation
             self._speech_pending = False
+        session = self._stream_speech_session
+        if (
+            session is not None
+            and session.started
+            and session.generation == previous_generation
+            and not session.cancelled
+        ):
+            session.cancel()
         was_active = self._speech_active
         stop_event = self._active_speech_stop_event
         done = self._active_speech_done
@@ -2651,6 +2672,12 @@ class SvgHologram(QMainWindow):
             self._task_cancel_pending = False
             self._task_active = True
 
+        with self._stream_session_lock:
+            self._stream_turn_counter += 1
+            stream_token = self._stream_turn_counter
+            stream_session = StreamingSpeechSession(stream_token)
+            self._stream_speech_session = stream_session
+
         self._update_cancel_button()
         self._reset_streamed_text()
         self.show_caption_requested.emit(f"Você: {message}")
@@ -2662,8 +2689,12 @@ class SvgHologram(QMainWindow):
             try:
                 # A callback é consumida no worker; sinais Qt fazem a atualização
                 # do painel na thread principal sem bloquear a chamada do modelo.
-                self._agent.on_text_delta = self.streamed_text_requested.emit
-                self._agent.on_stream_reset = self.streamed_text_reset_requested.emit
+                self._agent.on_text_delta = (
+                    lambda delta, token=stream_token: self._receive_agent_stream_delta(token, delta)
+                )
+                self._agent.on_stream_reset = (
+                    lambda token=stream_token: self._reset_agent_stream_session(token)
+                )
                 try:
                     reply = self._agent.handle(message)
                 finally:
@@ -2679,14 +2710,18 @@ class SvgHologram(QMainWindow):
                     f"resposta={len(reply_text)} caracteres."
                 )
                 if status.endswith("CANCELLED"):
-                    self.streamed_text_reset_requested.emit()
+                    self._cancel_streamed_speech_session(stream_session)
                     self.show_caption_requested.emit("Tarefa cancelada.")
                     self.visual_state_requested.emit("idle")
                 elif reply_text:
                     final_state = "error" if status.endswith(("FAILED", "ERROR")) else "completed"
-                    self.speak_with_caption(
-                        f"Aurora: {reply_text}", reply_text, final_state=final_state
+                    spoken_incrementally = self._finish_streamed_speech_session(
+                        stream_session, final_state
                     )
+                    if not spoken_incrementally:
+                        self.speak_with_caption(
+                            f"Aurora: {reply_text}", reply_text, final_state=final_state
+                        )
                 else:
                     self.visual_state_requested.emit("completed")
             except Exception as exc:
@@ -2694,7 +2729,7 @@ class SvgHologram(QMainWindow):
                     f"[Aurora tarefa] Exceção após {time.monotonic() - task_started:.1f}s: "
                     f"{type(exc).__name__}: {exc}"
                 )
-                self.streamed_text_reset_requested.emit()
+                self._cancel_streamed_speech_session(stream_session)
                 if self._agent is not None and self._agent.cancel_event.is_set():
                     self.show_caption_requested.emit("Tarefa cancelada.")
                     self.visual_state_requested.emit("idle")
