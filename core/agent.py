@@ -71,6 +71,14 @@ def _unknown_tool_names(calls: list[ToolCall], available_names: set[str]) -> lis
     return sorted({call.name for call in calls if call.name not in available_names})
 
 
+_MAX_REDUNDANT_CAPTURE_REQUESTS = 2
+
+
+def _should_reuse_recent_capture(tool_name: str, has_fresh_observation: bool) -> bool:
+    """Evita recapturar a tela quando nenhuma ação alterou a observação recente."""
+    return tool_name == "capturar_tela" and has_fresh_observation
+
+
 def _messages_contain_image(messages: list[ChatMessage]) -> bool:
     """Retorna True quando o contexto contém uma imagem que exige modelo visual."""
     for message in messages:
@@ -1003,6 +1011,9 @@ class AuroraAgent:
         failures: dict[str, int] = {}
         # Um nome de ferramenta inválido recebe uma única oportunidade de correção pelo modelo.
         unknown_tool_recovery_used = False
+        # Uma captura recente é reutilizada até que alguma ação altere o desktop.
+        has_fresh_desktop_observation = False
+        redundant_capture_requests = 0
         # Conta execuções reais por assinatura durante este turno, não apenas falhas.
         action_call_counts: dict[str, int] = {}
         ctx = ToolContext(
@@ -1345,6 +1356,31 @@ class AuroraAgent:
                             adiada=True,
                         )
                         fatal = False
+                    elif _should_reuse_recent_capture(
+                        call.name, has_fresh_desktop_observation
+                    ):
+                        # A imagem/árvore da observação anterior já está no contexto do modelo.
+                        # Não pague outra captura até que uma ação realmente altere a tela.
+                        redundant_capture_requests += 1
+                        result = ToolResult(
+                            ok=True,
+                            summary=(
+                                "Captura nova ignorada: já existe uma observação recente da tela no contexto. "
+                                "Nenhuma captura foi executada. Use a observação anterior e prossiga com a ação "
+                                "necessária; só peça outra captura depois de mudar a interface ou se a anterior falhou."
+                            ),
+                            data={
+                                "reused_recent_capture": True,
+                                "capture_skipped": True,
+                                "redundant_capture_requests": redundant_capture_requests,
+                            },
+                        )
+                        fatal = False
+                        tool_elapsed_ms = 0
+                        print(
+                            "[Aurora agente] Captura redundante ignorada; "
+                            f"solicitações repetidas={redundant_capture_requests}."
+                        )
                     else:
                         tool_started = time.perf_counter()
                         guarded_action = False
@@ -1370,6 +1406,10 @@ class AuroraAgent:
                             if guarded_action:
                                 action_call_counts[signature] = attempts + 1
                             result, fatal = self._run_tool(call, task, ctx)
+                            if guarded_action and result.ok:
+                                # Ação real altera o estado desktop; observação anterior ficou obsoleta.
+                                has_fresh_desktop_observation = False
+                                redundant_capture_requests = 0
                         tool_elapsed_ms = round((time.perf_counter() - tool_started) * 1000)
                     print(
                         f"[Aurora agente] Ferramenta concluída: {call.name}; "
@@ -1377,9 +1417,25 @@ class AuroraAgent:
                         f"resumo={str(result.summary)[:180]}"
                     )
                     if call.name == "capturar_tela" and result.ok and not result.data.get("adiada"):
-                        image_url = result.data.pop("data_url", "")
-                        if isinstance(image_url, str) and image_url.startswith("data:image/"):
-                            vision_attachments.append((image_url, result.summary))
+                        if not result.data.get("reused_recent_capture"):
+                            image_url = result.data.pop("data_url", "")
+                            if isinstance(image_url, str) and image_url.startswith("data:image/"):
+                                vision_attachments.append((image_url, result.summary))
+                                has_fresh_desktop_observation = True
+                                redundant_capture_requests = 0
+                            else:
+                                snapshot = result.data.get("interface_acessivel", {})
+                                elements = snapshot.get("elementos", []) if isinstance(snapshot, dict) else []
+                                has_fresh_desktop_observation = bool(
+                                    isinstance(snapshot, dict)
+                                    and snapshot.get("disponivel")
+                                    and isinstance(elements, list)
+                                    and elements
+                                )
+                                if has_fresh_desktop_observation:
+                                    redundant_capture_requests = 0
+                                else:
+                                    has_fresh_desktop_observation = False
                     tools_used.append(call.name)
                     messages.append(
                         ChatMessage(
@@ -1389,6 +1445,19 @@ class AuroraAgent:
                             name=call.name,
                         )
                     )
+                    if (
+                        result.data.get("reused_recent_capture")
+                        and redundant_capture_requests >= _MAX_REDUNDANT_CAPTURE_REQUESTS
+                    ):
+                        final_text = (
+                            "Interrompi a tarefa porque o modelo pediu novas capturas da tela "
+                            "repetidamente sem realizar uma ação que mudasse a interface. "
+                            "A observação mais recente continuava disponível no contexto. "
+                            "Nenhuma captura adicional foi feita após a primeira repetição bloqueada."
+                        )
+                        task.error = "ciclo de capturas redundantes sem progresso"
+                        task.transition(TaskStatus.FAILED)
+                        break
                     # Se o usuário cancelou durante a execução da ferramenta, não faça
                     # a captura seguinte nem continue com outras ações do mesmo lote.
                     if self.cancel_event.is_set():
@@ -1445,6 +1514,8 @@ class AuroraAgent:
                                 f"Captura automática após ação {call.name}. Examine a imagem para recalcular o próximo passo; "
                                 f"o sucesso da chamada não significa, por si só, que o objetivo final foi concluído. {capture_result.summary}",
                             ))
+                            has_fresh_desktop_observation = True
+                            redundant_capture_requests = 0
                             verification_kind = "imagem"
                         elif (
                             capture_result.ok
@@ -1485,12 +1556,15 @@ class AuroraAgent:
                                     + json.dumps(observation, ensure_ascii=False, default=str)
                                 ),
                             ))
+                            has_fresh_desktop_observation = True
+                            redundant_capture_requests = 0
                             verification_kind = f"UIA/{len(compact_elements)} controles"
                             print(
                                 "[Aurora agente] Verificação rápida concluída via UI Automation; "
                                 "imagem e modelo visual local omitidos."
                             )
                         else:
+                            has_fresh_desktop_observation = False
                             detail = capture_result.error or capture_result.summary or "a captura não retornou evidência válida"
                             vision_warnings.append(
                                 f"A ação {call.name} foi executada, mas a verificação automática falhou: {detail}. "
