@@ -121,10 +121,13 @@ class AgentDeadlineTests(unittest.TestCase):
                 "capturar_tela", {"somente_acessibilidade": True}, False, True
             )
         )
-        # Captura genérica é redundante quando qualquer observação recente já está disponível.
-        # Para adquirir a modalidade que falta, o modelo deve especificá-la.
-        self.assertTrue(
+        # Se só houver UIA, a captura genérica ainda pode acrescentar os pixels.
+        self.assertFalse(
             _should_reuse_recent_capture("capturar_tela", {}, False, True)
+        )
+        # Imagem fresca é suficiente para bloquear uma captura genérica repetida.
+        self.assertTrue(
+            _should_reuse_recent_capture("capturar_tela", {}, True, False)
         )
         self.assertFalse(
             _should_reuse_recent_capture(
