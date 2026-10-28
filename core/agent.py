@@ -410,9 +410,10 @@ def _verification_settle_seconds(name: str, arguments: dict[str, Any]) -> float:
     if name in {"abrir_aplicativo", "restaurar_aplicativo", "abrir_url"}:
         return 0.45
     if _should_use_accessibility_only_verification(name, arguments):
-        # Um clique dispara evento e a árvore leva alguns quadros para refletir;
-        # 40ms costumava ler o estado anterior à ação.
-        return 0.12 if name == "controlar_mouse" else 0.04
+        # Após digitar, dê um instante para o campo refletir o texto na árvore UIA.
+        return 0.04
+    if name == "controlar_mouse":
+        return 0.12
     return 0.10
 
 
@@ -1538,9 +1539,8 @@ class AuroraAgent:
                         and self.registry.has("capturar_tela")
                         and _should_auto_capture_after_action(call.name, call.arguments, self.registry)
                     ):
-                        # Caminho rápido: para teclas e cliques, tenta primeiro a UI Automation
-                        # sem codificar uma imagem. A ferramenta cai automaticamente para
-                        # captura visual se o UIA não devolver controles úteis.
+                        # Digitação pode ser confirmada pela árvore UIA. Cliques, Enter e
+                        # navegação usam captura completa (pixels + UIA) em uma única chamada.
                         fast_verification = _should_use_accessibility_only_verification(
                             call.name, call.arguments
                         )
