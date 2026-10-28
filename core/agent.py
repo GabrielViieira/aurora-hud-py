@@ -1293,6 +1293,10 @@ class AuroraAgent:
                         prefer_primary=primary_vision_fallback_used,
                     )
                 except ProviderError as call_error:
+                    # A recuperação pode responder com JSON completo (sem deltas).
+                    # Esconda qualquer prévia parcial para não parecer uma resposta final.
+                    if stream_preview_allowed:
+                        self._reset_stream_preview()
                     if uses_local_vision and not primary_vision_fallback_used:
                         # Não descarte a imagem imediatamente: UIA pode mostrar apenas a janela
                         # principal do Steam e esconder justamente o diálogo nativo de instalação.

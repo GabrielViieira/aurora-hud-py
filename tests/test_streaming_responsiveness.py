@@ -26,7 +26,7 @@ sys.path.insert(0, str(_REPO_ROOT.parent))
 from aurora.config.settings import Settings
 from aurora.core.agent import _should_stream_response_preview
 from aurora.llm.freellm_client import FreeLLMClient
-from aurora.llm.provider import ChatMessage, LLMRequest
+from aurora.llm.provider import ChatMessage, LLMRequest, ProviderError
 
 
 class _ChunkedResponse:
@@ -148,7 +148,7 @@ class StreamingClientTests(unittest.TestCase):
         with mock.patch(
             "urllib.request.urlopen", return_value=response_source
         ) as urlopen:
-            with self.assertRaises(Exception):
+            with self.assertRaises(ProviderError):
                 self.client.chat(LLMRequest(
                     messages=[ChatMessage(role="user", content="Oi")],
                     stream=True,
