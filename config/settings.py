@@ -104,7 +104,7 @@ class LLMSettings:
     max_output_tokens: int = 1200
     timeout_s: float = 60.0
     max_retries: int = 2
-    stream: bool = False
+    stream: bool = True
     context_window: int = 32000
 
 
@@ -233,7 +233,7 @@ class Settings:
             max_output_tokens=_get_int(merged, "AURORA_LLM_MAX_OUTPUT_TOKENS", 1200),
             timeout_s=_get_float(merged, "AURORA_LLM_TIMEOUT_S", 60.0),
             max_retries=_get_int(merged, "AURORA_LLM_MAX_RETRIES", 2),
-            stream=_get_bool(merged, "AURORA_LLM_STREAM", False),
+            stream=_get_bool(merged, "AURORA_LLM_STREAM", True),
             context_window=_get_int(merged, "AURORA_LLM_CONTEXT_WINDOW", 32000),
         )
 

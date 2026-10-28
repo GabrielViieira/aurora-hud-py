@@ -8,7 +8,7 @@ agente, as ferramentas ou a memória.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Callable, Protocol, runtime_checkable
 
 
 class ErrorKind(str):
@@ -129,6 +129,8 @@ class LLMRequest:
     temperature: float = 0.3
     max_tokens: int = 1200
     stream: bool = False
+    # Callback local à este processo; nunca serializado para o gateway.
+    on_text_delta: Callable[[str], None] | None = field(default=None, repr=False, compare=False)
 
 
 @runtime_checkable

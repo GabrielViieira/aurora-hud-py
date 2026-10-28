@@ -152,6 +152,99 @@ def _parse_dots_function_calls(
     return calls
 
 
+class _OpenAIStreamCollector:
+    """Reconstrói uma resposta OpenAI SSE e emite fragmentos de texto assim que chegam."""
+
+    def __init__(self, on_text_delta: Callable[[str], None] | None = None) -> None:
+        self.on_text_delta = on_text_delta
+        self._buffer = ""
+        self._text: list[str] = []
+        self._tool_calls: dict[int, dict[str, Any]] = {}
+        self._model = ""
+        self._usage: dict[str, Any] = {}
+        self._finish_reason: str | None = None
+        self.saw_sse = False
+        self.error: Any = None
+
+    def feed(self, chunk: bytes) -> None:
+        self._buffer += chunk.decode("utf-8", errors="replace")
+        lines = self._buffer.split("\n")
+        self._buffer = lines.pop()
+        for line in lines:
+            self._consume_line(line.rstrip("\r"))
+
+    def finish(self) -> None:
+        if self._buffer.strip():
+            self._consume_line(self._buffer.rstrip("\r"))
+            self._buffer = ""
+
+    def _consume_line(self, line: str) -> None:
+        if not line.startswith("data:"):
+            return
+        self.saw_sse = True
+        payload = line[5:].strip()
+        if not payload or payload == "[DONE]":
+            return
+        try:
+            item = json.loads(payload)
+        except json.JSONDecodeError:
+            return
+        if item.get("model"):
+            self._model = str(item["model"])
+        if isinstance(item.get("usage"), dict):
+            self._usage.update(item["usage"])
+        if item.get("error"):
+            self.error = item["error"]
+
+        for choice in item.get("choices") or []:
+            delta = choice.get("delta") or {}
+            content = delta.get("content")
+            if isinstance(content, str) and content:
+                self._text.append(content)
+                if self.on_text_delta is not None:
+                    try:
+                        self.on_text_delta(content)
+                    except Exception:
+                        logger.debug("callback de texto incremental falhou", exc_info=True)
+
+            for tool_delta in delta.get("tool_calls") or []:
+                try:
+                    index = int(tool_delta.get("index", 0))
+                except (TypeError, ValueError):
+                    continue
+                tool = self._tool_calls.setdefault(index, {
+                    "id": "", "type": "function", "function": {"name": "", "arguments": ""}
+                })
+                if tool_delta.get("id"):
+                    tool["id"] += str(tool_delta["id"])
+                if tool_delta.get("type"):
+                    tool["type"] = str(tool_delta["type"])
+                function_delta = tool_delta.get("function") or {}
+                if function_delta.get("name"):
+                    tool["function"]["name"] += str(function_delta["name"])
+                if function_delta.get("arguments"):
+                    tool["function"]["arguments"] += str(function_delta["arguments"])
+            if choice.get("finish_reason") is not None:
+                self._finish_reason = str(choice["finish_reason"])
+
+    def as_openai_response(self) -> dict[str, Any]:
+        self.finish()
+        message: dict[str, Any] = {"role": "assistant", "content": "".join(self._text)}
+        if self._tool_calls:
+            message["tool_calls"] = [
+                self._tool_calls[index] for index in sorted(self._tool_calls)
+            ]
+        result: dict[str, Any] = {
+            "choices": [{"message": message, "finish_reason": self._finish_reason}],
+            "model": self._model,
+        }
+        if self._usage:
+            result["usage"] = self._usage
+        if self.error is not None:
+            result["error"] = self.error
+        return result
+
+
 class FreeLLMClient:
     """Implementação `LLMProvider` para o gateway FreeLLMAPI."""
 
@@ -216,6 +309,7 @@ class FreeLLMClient:
         payload: dict[str, Any] | None = None,
         *,
         retry: bool = True,
+        on_chunk: Callable[[bytes], None] | None = None,
     ) -> _HTTPResult:
         url = f"{self.base_url}{path}"
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
@@ -232,7 +326,17 @@ class FreeLLMClient:
             )
             try:
                 with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
-                    body = response.read()
+                    if on_chunk is None:
+                        body = response.read()
+                    else:
+                        chunks: list[bytes] = []
+                        while True:
+                            chunk = response.read(4096)
+                            if not chunk:
+                                break
+                            chunks.append(chunk)
+                            on_chunk(chunk)
+                        body = b"".join(chunks)
                     latency = int((time.perf_counter() - started) * 1000)
                     result = _HTTPResult(response.status, body, latency)
                     self._record(method, path, result.status, latency, attempt)
@@ -392,14 +496,30 @@ class FreeLLMClient:
         if request.stream:
             payload["stream"] = True
 
-        result = self._request("POST", "/chat/completions", payload)
+        stream_collector = (
+            _OpenAIStreamCollector(request.on_text_delta)
+            if request.stream else None
+        )
+        result = self._request(
+            "POST", "/chat/completions", payload,
+            on_chunk=stream_collector.feed if stream_collector is not None else None,
+        )
         latency_ms = int((time.perf_counter() - started) * 1000)
         try:
             data = json.loads(result.body)
+            # Alguns gateways aceitam stream=true, mas ainda devolvem JSON completo.
+            # Nesse caso, preserva compatibilidade e entrega um único delta final.
+            if stream_collector is not None and not stream_collector.saw_sse:
+                message = (data.get("choices") or [{}])[0].get("message") or {}
+                content = message.get("content")
+                if isinstance(content, str) and content and request.on_text_delta is not None:
+                    request.on_text_delta(content)
         except json.JSONDecodeError as exc:
-            raise ProviderError(
-                "resposta de chat não é JSON válido", kind=ErrorKind.INVALID_RESPONSE
-            ) from exc
+            if stream_collector is None or not stream_collector.saw_sse:
+                raise ProviderError(
+                    "resposta de chat não é JSON válido", kind=ErrorKind.INVALID_RESPONSE
+                ) from exc
+            data = stream_collector.as_openai_response()
 
         if "error" in data and not data.get("choices"):
             detail = data["error"]
