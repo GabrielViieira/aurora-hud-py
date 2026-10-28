@@ -74,9 +74,22 @@ def _unknown_tool_names(calls: list[ToolCall], available_names: set[str]) -> lis
 _MAX_REDUNDANT_CAPTURE_REQUESTS = 2
 
 
-def _should_reuse_recent_capture(tool_name: str, has_fresh_observation: bool) -> bool:
-    """Evita recapturar a tela quando nenhuma ação alterou a observação recente."""
-    return tool_name == "capturar_tela" and has_fresh_observation
+def _should_reuse_recent_capture(
+    tool_name: str,
+    arguments: dict[str, Any],
+    has_fresh_image: bool,
+    has_fresh_accessibility: bool,
+) -> bool:
+    """Reutiliza evidência já fresca sem impedir a aquisição de um tipo de observação ausente."""
+    if tool_name != "capturar_tela":
+        return False
+    if arguments.get("somente_imagem") is True:
+        return has_fresh_image
+    if arguments.get("somente_acessibilidade") is True:
+        return has_fresh_accessibility
+    # A captura padrão inclui pixels; quando já há imagem recente, repeti-la é redundante.
+    # Se só houver UIA, uma captura padrão pode acrescentar a imagem que ainda falta.
+    return has_fresh_image
 
 
 def _messages_contain_image(messages: list[ChatMessage]) -> bool:
@@ -1011,8 +1024,9 @@ class AuroraAgent:
         failures: dict[str, int] = {}
         # Um nome de ferramenta inválido recebe uma única oportunidade de correção pelo modelo.
         unknown_tool_recovery_used = False
-        # Uma captura recente é reutilizada até que alguma ação altere o desktop.
-        has_fresh_desktop_observation = False
+        # Rastreamento por modalidade: UIA rápida não substitui uma imagem quando os pixels são necessários.
+        has_fresh_desktop_image = False
+        has_fresh_accessibility_snapshot = False
         redundant_capture_requests = 0
         # Conta execuções reais por assinatura durante este turno, não apenas falhas.
         action_call_counts: dict[str, int] = {}
@@ -1322,6 +1336,19 @@ class AuroraAgent:
                     "abrir_aplicativo", "restaurar_aplicativo", "abrir_url",
                 }
                 desktop_calls = [call.name for call in response.tool_calls if call.name in desktop_tool_names]
+                requested_capture = next(
+                    (call for call in response.tool_calls if call.name == "capturar_tela"),
+                    None,
+                )
+                capture_is_redundant = bool(
+                    requested_capture
+                    and _should_reuse_recent_capture(
+                        requested_capture.name,
+                        requested_capture.arguments,
+                        has_fresh_desktop_image,
+                        has_fresh_accessibility_snapshot,
+                    )
+                )
                 preferred_desktop_tool = (
                     next(
                         (name for name in ("abrir_aplicativo", "restaurar_aplicativo", "abrir_url")
@@ -1329,10 +1356,11 @@ class AuroraAgent:
                         "",
                     )
                     or (
-                        next((name for name in desktop_calls if name != "capturar_tela"), "")
-                        if has_fresh_desktop_observation
-                        else ("capturar_tela" if "capturar_tela" in desktop_calls else "")
+                        "capturar_tela"
+                        if requested_capture is not None and not capture_is_redundant
+                        else ""
                     )
+                    or next((name for name in desktop_calls if name != "capturar_tela"), "")
                     or (desktop_calls[0] if desktop_calls else "")
                 )
                 desktop_batch_requires_serial = len(desktop_calls) > 1
@@ -1358,7 +1386,10 @@ class AuroraAgent:
                     )
                     tool_elapsed_ms = 0
                     if _should_reuse_recent_capture(
-                        call.name, has_fresh_desktop_observation
+                        call.name,
+                        call.arguments,
+                        has_fresh_desktop_image,
+                        has_fresh_accessibility_snapshot,
                     ):
                         # A imagem/árvore da observação anterior já está no contexto do modelo.
                         # Não pague outra captura até que uma ação realmente altere a tela.
@@ -1422,10 +1453,10 @@ class AuroraAgent:
                                 action_call_counts[signature] = attempts + 1
                             result, fatal = self._run_tool(call, task, ctx)
                             if guarded_action and result.ok:
-                                # Ação real altera o estado desktop; observação anterior ficou obsoleta.
-                                # O contador de capturas redundantes é da tarefa inteira: a verificação
-                                # automática logo abaixo já fornece a observação atualizada.
-                                has_fresh_desktop_observation = False
+                                # Ação real altera o estado desktop; as duas modalidades ficam obsoletas.
+                                # O contador de capturas redundantes permanece acumulado na tarefa.
+                                has_fresh_desktop_image = False
+                                has_fresh_accessibility_snapshot = False
                         tool_elapsed_ms = round((time.perf_counter() - tool_started) * 1000)
                     print(
                         f"[Aurora agente] Ferramenta concluída: {call.name}; "
@@ -1435,23 +1466,22 @@ class AuroraAgent:
                     if call.name == "capturar_tela" and result.ok and not result.data.get("adiada"):
                         if not result.data.get("reused_recent_capture"):
                             image_url = result.data.pop("data_url", "")
-                            if isinstance(image_url, str) and image_url.startswith("data:image/"):
+                            snapshot = result.data.get("interface_acessivel", {})
+                            elements = snapshot.get("elementos", []) if isinstance(snapshot, dict) else []
+                            has_fresh_desktop_image = (
+                                isinstance(image_url, str) and image_url.startswith("data:image/")
+                            )
+                            has_fresh_accessibility_snapshot = bool(
+                                isinstance(snapshot, dict)
+                                and snapshot.get("disponivel")
+                                and isinstance(elements, list)
+                                and elements
+                            )
+                            if has_fresh_desktop_image:
                                 vision_attachments.append((image_url, result.summary))
-                                has_fresh_desktop_observation = True
                                 redundant_capture_requests = 0
-                            else:
-                                snapshot = result.data.get("interface_acessivel", {})
-                                elements = snapshot.get("elementos", []) if isinstance(snapshot, dict) else []
-                                has_fresh_desktop_observation = bool(
-                                    isinstance(snapshot, dict)
-                                    and snapshot.get("disponivel")
-                                    and isinstance(elements, list)
-                                    and elements
-                                )
-                                if has_fresh_desktop_observation:
-                                    redundant_capture_requests = 0
-                                else:
-                                    has_fresh_desktop_observation = False
+                            elif has_fresh_accessibility_snapshot:
+                                redundant_capture_requests = 0
                     if not result.data.get("capture_skipped"):
                         tools_used.append(call.name)
                     messages.append(
@@ -1531,7 +1561,13 @@ class AuroraAgent:
                                 f"Captura automática após ação {call.name}. Examine a imagem para recalcular o próximo passo; "
                                 f"o sucesso da chamada não significa, por si só, que o objetivo final foi concluído. {capture_result.summary}",
                             ))
-                            has_fresh_desktop_observation = True
+                            has_fresh_desktop_image = True
+                            has_fresh_accessibility_snapshot = bool(
+                                isinstance(ui_snapshot, dict)
+                                and ui_snapshot.get("disponivel")
+                                and isinstance(ui_elements, list)
+                                and ui_elements
+                            )
                             verification_kind = "imagem"
                         elif (
                             capture_result.ok
@@ -1572,14 +1608,16 @@ class AuroraAgent:
                                     + json.dumps(observation, ensure_ascii=False, default=str)
                                 ),
                             ))
-                            has_fresh_desktop_observation = True
+                            has_fresh_desktop_image = False
+                            has_fresh_accessibility_snapshot = True
                             verification_kind = f"UIA/{len(compact_elements)} controles"
                             print(
                                 "[Aurora agente] Verificação rápida concluída via UI Automation; "
                                 "imagem e modelo visual local omitidos."
                             )
                         else:
-                            has_fresh_desktop_observation = False
+                            has_fresh_desktop_image = False
+                            has_fresh_accessibility_snapshot = False
                             detail = capture_result.error or capture_result.summary or "a captura não retornou evidência válida"
                             vision_warnings.append(
                                 f"A ação {call.name} foi executada, mas a verificação automática falhou: {detail}. "
