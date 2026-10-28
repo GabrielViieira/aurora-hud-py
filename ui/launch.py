@@ -1059,10 +1059,12 @@ class SvgHologram(QMainWindow):
     def _receive_agent_stream_delta(self, token: int, fragment: str) -> None:
         """Entrega texto à HUD e encaminha frases completas à fila de voz."""
         session = self._stream_session_for_token(token)
-        if session is None or not session.is_accepting or not fragment:
+        if session is None or not fragment:
+            return
+        segments = session.feed(fragment)
+        if not session.is_accepting:
             return
         self.streamed_text_requested.emit(fragment)
-        segments = session.feed(fragment)
         if segments:
             self._enqueue_streamed_speech_segments(session, segments)
 
