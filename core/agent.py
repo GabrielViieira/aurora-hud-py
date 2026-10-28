@@ -1408,8 +1408,9 @@ class AuroraAgent:
                             result, fatal = self._run_tool(call, task, ctx)
                             if guarded_action and result.ok:
                                 # Ação real altera o estado desktop; observação anterior ficou obsoleta.
+                                # O contador de capturas redundantes é da tarefa inteira: a verificação
+                                # automática logo abaixo já fornece a observação atualizada.
                                 has_fresh_desktop_observation = False
-                                redundant_capture_requests = 0
                         tool_elapsed_ms = round((time.perf_counter() - tool_started) * 1000)
                     print(
                         f"[Aurora agente] Ferramenta concluída: {call.name}; "
@@ -1515,7 +1516,6 @@ class AuroraAgent:
                                 f"o sucesso da chamada não significa, por si só, que o objetivo final foi concluído. {capture_result.summary}",
                             ))
                             has_fresh_desktop_observation = True
-                            redundant_capture_requests = 0
                             verification_kind = "imagem"
                         elif (
                             capture_result.ok
@@ -1557,7 +1557,6 @@ class AuroraAgent:
                                 ),
                             ))
                             has_fresh_desktop_observation = True
-                            redundant_capture_requests = 0
                             verification_kind = f"UIA/{len(compact_elements)} controles"
                             print(
                                 "[Aurora agente] Verificação rápida concluída via UI Automation; "
