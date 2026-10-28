@@ -37,14 +37,14 @@ _TOOL_DESCRIPTION_CAPTURE = (
     "decida pelos indícios (rótulo + lupa + geometria), nunca pelo nome do aplicativo."
 )
 _TOOL_DESCRIPTION_MOUSE = (
-    "Controla o mouse na área de trabalho virtual. Faça capturar_tela antes. Se houver um controle acessível "
-    "com nome EXATO ou id_automacao único, prefira enviar esse valor em 'controle' para clicá-lo diretamente "
-    "via UI Automation (para clicar, duplo-clique ou clique direito); isso evita estimar pixels pela imagem. "
-    "Caso contrário, use centro_x/centro_y do controle acessível quando houver correspondência clara; esses "
-    "valores já são coordenadas absolutas e não devem ser redimensionados. Se estimar o ponto pela imagem, "
-    "transforme-o usando origem_x/origem_y e as dimensões original/capturada retornadas pela captura. Use x/y "
-    "absolutos, não coordenadas relativas à janela ou à imagem. Coordenadas negativas só valem dentro dos limites "
-    "reais da área de trabalho virtual. Execute uma ação por chamada e verifique o resultado."
+    "Controla o mouse na área de trabalho virtual. Antes de clicar, use a observação de tela mais recente já "
+    "anexada ao contexto; chame capturar_tela apenas se ainda não houver observação utilizável ou se a verificação "
+    "anterior falhou. Depois de uma ação bem-sucedida, o agente tenta anexar uma verificação automática: não peça "
+    "outra captura se essa observação já estiver disponível. Se houver um controle acessível com nome EXATO ou "
+    "id_automacao único, prefira enviar esse valor em 'controle' para clicá-lo diretamente via UI Automation; "
+    "caso contrário, use centro_x/centro_y ou coordenadas da imagem convertidas com origem_x/origem_y e as dimensões "
+    "original/capturada. Use coordenadas absolutas, não relativas à janela ou imagem. Coordenadas negativas só valem "
+    "dentro dos limites reais da área de trabalho virtual. Execute uma ação por chamada."
 )
 _TOOL_DESCRIPTION_SEARCH = (
     "Pesquisa em qualquer aplicativo numa única chamada: encontra a barra de pesquisa pela anatomia "
@@ -57,11 +57,12 @@ _TOOL_DESCRIPTION_SEARCH = (
 
 _TOOL_DESCRIPTION_KEYBOARD = (
     "Digita texto, pressiona uma tecla ou envia um atalho ao aplicativo em primeiro plano. "
-    "Use capturar_tela para confirmar qual janela está ativa e verificar o resultado. "
-    "Depois de digitar, o retorno traz 'confirmado' e o valor lido no campo em foco: "
-    "se confirmado=false, o texto não entrou — clique no campo (de preferência pelo controle acessível) "
-    "e digite de novo antes de anunciar sucesso. confirmado=null significa que o campo não pôde ser lido. "
-    "Atalhos de encerramento/segurança são bloqueados por proteção."
+    "Use a observação de tela mais recente já anexada ao contexto para confirmar a janela; chame capturar_tela "
+    "somente se não existir observação utilizável ou se a verificação anterior falhou. Depois de uma ação "
+    "bem-sucedida, o agente tenta anexar uma verificação automática: não peça outra captura se ela já estiver "
+    "disponível. Depois de digitar, o retorno traz 'confirmado' e o valor lido no campo em foco: se confirmado=false, "
+    "o texto não entrou — clique no campo e tente novamente antes de anunciar sucesso. confirmado=null significa "
+    "que o campo não pôde ser lido. Atalhos de encerramento/segurança são bloqueados por proteção."
 )
 
 
