@@ -86,6 +86,11 @@ class StreamingSpeechSession:
         self.cancelled = False
         self.final_state = "completed"
 
+    @property
+    def is_accepting(self) -> bool:
+        with self.lock:
+            return not self.closed and not self.cancelled and not self.stop_event.is_set()
+
     def feed(self, fragment: str) -> list[str]:
         with self.lock:
             if self.closed or self.cancelled or self.stop_event.is_set():
