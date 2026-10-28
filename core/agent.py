@@ -412,6 +412,9 @@ def _verification_settle_seconds(name: str, arguments: dict[str, Any]) -> float:
     if _should_use_accessibility_only_verification(name, arguments):
         # Após digitar, dê um instante para o campo refletir o texto na árvore UIA.
         return 0.04
+    if name == "controlar_teclado" and action == "pressionar":
+        # Enter/Tab podem confirmar uma escolha ou mudar a etapa de um diálogo.
+        return 0.45
     if name == "controlar_mouse":
         # Steam e outras interfaces web podem animar/posicionar diálogos modais
         # por algumas centenas de ms. Capturar aos 120 ms permite que o modelo

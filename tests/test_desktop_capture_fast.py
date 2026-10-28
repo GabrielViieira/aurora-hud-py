@@ -368,12 +368,14 @@ class VerificationPolicyTests(unittest.TestCase):
 
     def test_click_settles_longer_than_typing_before_reading_state(self):
         click = _verification_settle_seconds("controlar_mouse", {"acao": "clicar", "x": 1, "y": 2})
+        enter = _verification_settle_seconds("controlar_teclado", {"acao": "pressionar", "tecla": "enter"})
         typing = _verification_settle_seconds("controlar_teclado", {"acao": "digitar"})
         launch = _verification_settle_seconds("abrir_aplicativo", {"nome": "Steam"})
 
         self.assertGreater(click, typing)
-        # Um clique pode abrir um diálogo modal; esperar evita capturar a tela anterior.
+        # Clique/Enter podem abrir ou avançar diálogos; não capture antes da transição.
         self.assertEqual(click, 0.45)
+        self.assertEqual(enter, 0.45)
         self.assertEqual(launch, 0.45)
 
 
