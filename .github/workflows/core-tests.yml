@@ -19,8 +19,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Compile project Python files
-        run: python -m compileall -q config core llm memory security storage tools ui
+      - name: Compile core modules
+        run: python -m compileall -q config core llm memory security storage tools
+      - name: Compile active HUD modules
+        run: python -m py_compile ui/launch.py ui/assistant_panel.py ui/hud_preferences.py
+      - name: Test streaming HTTP client and policy
+        run: python tests/test_streaming_responsiveness.py
       - name: Test incremental speech primitives
         run: python tests/test_streaming_speech.py
       - name: Test conversation history storage

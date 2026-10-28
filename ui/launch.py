@@ -1432,7 +1432,9 @@ class SvgHologram(QMainWindow):
 
     def _save_hud_preferences(self, values: dict) -> dict:
         self._hud_preferences = save_hud_preferences(self._hud_preferences_path, values)
-        self._apply_hud_preferences()
+        # Não troque a configuração no meio de um turno; aplique assim que ele terminar.
+        if not self._task_active:
+            self._apply_hud_preferences()
         if self._assistant_panel is not None:
             self._assistant_panel.set_preferences(self._hud_preferences)
         return self._hud_preferences
@@ -2981,6 +2983,7 @@ class SvgHologram(QMainWindow):
             self._task_active = False
             self._task_cancel_pending = False
         self._active_task_thread = None
+        self._apply_hud_preferences()
         self._update_cancel_button()
         if self._exit_after_task:
             self._allow_close = True
