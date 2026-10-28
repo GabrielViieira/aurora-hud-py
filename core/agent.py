@@ -66,6 +66,10 @@ def _tool_call_signature(call: ToolCall) -> str:
     args = json.dumps(call.arguments, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str)
     return f"{call.name}:{args}"
 
+def _unknown_tool_names(calls: list[ToolCall], available_names: set[str]) -> list[str]:
+    """Lista nomes únicos de ferramentas que não estão disponíveis nesta chamada."""
+    return sorted({call.name for call in calls if call.name not in available_names})
+
 
 def _messages_contain_image(messages: list[ChatMessage]) -> bool:
     """Retorna True quando o contexto contém uma imagem que exige modelo visual."""
@@ -997,6 +1001,8 @@ class AuroraAgent:
         model_used = ""
         tool_call_count = 0
         failures: dict[str, int] = {}
+        # Um nome de ferramenta inválido recebe uma única oportunidade de correção pelo modelo.
+        unknown_tool_recovery_used = False
         # Conta execuções reais por assinatura durante este turno, não apenas falhas.
         action_call_counts: dict[str, int] = {}
         ctx = ToolContext(
@@ -1199,6 +1205,97 @@ class AuroraAgent:
                 if not response.tool_calls:
                     final_text = response.text.strip() or "(o modelo não devolveu texto)"
                     task.transition(TaskStatus.COMPLETED)
+                    break
+
+                available_tool_names = {
+                    spec.name for spec in self.registry.specs(self.settings.enabled_tools)
+                }
+                unknown_tool_names = _unknown_tool_names(
+                    response.tool_calls, available_tool_names
+                )
+                if unknown_tool_names:
+                    # Não execute nenhuma ação de um lote que contém ferramenta inválida.
+                    # Cada tool_call_id recebe um resultado para manter o protocolo do provedor.
+                    assistant = ChatMessage(
+                        role="assistant",
+                        content=response.text,
+                        tool_calls=list(response.tool_calls),
+                    )
+                    messages.append(assistant)
+                    unknown_tool_recovery_used = unknown_tool_recovery_used
+                    retry_allowed = not unknown_tool_recovery_used
+                    unknown_tool_recovery_used = True
+                    available_text = ", ".join(sorted(available_tool_names)) or "(nenhuma)"
+                    for call in response.tool_calls:
+                        tool_call_count += 1
+                        tools_used.append(call.name)
+                        if call.name in unknown_tool_names:
+                            self.audit.record(
+                                "tool.unknown",
+                                task_id=task.id,
+                                tool=call.name,
+                                available_tools=sorted(available_tool_names),
+                                recovery_attempt=1 if retry_allowed else 2,
+                            )
+                            if retry_allowed:
+                                detail = (
+                                    f"A ferramenta '{call.name}' não está disponível e NÃO foi executada. "
+                                    f"Use exatamente um dos nomes registrados: {available_text}. "
+                                    "Corrija a chamada usando o nome exato e os argumentos do esquema. "
+                                    "Não invente variantes nem tente executar a ação por outro caminho "
+                                    "sem reavaliar a solicitação."
+                                )
+                            else:
+                                detail = (
+                                    f"A ferramenta '{call.name}' continua inválida após a única tentativa "
+                                    f"de correção. Nenhuma ação deste lote foi executada. "
+                                    f"Nomes disponíveis: {available_text}."
+                                )
+                            result = ToolResult.fail(
+                                detail,
+                                ferramenta_desconhecida=call.name,
+                                ferramentas_disponiveis=sorted(available_tool_names),
+                            )
+                            tool_message_name = ""
+                        else:
+                            detail = (
+                                "AÇÃO NÃO EXECUTADA: a resposta continha outra ferramenta com nome inválido. "
+                                "Nenhuma ação deste lote foi executada. Reenvie somente chamadas com nomes "
+                                "exatamente iguais aos esquemas de ferramenta disponíveis."
+                            )
+                            result = ToolResult.fail(detail, lote_cancelado=True)
+                            tool_message_name = call.name
+                            self.audit.record(
+                                "tool.batch_aborted",
+                                task_id=task.id,
+                                tool=call.name,
+                                reason="a mesma resposta continha nome de ferramenta desconhecido",
+                            )
+                        messages.append(
+                            ChatMessage(
+                                role="tool",
+                                content=result.to_content(self.settings.limits.max_output_chars),
+                                tool_call_id=call.id,
+                                name=tool_message_name,
+                            )
+                        )
+
+                    if retry_allowed:
+                        print(
+                            "[Aurora agente] Nome de ferramenta desconhecido; "
+                            "nenhuma ação foi executada. Solicitando uma única correção ao modelo."
+                        )
+                        continue
+
+                    final_text = (
+                        "Interrompi a tarefa porque o modelo voltou a solicitar uma ferramenta "
+                        f"desconhecida ({', '.join(unknown_tool_names)}). "
+                        "Nenhuma ação desse lote foi executada. "
+                        f"Ferramentas disponíveis: {available_text}."
+                    )
+                    task.error = final_text
+                    if task.status not in {TaskStatus.COMPLETED, TaskStatus.CANCELLED, TaskStatus.FAILED}:
+                        task.transition(TaskStatus.FAILED)
                     break
 
                 assistant = ChatMessage(
