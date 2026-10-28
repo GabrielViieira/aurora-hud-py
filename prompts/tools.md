@@ -24,9 +24,9 @@ Regras:
 ## Abertura e restauração de aplicativos
 
 9. Para abrir um programa instalado, use `abrir_aplicativo` com o nome curto (por exemplo, `Steam`); não tente simular o Menu Iniciar com cliques no escuro.
-10. Se o programa já estiver ativo/minimizado, use `restaurar_aplicativo`. Depois, execute `capturar_tela` em uma chamada posterior para verificar a janela.
+10. Se o programa já estiver ativo/minimizado, use `restaurar_aplicativo`. O agente tenta capturar/verificar automaticamente após a restauração; examine essa observação quando estiver no contexto e não peça outra captura se ela já estiver disponível. Faça uma captura manual apenas se a verificação automática não tiver produzido evidência utilizável.
 11. Para descobrir atalhos e processos, use `listar_aplicativos` com `consulta` contendo o nome do programa.
-12. Faça no máximo uma ação que altera a área de trabalho por chamada do modelo. Não repita a mesma chamada quando a ferramenta já informou que a ação foi iniciada; capture e verifique primeiro.
+12. Faça no máximo uma ação que altera a área de trabalho por chamada do modelo. Não repita a mesma chamada quando a ferramenta já informou que a ação foi iniciada. Após uma ação bem-sucedida, verifique a observação automática já anexada; chame `capturar_tela` apenas se não houver verificação recente ou se ela falhou.
 13. Para instalações interativas, confirme visualmente cada tela antes de clicar. Se aparecer EULA/termos legais, pause e mostre ao usuário para ele confirmar antes de aceitar. Não alegue que um programa foi aberto/instalado sem observar o resultado.
 
 ## Encontrar controles pelo propósito, não só pelo idioma
