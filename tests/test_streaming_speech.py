@@ -35,6 +35,12 @@ class SentenceSegmenterTests(unittest.TestCase):
             "Primeira linha", "Segunda linha"
         ])
 
+    def test_splits_sentence_with_closing_quote(self):
+        segmenter = SentenceSegmenter()
+        self.assertEqual(segmenter.feed('A primeira frase.” A segunda.'), [
+            'A primeira frase.”'
+        ])
+
     def test_long_unpunctuated_text_is_released_without_waiting_for_end(self):
         segmenter = SentenceSegmenter(max_chars=40)
         text = "Esta é uma resposta longa sem pontuação " * 3
