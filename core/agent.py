@@ -87,9 +87,9 @@ def _should_reuse_recent_capture(
         return has_fresh_image
     if arguments.get("somente_acessibilidade") is True:
         return has_fresh_accessibility
-    # Uma chamada genérica não declara qual modalidade está faltando: reutilize
-    # qualquer observação recente e peça ao modelo para escolher pixels ou UIA explicitamente.
-    return has_fresh_image or has_fresh_accessibility
+    # A chamada genérica normalmente inclui pixels e UIA: quando só houver UIA,
+    # permita que ela acrescente a imagem. Se a imagem já estiver fresca, evite duplicá-la.
+    return has_fresh_image
 
 
 def _messages_contain_image(messages: list[ChatMessage]) -> bool:
@@ -1397,11 +1397,11 @@ class AuroraAgent:
                         result = ToolResult(
                             ok=True,
                             summary=(
-                                "Captura nova ignorada: já existe uma observação recente da tela no contexto. "
-                                "Nenhuma captura foi executada. Use a observação anterior e prossiga. Se faltam pixels, "
-                                "solicite capturar_tela com somente_imagem=true. Só use somente_acessibilidade=true se "
-                                "UIA ainda não foi tentada desde a última ação; se a leitura anterior informou UIA indisponível "
-                                "ou sem controles úteis, não repita a mesma tentativa sem mudança na interface."
+                                "Captura nova ignorada: a modalidade solicitada já tem uma observação recente no contexto. "
+                                "Nenhuma captura foi executada. Reutilize a evidência disponível. Se ainda não houver pixels, "
+                                "solicite capturar_tela com somente_imagem=true; se UIA ainda não foi tentada desde a última ação, "
+                                "pode solicitar somente_acessibilidade=true. Se os pixels ou a árvore já foram observados e não "
+                                "resolvem o problema, mude a estratégia em vez de repetir a mesma captura."
                             ),
                             data={
                                 "reused_recent_capture": True,
