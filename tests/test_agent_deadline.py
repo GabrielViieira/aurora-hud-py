@@ -28,8 +28,9 @@ from aurora.core.agent import (
     TaskDeadlineExceeded,
     _local_app_intent,
     _should_use_accessibility_only_verification,
+    _unknown_tool_names,
 )
-from aurora.llm.provider import LLMRequest, LLMResponse
+from aurora.llm.provider import LLMRequest, LLMResponse, ToolCall
 
 
 class SlowProvider:
@@ -103,6 +104,34 @@ class AgentDeadlineTests(unittest.TestCase):
         self.assertEqual(
             intent[1]["url"],
             "https://store.steampowered.com/search/?term=hollow+knight",
+        )
+
+    def test_unknown_tool_typo_is_detected_against_registered_names(self):
+        calls = [
+            ToolCall(
+                id="call-1",
+                name="pesificar",
+                arguments={"texto": "Hollow Knight"},
+            )
+        ]
+
+        self.assertEqual(
+            _unknown_tool_names(calls, {"pesquisar", "controlar_teclado"}),
+            ["pesificar"],
+        )
+
+    def test_exact_registered_tool_name_is_not_flagged_as_unknown(self):
+        calls = [
+            ToolCall(
+                id="call-2",
+                name="pesquisar",
+                arguments={"texto": "Hollow Knight"},
+            )
+        ]
+
+        self.assertEqual(
+            _unknown_tool_names(calls, {"pesquisar", "controlar_teclado"}),
+            [],
         )
 
     def test_non_steam_search_is_not_routed_without_llm(self):
