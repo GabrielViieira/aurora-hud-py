@@ -31,8 +31,8 @@ from aurora.core.agent import (
     _is_vision_backend_unreachable,
     _messages_contain_image,
 )
-from aurora.llm.freellm_client import FreeLLMClient
-from aurora.llm.provider import ChatMessage, ErrorKind, ProviderError
+from aurora.llm.freellm_client import FreeLLMClient, _HTTPResult, _parse_dots_function_calls
+from aurora.llm.provider import ChatMessage, ErrorKind, LLMRequest, ProviderError
 
 
 class _FakeGateway:
@@ -76,6 +76,96 @@ class _FakeGateway:
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=5)
+
+
+class DotsFunctionCallParsingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.client = FreeLLMClient("http://127.0.0.1:9999/v1", "test-key", max_retries=0)
+        self.tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "controlar_teclado",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "acao": {"type": "string", "enum": ["digitar", "pressionar", "atalho"]},
+                            "tecla": {"type": "string"},
+                        },
+                        "required": ["acao"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "controlar_mouse",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "acao": {"type": "string"},
+                            "x": {"type": "integer"},
+                        },
+                        "required": ["acao", "x"],
+                    },
+                },
+            },
+        ]
+
+    def _chat_from_text(self, content: str):
+        payload = {
+            "choices": [{"message": {"role": "assistant", "content": content}}],
+            "model": "test-model",
+        }
+        with mock.patch.object(
+            self.client,
+            "_request",
+            return_value=_HTTPResult(200, json.dumps(payload).encode("utf-8"), 5),
+        ):
+            return self.client.chat(LLMRequest(
+                messages=[ChatMessage(role="user", content="Pressione Enter.")],
+                tools=self.tools,
+            ))
+
+    def test_dots_xml_becomes_native_keyboard_tool_call(self):
+        markup = (
+            "<dots_function_call>\\n"
+            '<invoke name="controlar_teclado">\\n'
+            '<parameter name="acao">\\npressionar\\n</parameter>\\n'
+            '<parameter name="tecla">\\nenter\\n</parameter>\\n'
+            "</invoke>\\n</dots_function_call>"
+        )
+        response = self._chat_from_text(markup)
+
+        self.assertEqual(response.text, "")
+        self.assertEqual(len(response.tool_calls), 1)
+        self.assertEqual(response.tool_calls[0].name, "controlar_teclado")
+        self.assertEqual(
+            response.tool_calls[0].arguments,
+            {"acao": "pressionar", "tecla": "enter"},
+        )
+
+    def test_dots_xml_arguments_follow_tool_schema_types(self):
+        markup = (
+            '<dots_function_call><invoke name="controlar_mouse">'
+            '<parameter name="acao">clicar</parameter>'
+            '<parameter name="x">420</parameter>'
+            "</invoke></dots_function_call>"
+        )
+        calls = _parse_dots_function_calls(markup, self.tools)
+
+        self.assertEqual(calls[0].name, "controlar_mouse")
+        self.assertEqual(calls[0].arguments, {"acao": "clicar", "x": 420})
+
+    def test_malformed_dots_markup_is_not_exposed_as_assistant_text(self):
+        response = self._chat_from_text(
+            '<dots_function_call><invoke name="controlar_teclado">'
+        )
+
+        self.assertEqual(response.tool_calls, [])
+        self.assertNotIn("<dots_function_call>", response.text)
+        self.assertIn("formato inválido", response.text)
 
 
 class DynamicApiKeyTests(unittest.TestCase):
