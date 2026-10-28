@@ -1364,7 +1364,7 @@ class AuroraAgent:
                     or (desktop_calls[0] if desktop_calls else "")
                 )
                 desktop_batch_requires_serial = len(desktop_calls) > 1
-                for call in response.tool_calls:
+                for call_index, call in enumerate(response.tool_calls):
                     # Uma única resposta do modelo pode conter várias chamadas; ao cancelar,
                     # não inicie a próxima ferramenta do lote.
                     if self.cancel_event.is_set():
@@ -1496,13 +1496,20 @@ class AuroraAgent:
                             name=call.name,
                         )
                     )
+                    pending_desktop_action = any(
+                        pending_call.name in desktop_tool_names
+                        and pending_call.name != "capturar_tela"
+                        and pending_call.name not in _NON_MUTATING_DESKTOP_TOOLS
+                        for pending_call in response.tool_calls[call_index + 1:]
+                    )
                     if (
                         result.data.get("reused_recent_capture")
                         and redundant_capture_requests >= _MAX_REDUNDANT_CAPTURE_REQUESTS
+                        and not pending_desktop_action
                     ):
                         final_text = (
                             "Interrompi a tarefa porque o modelo pediu novas capturas da tela "
-                            "repetidamente sem realizar uma ação que mudasse a interface. "
+                            "repetidamente sem executar uma ação de desktop que permitisse avançar. "
                             "A observação mais recente continuava disponível no contexto. "
                             "Nenhuma captura adicional foi feita após a primeira repetição bloqueada."
                         )
