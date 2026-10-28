@@ -72,7 +72,7 @@ def _unknown_tool_names(calls: list[ToolCall], available_names: set[str]) -> lis
 
 
 _DESKTOP_ACTION_REQUEST_RE = re.compile(
-    r"\\b(?:instale|instala|instalar|baixe|baixa|baixar|clique|clica|clicar|"
+    r"\b(?:instale|instala|instalar|baixe|baixa|baixar|clique|clica|clicar|"
     r"abra|abre|abrir|pesquise|pesquisa|pesquisar|selecione|seleciona|selecionar|"
     r"digite|digita|digitar|execute|executa|executar|open|install|click|select|"
     r"type|press|launch|download)\\b",
@@ -84,7 +84,7 @@ _INFORMATIONAL_REQUEST_RE = re.compile(
     re.IGNORECASE,
 )
 _UNRESOLVED_DESKTOP_RESPONSE_RE = re.compile(
-    r"\\b(?:maybe|perhaps|let me try|i think|i should|could try|not sure|"
+    r"\b(?:maybe|perhaps|let me try|i think|i should|could try|not sure|"
     r"unavailable|can['’]?t see|cannot see|visual model|i need to|i['’]?ll try|"
     r"might be|maybe i should|try a different approach|"
     r"talvez|pode ser|acho que|preciso tentar|vou tentar|não sei|nao sei|"
@@ -152,8 +152,8 @@ def _compact_primary_vision_request(request: LLMRequest) -> LLMRequest:
             for part in parts
             if isinstance(part, dict) and part.get("type") == "text" and part.get("text")
         ]
-        content = "\\n".join(text_parts).strip()
-        content = (content + "\\n(Captura antiga omitida no fallback visual; use a captura mais recente.)").strip()
+        content = "\n".join(text_parts).strip()
+        content = (content + "\n(Captura antiga omitida no fallback visual; use a captura mais recente.)").strip()
         compact_messages.append(ChatMessage(
             role=message.role, content=content, tool_call_id=message.tool_call_id, name=message.name
         ))
