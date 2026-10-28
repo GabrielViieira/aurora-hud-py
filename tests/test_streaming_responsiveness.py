@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import urllib.error
 import types
 import unittest
 from pathlib import Path
@@ -46,6 +47,20 @@ class _ChunkedResponse:
         if not self._chunks:
             return b""
         return self._chunks.pop(0)
+
+
+class _FailAfterFirstChunkResponse(_ChunkedResponse):
+    """Falha de transporte depois de já entregar um evento SSE."""
+
+    def __init__(self, first_chunk: bytes) -> None:
+        super().__init__([first_chunk])
+        self._first = True
+
+    def read(self, _size: int = -1) -> bytes:
+        if self._first:
+            self._first = False
+            return super().read(_size)
+        raise urllib.error.URLError("conexão interrompida")
 
 
 def _event(payload: dict) -> bytes:
@@ -122,6 +137,26 @@ class StreamingClientTests(unittest.TestCase):
         self.assertEqual(len(response.tool_calls), 1)
         self.assertEqual(response.tool_calls[0].name, "pesquisar")
         self.assertEqual(response.tool_calls[0].arguments, {"consulta": "Steam"})
+
+    def test_partial_stream_is_not_retried_after_text_was_exposed(self):
+        first_event = _event({
+            "choices": [{"index": 0, "delta": {"content": "Começo"}, "finish_reason": None}],
+        })
+        response_source = _FailAfterFirstChunkResponse(first_event)
+        self.client.max_retries = 2
+        emitted: list[str] = []
+        with mock.patch(
+            "urllib.request.urlopen", return_value=response_source
+        ) as urlopen:
+            with self.assertRaises(Exception):
+                self.client.chat(LLMRequest(
+                    messages=[ChatMessage(role="user", content="Oi")],
+                    stream=True,
+                    on_text_delta=emitted.append,
+                ))
+
+        self.assertEqual(emitted, ["Começo"])
+        self.assertEqual(urlopen.call_count, 1)
 
     def test_json_gateway_response_remains_compatible_when_stream_is_requested(self):
         body = json.dumps({

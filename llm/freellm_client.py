@@ -332,6 +332,7 @@ class FreeLLMClient:
             request = urllib.request.Request(
                 url, data=data, headers=headers, method=method
             )
+            stream_started = False
             try:
                 with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
                     if on_chunk is None:
@@ -345,6 +346,7 @@ class FreeLLMClient:
                             chunk = reader(4096)
                             if not chunk:
                                 break
+                            stream_started = True
                             chunks.append(chunk)
                             on_chunk(chunk)
                         body = b"".join(chunks)
@@ -373,7 +375,7 @@ class FreeLLMClient:
                         continue
                 if not last_error.retryable or attempt >= attempts:
                     raise last_error from exc
-            except (urllib.error.URLError, socket.timeout, TimeoutError) as exc:
+            except (urllib.error.URLError, socket.timeout, TimeoutError, http.client.HTTPException) as exc:
                 latency = int((time.perf_counter() - started) * 1000)
                 reason = getattr(exc, "reason", exc)
                 last_error = ProviderError(
@@ -381,7 +383,9 @@ class FreeLLMClient:
                     kind=ErrorKind.TIMEOUT if isinstance(reason, (socket.timeout, TimeoutError)) else ErrorKind.UNAVAILABLE,
                 )
                 self._record(method, path, None, latency, attempt, error=last_error.kind)
-                if attempt >= attempts:
+                # Depois de expor fragmentos ao usuário, repetir toda a resposta duplicaria
+                # texto na HUD. Erros anteriores ao primeiro byte ainda podem ser repetidos.
+                if (on_chunk is not None and stream_started) or attempt >= attempts:
                     raise last_error from exc
             except json.JSONDecodeError as exc:
                 raise ProviderError(
