@@ -1242,11 +1242,11 @@ class AuroraAgent:
                     )
                     tool_elapsed_ms = 0
                     if deferred:
-                        result = ToolResult(
-                            ok=True,
-                            summary=("AÇÃO NÃO EXECUTADA: etapa adiada para manter o ciclo visual "
-                                     "capturar/analisar/agir/verificar em sequência. Execute-a em uma chamada posterior."),
-                            data={"adiada": True},
+                        result = ToolResult.fail(
+                            "AÇÃO NÃO EXECUTADA: etapa adiada para manter o ciclo visual "
+                            "capturar/analisar/agir/verificar em sequência. Esta chamada não foi executada; "
+                            "reavalie a ordem das etapas e solicite-a novamente somente quando for a próxima ação.",
+                            adiada=True,
                         )
                         fatal = False
                     else:
