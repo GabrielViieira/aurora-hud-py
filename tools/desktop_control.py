@@ -16,6 +16,9 @@ from aurora.tools.search_perception import rank_search_candidates
 
 _TOOL_DESCRIPTION_CAPTURE = (
     "Captura um monitor e retorna a imagem, dimensões, origem da captura e geometria da área de trabalho virtual. "
+    "Antes de chamar, reutilize a observação mais recente já anexada ao contexto. Após ações bem-sucedidas, "
+    "o agente normalmente anexa uma verificação automática; não solicite outra captura enquanto essa evidência "
+    "estiver disponível, salvo se ela falhou ou não permite decidir com segurança. "
     "Controles em interface_acessivel usam coordenadas absolutas do desktop; centro_x/centro_y podem ser usados "
     "diretamente quando o nome do controle corresponde ao alvo. Para estimar um ponto pela imagem reduzida, "
     "converta o ponto (u, v) da imagem capturada para desktop: "
