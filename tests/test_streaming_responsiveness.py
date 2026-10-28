@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
-import urllib.error
 import types
 import unittest
 from pathlib import Path
@@ -60,7 +59,7 @@ class _FailAfterFirstChunkResponse(_ChunkedResponse):
         if self._first:
             self._first = False
             return super().read(_size)
-        raise urllib.error.URLError("conexão interrompida")
+        raise ConnectionResetError("conexão interrompida")
 
 
 def _event(payload: dict) -> bytes:

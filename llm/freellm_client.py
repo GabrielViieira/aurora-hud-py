@@ -375,7 +375,7 @@ class FreeLLMClient:
                         continue
                 if not last_error.retryable or attempt >= attempts:
                     raise last_error from exc
-            except (urllib.error.URLError, socket.timeout, TimeoutError, http.client.HTTPException) as exc:
+            except (urllib.error.URLError, socket.timeout, TimeoutError, http.client.HTTPException, OSError) as exc:
                 latency = int((time.perf_counter() - started) * 1000)
                 reason = getattr(exc, "reason", exc)
                 last_error = ProviderError(
