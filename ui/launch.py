@@ -2442,6 +2442,7 @@ class SvgHologram(QMainWindow):
                     f"resposta={len(reply_text)} caracteres."
                 )
                 if status.endswith("CANCELLED"):
+                    self.streamed_text_reset_requested.emit()
                     self.show_caption_requested.emit("Tarefa cancelada.")
                     self.visual_state_requested.emit("idle")
                 elif reply_text:
@@ -2456,7 +2457,7 @@ class SvgHologram(QMainWindow):
                     f"[Aurora tarefa] Exceção após {time.monotonic() - task_started:.1f}s: "
                     f"{type(exc).__name__}: {exc}"
                 )
-                self._reset_streamed_text()
+                self.streamed_text_reset_requested.emit()
                 if self._agent is not None and self._agent.cancel_event.is_set():
                     self.show_caption_requested.emit("Tarefa cancelada.")
                     self.visual_state_requested.emit("idle")
