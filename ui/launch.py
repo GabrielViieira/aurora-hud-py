@@ -2442,6 +2442,7 @@ class SvgHologram(QMainWindow):
             and (not session.closed or session.started)
         ):
             session.cancel()
+            self.streamed_text_reset_requested.emit()
         was_active = self._speech_active
         stop_event = self._active_speech_stop_event
         done = self._active_speech_done
