@@ -1222,7 +1222,6 @@ class AuroraAgent:
                         tool_calls=list(response.tool_calls),
                     )
                     messages.append(assistant)
-                    unknown_tool_recovery_used = unknown_tool_recovery_used
                     retry_allowed = not unknown_tool_recovery_used
                     unknown_tool_recovery_used = True
                     available_text = ", ".join(sorted(available_tool_names)) or "(nenhuma)"
