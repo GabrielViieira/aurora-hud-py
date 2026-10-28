@@ -1,11 +1,9 @@
-"""Primitivas leves para segmentar texto gerado para fala incremental.
-
-O segmento só é liberado em um limite de frase/linha ou quando excede o tamanho
-máximo; isso evita enviar fragmentos de tokens pequenos demais ao TTS.
-"""
+"""Primitivas leves para segmentar texto gerado para fala incremental."""
 from __future__ import annotations
 
+import queue
 import re
+import threading
 
 
 _BOUNDARY_RE = re.compile(r"(?:[.!?。！？…]+\s+|\n+)")
@@ -71,3 +69,42 @@ class SentenceSegmenter:
                 ready.append(segment)
 
         return ready
+
+
+class StreamingSpeechSession:
+    """Estado thread-safe de uma resposta cuja fala é produzida por segmentos."""
+
+    def __init__(self, token: int) -> None:
+        self.token = token
+        self.segmenter = SentenceSegmenter()
+        self.segments: queue.Queue[str | None] = queue.Queue()
+        self.stop_event = threading.Event()
+        self.lock = threading.Lock()
+        self.generation: int | None = None
+        self.started = False
+        self.closed = False
+        self.cancelled = False
+        self.final_state = "completed"
+
+    def feed(self, fragment: str) -> list[str]:
+        with self.lock:
+            if self.closed or self.cancelled or self.stop_event.is_set():
+                return []
+            return self.segmenter.feed(fragment)
+
+    def finish(self, final_state: str = "completed") -> list[str]:
+        with self.lock:
+            if self.closed or self.cancelled or self.stop_event.is_set():
+                return []
+            self.closed = True
+            self.final_state = final_state
+            return self.segmenter.flush()
+
+    def cancel(self) -> None:
+        with self.lock:
+            self.cancelled = True
+            self.closed = True
+            self.stop_event.set()
+            self.segmenter.reset()
+        # Queue ilimitada: o sentinel sempre consegue acordar o consumidor.
+        self.segments.put(None)
