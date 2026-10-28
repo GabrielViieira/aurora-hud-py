@@ -107,10 +107,27 @@ class AgentDeadlineTests(unittest.TestCase):
             "https://store.steampowered.com/search/?term=hollow+knight",
         )
 
-    def test_recent_capture_is_reused_without_a_desktop_change(self):
-        self.assertTrue(_should_reuse_recent_capture("capturar_tela", True))
-        self.assertFalse(_should_reuse_recent_capture("capturar_tela", False))
-        self.assertFalse(_should_reuse_recent_capture("controlar_mouse", True))
+    def test_recent_capture_is_reused_when_requested_evidence_exists(self):
+        self.assertTrue(
+            _should_reuse_recent_capture("capturar_tela", {}, True, True)
+        )
+        self.assertTrue(
+            _should_reuse_recent_capture(
+                "capturar_tela", {"somente_imagem": True}, True, False
+            ) is False
+        )
+        self.assertTrue(
+            _should_reuse_recent_capture(
+                "capturar_tela", {"somente_acessibilidade": True}, False, True
+            )
+        )
+        # UIA alone is not enough to skip a normal capture that could add pixels.
+        self.assertFalse(
+            _should_reuse_recent_capture("capturar_tela", {}, False, True)
+        )
+        self.assertFalse(
+            _should_reuse_recent_capture("controlar_mouse", {}, True, True)
+        )
 
     def test_unknown_tool_typo_is_detected_against_registered_names(self):
         calls = [
