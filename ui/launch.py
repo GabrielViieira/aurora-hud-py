@@ -2437,9 +2437,9 @@ class SvgHologram(QMainWindow):
         session = self._stream_speech_session
         if (
             session is not None
-            and session.started
-            and session.generation == previous_generation
             and not session.cancelled
+            and (session.generation is None or session.generation == previous_generation)
+            and (not session.closed or session.started)
         ):
             session.cancel()
         was_active = self._speech_active
@@ -2769,7 +2769,8 @@ class SvgHologram(QMainWindow):
                 self._task_cancel_pending = True
         if task_active and self._agent is not None:
             self._agent.cancel()
-        if speech_active:
+        if speech_active or task_active:
+            # Também invalida uma sessão de fala que ainda está segmentando a primeira frase.
             self._cancel_speech_output()
         dialog = self._active_approval_dialog
         if task_active and dialog is not None:
