@@ -27,6 +27,7 @@ from aurora.core.agent import (
     AuroraAgent,
     TaskDeadlineExceeded,
     _local_app_intent,
+    _should_reuse_recent_capture,
     _should_use_accessibility_only_verification,
     _unknown_tool_names,
 )
@@ -105,6 +106,11 @@ class AgentDeadlineTests(unittest.TestCase):
             intent[1]["url"],
             "https://store.steampowered.com/search/?term=hollow+knight",
         )
+
+    def test_recent_capture_is_reused_without_a_desktop_change(self):
+        self.assertTrue(_should_reuse_recent_capture("capturar_tela", True))
+        self.assertFalse(_should_reuse_recent_capture("capturar_tela", False))
+        self.assertFalse(_should_reuse_recent_capture("controlar_mouse", True))
 
     def test_unknown_tool_typo_is_detected_against_registered_names(self):
         calls = [
