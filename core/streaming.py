@@ -6,7 +6,7 @@ import re
 import threading
 
 
-_BOUNDARY_RE = re.compile(r"(?:[.!?。！？…]+["'’”)\]]*\s+|\n+)")
+_BOUNDARY_RE = re.compile(r"""(?:[.!?。！？…]+["'’”)\]]*\s+|\n+)""")
 
 
 class SentenceSegmenter:
