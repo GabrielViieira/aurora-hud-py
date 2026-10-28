@@ -413,7 +413,10 @@ def _verification_settle_seconds(name: str, arguments: dict[str, Any]) -> float:
         # Após digitar, dê um instante para o campo refletir o texto na árvore UIA.
         return 0.04
     if name == "controlar_mouse":
-        return 0.12
+        # Steam e outras interfaces web podem animar/posicionar diálogos modais
+        # por algumas centenas de ms. Capturar aos 120 ms permite que o modelo
+        # receba a página anterior e clique nela quando o diálogo já abriu.
+        return 0.45
     return 0.10
 
 
@@ -1595,8 +1598,10 @@ class AuroraAgent:
                                 )
                             vision_attachments.append((
                                 image_url,
-                                f"Captura automática após ação {call.name}. Examine a imagem para recalcular o próximo passo; "
-                                f"o sucesso da chamada não significa, por si só, que o objetivo final foi concluído. "
+                                f"Captura automática após ação {call.name}; este é o estado ATUAL da interface e substitui as coordenadas anteriores. "
+                                "Se abriu um diálogo/modal (por exemplo, instalação na Steam), mantenha-o aberto: não repita o clique anterior, não clique fora dele e não reutilize coordenadas de capturas anteriores. "
+                                "Identifique um controle do diálogo atual; prefira o nome UIA exato quando a correspondência for única. "
+                                f"O sucesso da chamada não significa, por si só, que o objetivo final foi concluído. "
                                 f"{capture_result.summary}{accessibility_note}",
                             ))
                             has_fresh_desktop_image = True

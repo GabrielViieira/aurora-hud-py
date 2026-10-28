@@ -333,8 +333,8 @@ class TypingConfirmationTests(unittest.TestCase):
 class VerificationPolicyTests(unittest.TestCase):
     """A verificação pós-ação deve preferir acessibilidade antes de gastar uma inferência visual."""
 
-    def test_key_press_is_verified_by_accessibility(self):
-        self.assertTrue(
+    def test_enter_uses_visual_verification_after_navigation(self):
+        self.assertFalse(
             _should_use_accessibility_only_verification(
                 "controlar_teclado", {"acao": "pressionar", "tecla": "enter"}
             )
@@ -347,8 +347,8 @@ class VerificationPolicyTests(unittest.TestCase):
             )
         )
 
-    def test_coordinate_click_is_verified_by_accessibility(self):
-        self.assertTrue(
+    def test_coordinate_click_uses_visual_verification_for_dialogs(self):
+        self.assertFalse(
             _should_use_accessibility_only_verification(
                 "controlar_mouse", {"acao": "clicar", "x": 1500, "y": 240}
             )
@@ -372,7 +372,8 @@ class VerificationPolicyTests(unittest.TestCase):
         launch = _verification_settle_seconds("abrir_aplicativo", {"nome": "Steam"})
 
         self.assertGreater(click, typing)
-        self.assertGreaterEqual(click, 0.10)
+        # Um clique pode abrir um diálogo modal; esperar evita capturar a tela anterior.
+        self.assertEqual(click, 0.45)
         self.assertEqual(launch, 0.45)
 
 

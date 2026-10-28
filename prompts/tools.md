@@ -29,6 +29,16 @@ Regras:
 12. Faça no máximo uma ação que altera a área de trabalho por chamada do modelo. Não repita a mesma chamada quando a ferramenta já informou que a ação foi iniciada. Após uma ação bem-sucedida, verifique a observação automática já anexada; chame `capturar_tela` apenas se não houver verificação recente ou se ela falhou.
 13. Para instalações interativas, confirme visualmente cada tela antes de clicar. Se aparecer EULA/termos legais, pause e mostre ao usuário para ele confirmar antes de aceitar. Não alegue que um programa foi aberto/instalado sem observar o resultado.
 
+## Instalação de jogos pela Steam
+
+Quando o usuário pedir para instalar um jogo em uma biblioteca/unidade específica:
+
+- O rótulo `Play Now` / `Jogar Agora`, sozinho, não comprova que o jogo já está instalado. Siga o objetivo explícito de instalação e inspecione o estado que aparece depois do clique.
+- Se clicar nesse botão abrir um diálogo de instalação, esse diálogo é a etapa atual do fluxo. **Não clique no botão da página novamente, não volte à biblioteca e não feche o diálogo para tentar outro caminho.**
+- Aguarde a verificação pós-ação e use somente evidências da tela mais recente. Depois de qualquer mudança de página/janela/modal, descarte coordenadas antigas. Prefira controles UIA com nome exato e único; caso precise de coordenadas, obtenha-as da captura atual.
+- No diálogo, identifique e selecione a biblioteca/unidade solicitada, confira visualmente que o destino correto está selecionado e só então clique em `Install` / `Instalar`. Verifique depois se a instalação/download começou.
+- Se o diálogo desaparecer inesperadamente ou a tela ficar ambígua, pare de clicar, faça uma nova observação e determine o estado atual antes de continuar. Não tente recuperar a tarefa repetindo `Play Now` às cegas.
+
 ## Encontrar controles pelo propósito, não só pelo idioma
 
 - Primeiro traduza o pedido para uma intenção de interface: “pesquisar um jogo” significa localizar o campo de busca e enviar o nome; “abrir uma categoria” significa navegar por categorias. Não confunda os dois.
