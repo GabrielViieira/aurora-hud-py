@@ -201,6 +201,16 @@ def _messages_contain_image(messages: list[ChatMessage]) -> bool:
                 return True
     return False
 
+
+def _should_stream_response_preview(
+    enabled: bool, user_text: str, messages: list[ChatMessage]
+) -> bool:
+    """Evita transmitir prévias de imagem/ações de desktop para a HUD."""
+    if not enabled or _messages_contain_image(messages):
+        return False
+    return not bool(_DESKTOP_ACTION_REQUEST_RE.search(user_text or ""))
+
+
 def _has_useful_accessibility_snapshot(messages: list[ChatMessage]) -> bool:
     """Retorna True se uma mensagem de ferramenta contém controles UIA utilizáveis."""
     for message in messages:
@@ -1223,9 +1233,9 @@ class AuroraAgent:
                 # Não expor texto parcial de decisões de desktop/visão: o streaming
                 # interativo fica restrito a turnos de conversa sem pedido de ação.
                 stream_preview_allowed = (
-                    bool(getattr(self.settings.llm, "stream", False))
-                    and not is_vision_input
-                    and not _DESKTOP_ACTION_REQUEST_RE.search(text)
+                    _should_stream_response_preview(
+                        bool(getattr(self.settings.llm, "stream", False)), text, messages
+                    )
                     and not self.cancel_event.is_set()
                 )
                 request = LLMRequest(
