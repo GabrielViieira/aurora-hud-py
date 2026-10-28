@@ -781,6 +781,9 @@ class SvgHologram(QMainWindow):
         self._allow_close = False
         self._close_prompt_active = False
         self._response_panel: Optional[ResponsePanel] = None
+        # Respostas curtas ficam na legenda da HUD; respostas extensas usam o painel rolável.
+        self._streamed_display_text = ""
+        self._streamed_display_in_panel = False
         self.approval_requested.connect(
             self._show_approval_dialog, Qt.ConnectionType.QueuedConnection
         )
@@ -1034,22 +1037,70 @@ class SvgHologram(QMainWindow):
 
     @Slot(str)
     def _show_streamed_text(self, fragment: str) -> None:
+        """Mostra a resposta na HUD e abre o painel lateral apenas para textos longos."""
         if not fragment or not self.isVisible():
             return
-        if self._response_panel is None:
-            self._response_panel = ResponsePanel(self)
-        if not self._response_panel.isVisible():
-            self._response_panel.set_response("")
-            target = self.frameGeometry().topRight() + QPoint(12, 0)
-            self._response_panel.move(target)
-            self._response_panel.show()
-            self._response_panel.raise_()
-        self._response_panel.append_streamed_text(fragment)
+
+        self._streamed_display_text += fragment
+        if self._streamed_display_in_panel:
+            if self._response_panel is not None:
+                self._response_panel.append_streamed_text(fragment)
+            return
+
+        # Mantém o comportamento de leitura rolável para respostas realmente longas,
+        # mas não abre uma janela separada para cada resposta curta.
+        if len(self._streamed_display_text) > 420 or self._streamed_display_text.count("\n") >= 5:
+            self._streamed_display_in_panel = True
+            self.caption_hide_timer.stop()
+            self.caption_anim_timer.stop()
+            self.caption_label.hide()
+            self._show_response_panel(self._streamed_display_text)
+            return
+
+        self._update_streamed_main_caption()
+
+    def _update_streamed_main_caption(self) -> None:
+        text = f"Aurora: {self._streamed_display_text}"
+        self.caption_hide_timer.stop()
+
+        was_visible = self.caption_label.isVisible()
+        if not was_visible:
+            self.show_caption(text, duration_ms=60_000)
+            return
+
+        # Atualiza o texto sem reiniciar o fade a cada token recebido.
+        self._caption_fading_out = False
+        self.caption_label.setText(text)
+        self.caption_label.adjustSize()
+        label_rect = self.caption_label.sizeHint()
+        x = (self.width() - label_rect.width()) // 2
+        y = self.height() - label_rect.height() - max(16, int(self.height() * 0.08))
+        self.caption_label.move(max(10, x), max(10, y))
+        self._apply_caption_style(self._caption_alpha)
+
+        if self._caption_alpha < 255:
+            self._caption_fading_in = True
+            if not self.caption_anim_timer.isActive():
+                self.caption_anim_timer.start()
+        else:
+            self._caption_fading_in = False
+            if self.caption_anim_timer.isActive():
+                self.caption_anim_timer.stop()
 
     @Slot()
     def _reset_streamed_text(self) -> None:
+        self._streamed_display_text = ""
+        self._streamed_display_in_panel = False
         if self._response_panel is not None:
             self._response_panel.hide()
+        if hasattr(self, "caption_label") and self.caption_label.isVisible():
+            self.caption_hide_timer.stop()
+            self.caption_anim_timer.stop()
+            self._caption_fading_in = False
+            self._caption_fading_out = False
+            self._caption_alpha = 0
+            self.caption_label.hide()
+            self._apply_caption_style(0)
 
     def _stream_session_for_token(self, token: int) -> Optional[StreamingSpeechSession]:
         with self._stream_session_lock:
