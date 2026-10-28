@@ -1323,8 +1323,17 @@ class AuroraAgent:
                 }
                 desktop_calls = [call.name for call in response.tool_calls if call.name in desktop_tool_names]
                 preferred_desktop_tool = (
-                    next((name for name in ("abrir_aplicativo", "restaurar_aplicativo", "abrir_url") if name in desktop_calls), "")
-                    or ("capturar_tela" if "capturar_tela" in desktop_calls else (desktop_calls[0] if desktop_calls else ""))
+                    next(
+                        (name for name in ("abrir_aplicativo", "restaurar_aplicativo", "abrir_url")
+                         if name in desktop_calls),
+                        "",
+                    )
+                    or (
+                        next((name for name in desktop_calls if name != "capturar_tela"), "")
+                        if has_fresh_desktop_observation
+                        else ("capturar_tela" if "capturar_tela" in desktop_calls else "")
+                    )
+                    or (desktop_calls[0] if desktop_calls else "")
                 )
                 desktop_batch_requires_serial = len(desktop_calls) > 1
                 for call in response.tool_calls:
@@ -1348,15 +1357,7 @@ class AuroraAgent:
                         and call.name != preferred_desktop_tool
                     )
                     tool_elapsed_ms = 0
-                    if deferred:
-                        result = ToolResult.fail(
-                            "AÇÃO NÃO EXECUTADA: etapa adiada para manter o ciclo visual "
-                            "capturar/analisar/agir/verificar em sequência. Esta chamada não foi executada; "
-                            "reavalie a ordem das etapas e solicite-a novamente somente quando for a próxima ação.",
-                            adiada=True,
-                        )
-                        fatal = False
-                    elif _should_reuse_recent_capture(
+                    if _should_reuse_recent_capture(
                         call.name, has_fresh_desktop_observation
                     ):
                         # A imagem/árvore da observação anterior já está no contexto do modelo.
@@ -1387,6 +1388,14 @@ class AuroraAgent:
                             "[Aurora agente] Captura redundante ignorada; "
                             f"solicitações repetidas={redundant_capture_requests}."
                         )
+                    elif deferred:
+                        result = ToolResult.fail(
+                            "AÇÃO NÃO EXECUTADA: etapa adiada para manter o ciclo visual "
+                            "capturar/analisar/agir/verificar em sequência. Esta chamada não foi executada; "
+                            "reavalie a ordem das etapas e solicite-a novamente somente quando for a próxima ação.",
+                            adiada=True,
+                        )
+                        fatal = False
                     else:
                         tool_started = time.perf_counter()
                         guarded_action = False
