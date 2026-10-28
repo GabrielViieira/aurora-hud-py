@@ -130,11 +130,11 @@ class DotsFunctionCallParsingTests(unittest.TestCase):
 
     def test_dots_xml_becomes_native_keyboard_tool_call(self):
         markup = (
-            "<dots_function_call>\\n"
-            '<invoke name="controlar_teclado">\\n'
-            '<parameter name="acao">\\npressionar\\n</parameter>\\n'
-            '<parameter name="tecla">\\nenter\\n</parameter>\\n'
-            "</invoke>\\n</dots_function_call>"
+            "<dots_function_call>\n"
+            '<invoke name="controlar_teclado">\n'
+            '<parameter name="acao">\npressionar\n</parameter>\n'
+            '<parameter name="tecla">\nenter\n</parameter>\n'
+            "</invoke>\n</dots_function_call>"
         )
         response = self._chat_from_text(markup)
 
