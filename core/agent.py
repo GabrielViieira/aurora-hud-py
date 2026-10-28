@@ -389,20 +389,19 @@ def _is_action_tool(name: str, spec: Any) -> bool:
     )
 
 def _should_use_accessibility_only_verification(name: str, arguments: dict[str, Any]) -> bool:
-    """Escolhe verificação pós-ação rápida quando pixels não são necessários para o próximo passo.
+    """Usa UIA sozinha apenas quando ela normalmente comprova a ação sem precisar de pixels.
 
-    A ferramenta `capturar_tela` com `somente_acessibilidade` já captura a imagem
-    sozinha quando o UIA não devolve controles úteis, então preferir a árvore de
-    acessibilidade não é verificação cega: é tentar o caminho de 0,6s antes do de 13s.
+    Depois de cliques ou teclas de navegação, a próxima decisão costuma depender do
+    conteúdo visual da janela. Anexar pixels nessa primeira verificação evita que o
+    modelo peça uma segunda captura logo em seguida. Para digitação de texto, a leitura
+    do campo costuma confirmar o resultado sem precisar codificar a imagem.
     """
     action = str(arguments.get("acao", "")).strip().lower()
     if name == "controlar_teclado":
-        # digitar e pressionar tecla mudam o estado que o UIA já expõe.
-        return action in {"digitar", "pressionar"}
+        return action == "digitar"
+    # Cliques podem navegar para outra página/diálogo; valide o resultado por imagem.
     if name == "controlar_mouse":
-        # Clique por coordenada também: se nada mudar na árvore, a ferramenta
-        # devolve imagem por conta própria.
-        return action in {"clicar", "duplo_clique", "clique_direito"}
+        return False
     return False
 
 
