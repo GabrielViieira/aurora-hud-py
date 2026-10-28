@@ -111,10 +111,10 @@ class AgentDeadlineTests(unittest.TestCase):
         self.assertTrue(
             _should_reuse_recent_capture("capturar_tela", {}, True, True)
         )
-        self.assertTrue(
+        self.assertFalse(
             _should_reuse_recent_capture(
                 "capturar_tela", {"somente_imagem": True}, True, False
-            ) is False
+            )
         )
         self.assertTrue(
             _should_reuse_recent_capture(
