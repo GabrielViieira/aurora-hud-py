@@ -1026,7 +1026,7 @@ class AuroraAgent:
         unknown_tool_recovery_used = False
         # Rastreamento por modalidade: UIA rápida não substitui uma imagem quando os pixels são necessários.
         has_fresh_desktop_image = False
-        has_fresh_accessibility_snapshot = False
+        has_fresh_accessibility_attempt = False
         redundant_capture_requests = 0
         # Conta execuções reais por assinatura durante este turno, não apenas falhas.
         action_call_counts: dict[str, int] = {}
@@ -1346,7 +1346,7 @@ class AuroraAgent:
                         requested_capture.name,
                         requested_capture.arguments,
                         has_fresh_desktop_image,
-                        has_fresh_accessibility_snapshot,
+                        has_fresh_accessibility_attempt,
                     )
                 )
                 preferred_desktop_tool = (
@@ -1389,7 +1389,7 @@ class AuroraAgent:
                         call.name,
                         call.arguments,
                         has_fresh_desktop_image,
-                        has_fresh_accessibility_snapshot,
+                        has_fresh_accessibility_attempt,
                     ):
                         # A imagem/árvore da observação anterior já está no contexto do modelo.
                         # Não pague outra captura até que uma ação realmente altere a tela.
@@ -1457,7 +1457,7 @@ class AuroraAgent:
                                 # Ação real altera o estado desktop; as duas modalidades ficam obsoletas.
                                 # O contador de capturas redundantes permanece acumulado na tarefa.
                                 has_fresh_desktop_image = False
-                                has_fresh_accessibility_snapshot = False
+                                has_fresh_accessibility_attempt = False
                         tool_elapsed_ms = round((time.perf_counter() - tool_started) * 1000)
                     print(
                         f"[Aurora agente] Ferramenta concluída: {call.name}; "
@@ -1472,21 +1472,19 @@ class AuroraAgent:
                             captured_image = (
                                 isinstance(image_url, str) and image_url.startswith("data:image/")
                             )
-                            captured_accessibility = bool(
-                                isinstance(snapshot, dict)
-                                and snapshot.get("disponivel")
-                                and isinstance(elements, list)
-                                and elements
+                            accessibility_was_attempted = (
+                                result.data.get("modo_uia") != "omitida_captura_rapida"
                             )
-                            # Uma captura pode acrescentar pixels ou UIA. Não invalide a outra
+                            # Uma captura pode acrescentar pixels ou registrar a tentativa de UIA,
+                            # mesmo que o Windows não exponha controles úteis. Não invalide a outra
                             # modalidade enquanto nenhuma ação mutável tiver ocorrido.
                             has_fresh_desktop_image = has_fresh_desktop_image or captured_image
-                            has_fresh_accessibility_snapshot = (
-                                has_fresh_accessibility_snapshot or captured_accessibility
+                            has_fresh_accessibility_attempt = (
+                                has_fresh_accessibility_attempt or accessibility_was_attempted
                             )
                             if captured_image:
                                 vision_attachments.append((image_url, result.summary))
-                            if captured_image or captured_accessibility:
+                            if captured_image or accessibility_was_attempted:
                                 redundant_capture_requests = 0
                     if not result.data.get("capture_skipped"):
                         tools_used.append(call.name)
@@ -1568,11 +1566,8 @@ class AuroraAgent:
                                 f"o sucesso da chamada não significa, por si só, que o objetivo final foi concluído. {capture_result.summary}",
                             ))
                             has_fresh_desktop_image = True
-                            has_fresh_accessibility_snapshot = bool(
-                                isinstance(ui_snapshot, dict)
-                                and ui_snapshot.get("disponivel")
-                                and isinstance(ui_elements, list)
-                                and ui_elements
+                            has_fresh_accessibility_attempt = (
+                                capture_result.data.get("modo_uia") != "omitida_captura_rapida"
                             )
                             verification_kind = "imagem"
                         elif (
@@ -1615,7 +1610,7 @@ class AuroraAgent:
                                 ),
                             ))
                             has_fresh_desktop_image = False
-                            has_fresh_accessibility_snapshot = True
+                            has_fresh_accessibility_attempt = True
                             verification_kind = f"UIA/{len(compact_elements)} controles"
                             print(
                                 "[Aurora agente] Verificação rápida concluída via UI Automation; "
@@ -1623,7 +1618,7 @@ class AuroraAgent:
                             )
                         else:
                             has_fresh_desktop_image = False
-                            has_fresh_accessibility_snapshot = False
+                            has_fresh_accessibility_attempt = False
                             detail = capture_result.error or capture_result.summary or "a captura não retornou evidência válida"
                             vision_warnings.append(
                                 f"A ação {call.name} foi executada, mas a verificação automática falhou: {detail}. "
