@@ -1468,19 +1468,24 @@ class AuroraAgent:
                             image_url = result.data.pop("data_url", "")
                             snapshot = result.data.get("interface_acessivel", {})
                             elements = snapshot.get("elementos", []) if isinstance(snapshot, dict) else []
-                            has_fresh_desktop_image = (
+                            captured_image = (
                                 isinstance(image_url, str) and image_url.startswith("data:image/")
                             )
-                            has_fresh_accessibility_snapshot = bool(
+                            captured_accessibility = bool(
                                 isinstance(snapshot, dict)
                                 and snapshot.get("disponivel")
                                 and isinstance(elements, list)
                                 and elements
                             )
-                            if has_fresh_desktop_image:
+                            # Uma captura pode acrescentar pixels ou UIA. Não invalide a outra
+                            # modalidade enquanto nenhuma ação mutável tiver ocorrido.
+                            has_fresh_desktop_image = has_fresh_desktop_image or captured_image
+                            has_fresh_accessibility_snapshot = (
+                                has_fresh_accessibility_snapshot or captured_accessibility
+                            )
+                            if captured_image:
                                 vision_attachments.append((image_url, result.summary))
-                                redundant_capture_requests = 0
-                            elif has_fresh_accessibility_snapshot:
+                            if captured_image or captured_accessibility:
                                 redundant_capture_requests = 0
                     if not result.data.get("capture_skipped"):
                         tools_used.append(call.name)
