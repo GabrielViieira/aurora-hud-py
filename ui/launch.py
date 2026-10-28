@@ -69,6 +69,7 @@ from aurora.core.streaming import StreamingSpeechSession
 from aurora.core.control_commands import classify_hud_control_command
 from aurora.ui.assistant_panel import AssistantPanelDialog
 from aurora.ui.hud_preferences import load_hud_preferences, save_hud_preferences
+from aurora.ui.window_overlay import set_window_topmost
 from PySide6.QtCore import (
     QPoint,
     QRectF,
@@ -758,6 +759,7 @@ class SvgHologram(QMainWindow):
         self._stream_speech_session: Optional[StreamingSpeechSession] = None
         self._allow_close = False
         self._close_prompt_active = False
+        self._topmost_error_reported = False
         self._response_panel: Optional[ResponsePanel] = None
         # Respostas curtas ficam na legenda da HUD; respostas extensas usam o painel rolável.
         self._streamed_display_text = ""
@@ -804,6 +806,12 @@ class SvgHologram(QMainWindow):
         self.animation_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.animation_timer.timeout.connect(self.svg_widget.advance_animation)
         self.animation_timer.start(16)
+
+        # Reafirma a prioridade da janela no Windows sem ativá-la nem roubar foco.
+        self.topmost_timer = QTimer(self)
+        self.topmost_timer.setInterval(1200)
+        self.topmost_timer.timeout.connect(self._enforce_topmost)
+        self.topmost_timer.start()
 
         self.recognized_text.connect(self.show_recognized_text)
         self.voice_status.connect(self.show_voice_status)
@@ -2680,6 +2688,38 @@ class SvgHologram(QMainWindow):
         if text:
             self.speak_requested.emit(text)
 
+    def _enforce_topmost(self) -> None:
+        """Mantém a HUD no topo sem ativar a janela, inclusive quando um jogo ganha foco."""
+        if not self.isVisible():
+            return
+
+        target = self
+        # Painéis abertos intencionalmente devem ficar acima da própria HUD.
+        for candidate in (self._assistant_panel, self._response_panel):
+            if candidate is not None and candidate.isVisible():
+                target = candidate
+                break
+
+        try:
+            target.raise_()
+            if os.name == "nt":
+                hwnd = int(target.winId())
+                if not set_window_topmost(hwnd) and not self._topmost_error_reported:
+                    self._topmost_error_reported = True
+                    print(
+                        "[Aurora UI] Não foi possível reafirmar HWND_TOPMOST. "
+                        "Se um jogo estiver em tela cheia exclusiva, use janela sem bordas."
+                    )
+        except Exception as exc:
+            if not self._topmost_error_reported:
+                self._topmost_error_reported = True
+                print(f"[Aurora UI] Falha ao manter o overlay no topo: {exc}")
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        # A janela nativa só está garantidamente criada após o showEvent.
+        QTimer.singleShot(0, self._enforce_topmost)
+
     def _enforce_fixed_size(self) -> None:
         try:
             if hasattr(self, "_base_size") and self._base_size is not None:
@@ -3130,6 +3170,7 @@ class SvgHologram(QMainWindow):
             return
 
         self.animation_timer.stop()
+        self.topmost_timer.stop()
         self.stop_listening()
         self._shutdown_gpt_sovits_direct()
         self._shutdown_gpt_sovits_api()

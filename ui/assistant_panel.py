@@ -45,7 +45,10 @@ class AssistantPanelDialog(QDialog):
         is_busy: Callable[[], bool],
         on_session_deleted: Callable[[str | None], Any],
     ) -> None:
-        super().__init__(parent, Qt.WindowType.Window)
+        super().__init__(
+            parent,
+            Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint,
+        )
         self.setWindowTitle("Aurora — painel")
         self.resize(820, 560)
         self.setMinimumSize(680, 440)
