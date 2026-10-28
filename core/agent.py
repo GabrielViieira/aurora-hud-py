@@ -87,9 +87,9 @@ def _should_reuse_recent_capture(
         return has_fresh_image
     if arguments.get("somente_acessibilidade") is True:
         return has_fresh_accessibility_attempt
-    # A chamada genérica normalmente inclui pixels e UIA: quando só houver UIA,
-    # permita que ela acrescente a imagem. Se a imagem já estiver fresca, evite duplicá-la.
-    return has_fresh_image
+    # Uma chamada genérica não especifica o que falta. Reutilize qualquer observação
+    # recente e peça ao modelo para indicar explicitamente a modalidade ausente.
+    return has_fresh_image or has_fresh_accessibility_attempt
 
 
 def _messages_contain_image(messages: list[ChatMessage]) -> bool:
@@ -1455,10 +1455,11 @@ class AuroraAgent:
                                 action_call_counts[signature] = attempts + 1
                             result, fatal = self._run_tool(call, task, ctx)
                             if guarded_action and result.ok:
-                                # Ação real altera o estado desktop; as duas modalidades ficam obsoletas.
-                                # O contador de capturas redundantes permanece acumulado na tarefa.
+                                # Ação real pode mudar a tela: ambas as observações ficam obsoletas.
+                                # Reinicie a sequência de capturas redundantes após uma ação de verdade.
                                 has_fresh_desktop_image = False
                                 has_fresh_accessibility_attempt = False
+                                redundant_capture_requests = 0
                         tool_elapsed_ms = round((time.perf_counter() - tool_started) * 1000)
                     print(
                         f"[Aurora agente] Ferramenta concluída: {call.name}; "
