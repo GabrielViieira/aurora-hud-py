@@ -73,26 +73,24 @@ class AgentDeadlineTests(unittest.TestCase):
             )
         )
 
-    def test_named_accessible_click_uses_accessibility_only_verification(self):
-        self.assertTrue(
+    def test_named_accessible_click_uses_visual_verification(self):
+        self.assertFalse(
             _should_use_accessibility_only_verification(
                 "controlar_mouse", {"acao": "clicar", "controle": "Search"}
             )
         )
 
-    def test_coordinate_click_uses_accessibility_only_verification(self):
-        # Mudança de política (2026-10-26): clique por coordenada também tenta UIA
-        # primeiro. Se a árvore não tiver controles úteis, a própria ferramenta
-        # captura a imagem como fallback, então a verificação continua existindo —
-        # só deixa de custar uma inferência de visão (~13s) quando é dispensável.
-        self.assertTrue(
+    def test_coordinate_click_uses_visual_verification(self):
+        # Cliques podem mudar página ou abrir diálogo; a verificação automática inclui pixels.
+        self.assertFalse(
             _should_use_accessibility_only_verification(
                 "controlar_mouse", {"acao": "clicar", "x": 420, "y": 250}
             )
         )
 
-    def test_enter_uses_accessibility_only_verification(self):
-        self.assertTrue(
+    def test_enter_uses_visual_verification(self):
+        # Enter frequentemente envia busca ou confirma navegação; priorize uma imagem após a ação.
+        self.assertFalse(
             _should_use_accessibility_only_verification(
                 "controlar_teclado", {"acao": "pressionar", "tecla": "enter"}
             )
