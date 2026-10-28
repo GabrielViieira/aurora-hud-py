@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import re
 import socket
 import time
 import urllib.error
@@ -43,6 +44,112 @@ class _HTTPResult:
     status: int
     body: bytes
     latency_ms: int
+
+
+_DOTS_BLOCK_RE = re.compile(
+    r"<dots_function_call>\s*(.*?)\s*</dots_function_call>", re.DOTALL
+)
+_DOTS_INVOKE_RE = re.compile(
+    r"<invoke\s+name\s*=\s*[\"']([^\"']+)[\"']\s*>(.*?)</invoke>",
+    re.DOTALL,
+)
+_DOTS_PARAMETER_RE = re.compile(
+    r"<parameter\s+name\s*=\s*[\"']([^\"']+)[\"']\s*>(.*?)</parameter>",
+    re.DOTALL,
+)
+
+
+def _convert_dots_argument(value: str, schema: dict[str, Any]) -> Any:
+    """Converte o valor textual do formato Dots segundo o esquema JSON da ferramenta."""
+    value = value.strip()
+    kind = schema.get("type", "string")
+    if isinstance(kind, list):
+        kind = next((item for item in kind if item != "null"), "string")
+
+    if kind == "string" or not value:
+        return value
+    if kind == "boolean":
+        if value.casefold() == "true":
+            return True
+        if value.casefold() == "false":
+            return False
+        return value
+    if kind == "integer":
+        try:
+            return int(value)
+        except ValueError:
+            return value
+    if kind == "number":
+        try:
+            number = json.loads(value)
+            return number if isinstance(number, (int, float)) and not isinstance(number, bool) else value
+        except (json.JSONDecodeError, TypeError):
+            return value
+    if kind in {"array", "object"}:
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return value
+        if kind == "array" and isinstance(parsed, list):
+            return parsed
+        if kind == "object" and isinstance(parsed, dict):
+            return parsed
+    return value
+
+
+def _parse_dots_function_calls(
+    content: str, tool_schemas: list[dict[str, Any]]
+) -> list[ToolCall]:
+    """Converte chamadas Dots em XML para chamadas nativas, usando esquemas OpenAI."""
+    blocks = list(_DOTS_BLOCK_RE.finditer(content))
+    if not blocks:
+        raise ValueError("nenhum bloco <dots_function_call> completo foi encontrado")
+    if (
+        content.count("<dots_function_call>") != len(blocks)
+        or content.count("</dots_function_call>") != len(blocks)
+    ):
+        raise ValueError("blocos <dots_function_call> incompletos ou malformados")
+
+    schemas_by_name: dict[str, dict[str, Any]] = {}
+    for item in tool_schemas:
+        function = item.get("function") or {}
+        name = function.get("name")
+        if isinstance(name, str):
+            schemas_by_name[name] = function.get("parameters") or {}
+
+    calls: list[ToolCall] = []
+    call_prefix = f"dots-{int(time.time() * 1000)}"
+    for block_index, block in enumerate(blocks, start=1):
+        body = block.group(1)
+        invokes = list(_DOTS_INVOKE_RE.finditer(body))
+        if not invokes or re.sub(_DOTS_INVOKE_RE, "", body).strip():
+            raise ValueError("o bloco Dots contém invocações inválidas ou conteúdo inesperado")
+
+        for invoke in invokes:
+            name = invoke.group(1).strip()
+            if not name:
+                raise ValueError("a invocação Dots não contém o nome da ferramenta")
+            parameters_schema = schemas_by_name.get(name, {}).get("properties") or {}
+            arguments: dict[str, Any] = {}
+            parameter_matches = list(_DOTS_PARAMETER_RE.finditer(invoke.group(2)))
+            if re.sub(_DOTS_PARAMETER_RE, "", invoke.group(2)).strip():
+                raise ValueError(f"parâmetros inválidos na chamada Dots para {name}")
+            for parameter in parameter_matches:
+                key = parameter.group(1).strip()
+                if not key or key in arguments:
+                    raise ValueError(f"parâmetro vazio ou duplicado na chamada Dots para {name}")
+                arguments[key] = _convert_dots_argument(
+                    parameter.group(2), parameters_schema.get(key) or {}
+                )
+            calls.append(
+                ToolCall(
+                    id=f"{call_prefix}-{block_index}-{len(calls) + 1}",
+                    name=name,
+                    arguments=arguments,
+                    raw_arguments=json.dumps(arguments, ensure_ascii=False),
+                )
+            )
+    return calls
 
 
 class FreeLLMClient:
@@ -309,6 +416,37 @@ class FreeLLMClient:
             text = "".join(part.get("text", "") for part in text if isinstance(part, dict))
         tool_calls = [self._parse_tool_call(item) for item in (message.get("tool_calls") or [])]
         tool_calls = [call for call in tool_calls if call is not None]
+
+        # Alguns modelos (incluindo modelos da família Dots) emitem chamadas
+        # no corpo textual como XML. Se o gateway não as normalizou em
+        # message.tool_calls, converta-as aqui antes de o agente ver o texto.
+        if "<dots_function_call>" in text:
+            if tool_calls:
+                text = _DOTS_BLOCK_RE.sub("", text).strip()
+            elif request.tools:
+                try:
+                    tool_calls = _parse_dots_function_calls(text, request.tools)
+                    text = _DOTS_BLOCK_RE.sub("", text).strip()
+                    logger.info(
+                        "Chamadas Dots em XML convertidas para tool_calls nativas",
+                        extra={"aurora": {"tool_calls": len(tool_calls)}},
+                    )
+                except (ValueError, re.error) as exc:
+                    logger.warning(
+                        "resposta contém chamada Dots inválida; nenhuma ação será executada: %s",
+                        str(exc)[:180],
+                    )
+                    text = (
+                        "O modelo retornou uma chamada de ferramenta em formato inválido. "
+                        "Nenhuma ação foi executada. Tente novamente."
+                    )
+            else:
+                # Não exponha o protocolo interno de ferramentas como resposta ao usuário,
+                # especialmente na rota visual local, que não recebe esquemas de ferramentas.
+                text = (
+                    "O modelo retornou uma chamada de ferramenta onde era esperada uma resposta textual. "
+                    "Nenhuma ação foi executada."
+                )
 
         usage_data = data.get("usage") or {}
         usage = Usage(
