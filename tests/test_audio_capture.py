@@ -1,8 +1,23 @@
 """Testes offline da conversão de áudio do microfone para PCM do Vosk."""
 from __future__ import annotations
 
+import sys
+import types
 import struct
 import unittest
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if "aurora" in sys.modules:
+    _package = sys.modules["aurora"]
+    _paths = getattr(_package, "__path__", None)
+    if _paths is not None and str(_REPO_ROOT) not in _paths:
+        _paths.insert(0, str(_REPO_ROOT))
+else:
+    _package = types.ModuleType("aurora")
+    _package.__path__ = [str(_REPO_ROOT)]
+    sys.modules["aurora"] = _package
+sys.path.insert(0, str(_REPO_ROOT.parent))
 
 from aurora.ui.audio_capture import to_vosk_pcm16
 

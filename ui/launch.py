@@ -1652,6 +1652,7 @@ class SvgHologram(QMainWindow):
             print(f"[Aurora preferências] Não foi possível aplicar configuração de streaming: {exc}")
 
     def _save_hud_preferences(self, values: dict) -> dict:
+        previous_device = str(self._hud_preferences.get("microphone_device", "default") or "default")
         self._hud_preferences = save_hud_preferences(self._hud_preferences_path, values)
         if hasattr(self, "voice_listener"):
             self.voice_listener.set_conversation_timeout(
@@ -1660,9 +1661,8 @@ class SvgHologram(QMainWindow):
             self.voice_listener.set_input_gain_percent(
                 self._hud_preferences.get("microphone_gain_percent", 125)
             )
-            old_device = str(values.get("microphone_device", "default") or "default")
             new_device = str(self._hud_preferences.get("microphone_device", "default") or "default")
-            if old_device != new_device:
+            if previous_device != new_device:
                 thread = self.voice_listener._thread
                 was_running = bool(thread and thread.is_alive())
                 if was_running:
