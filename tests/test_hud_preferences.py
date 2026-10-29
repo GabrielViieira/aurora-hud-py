@@ -50,11 +50,13 @@ class HudPreferencesTests(unittest.TestCase):
                 "speech_volume_percent": 80,
                 "speech_rate": 175,
                 "response_panel_threshold": 300,
+                "conversation_timeout_seconds": 90,
             })
             loaded = load_hud_preferences(path)
         self.assertEqual(loaded, saved)
         self.assertFalse(loaded["speech_enabled"])
         self.assertFalse(loaded["long_responses_in_panel"])
+        self.assertEqual(loaded["conversation_timeout_seconds"], 90)
         self.assertNotIn("api_key", loaded)
 
     def test_corrupt_file_uses_defaults(self):

@@ -16,6 +16,7 @@ def default_hud_preferences(streaming_enabled: bool = True) -> dict[str, Any]:
         "speech_volume_percent": 100,
         "speech_rate": 165,
         "response_panel_threshold": 260,
+        "conversation_timeout_seconds": 60,
     }
 
 
@@ -36,6 +37,7 @@ def normalize_hud_preferences(
             "speech_volume_percent": (25, 125),
             "speech_rate": (100, 220),
             "response_panel_threshold": (160, 600),
+            "conversation_timeout_seconds": (15, 600),
         }
         for key, (minimum, maximum) in bounds.items():
             try:

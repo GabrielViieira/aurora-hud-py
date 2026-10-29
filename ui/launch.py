@@ -69,6 +69,7 @@ from aurora.core.streaming import StreamingSpeechSession
 from aurora.core.control_commands import classify_hud_control_command
 from aurora.ui.assistant_panel import AssistantPanelDialog
 from aurora.ui.hud_preferences import load_hud_preferences, save_hud_preferences
+from aurora.ui.voice_conversation import VoiceConversationSession, is_conversation_end_command
 from aurora.ui.window_overlay import set_window_topmost
 from PySide6.QtCore import (
     QPoint,
@@ -294,21 +295,31 @@ class VoiceListener:
         text_callback: Callable[[str], None],
         status_callback: Callable[[str], None],
         wakeword: str = "aurora",
-        command_timeout_s: float = 8.0,
+        conversation_timeout_s: float = 60.0,
         activation_callback: Optional[Callable[[], None]] = None,
         standby_callback: Optional[Callable[[], None]] = None,
+        busy_callback: Optional[Callable[[], bool]] = None,
+        assistant_speaking_callback: Optional[Callable[[], bool]] = None,
     ) -> None:
         self.model_path = model_path
         self.text_callback = text_callback
         self.status_callback = status_callback
         self.wakeword = (wakeword or "aurora").strip().casefold()
-        self.command_timeout_s = max(2.0, float(command_timeout_s))
+        self.conversation_timeout_s = max(15.0, min(600.0, float(conversation_timeout_s)))
         self.activation_callback = activation_callback
         self.standby_callback = standby_callback
+        self.busy_callback = busy_callback
+        self.assistant_speaking_callback = assistant_speaking_callback
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._audio_queue: queue.Queue[bytes] = queue.Queue(maxsize=20)
         self._stream = None
+
+    def set_conversation_timeout(self, timeout_s: float) -> None:
+        try:
+            self.conversation_timeout_s = max(15.0, min(600.0, float(timeout_s)))
+        except (TypeError, ValueError, OverflowError):
+            return
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -427,11 +438,19 @@ class VoiceListener:
                     # backends não exclusivos; falha de detecção não deve parar.
                     print(f"[Aurora voz] Não consegui confirmar o backend de áudio: {exc}")
 
-                active_until = 0.0
+                session = VoiceConversationSession(self.conversation_timeout_s)
                 wakeword_pattern = re.compile(
                     rf"(?<!\w){re.escape(self.wakeword)}(?!\w)",
                     flags=re.IGNORECASE,
                 )
+
+                def callback_enabled(callback) -> bool:
+                    if callback is None:
+                        return False
+                    try:
+                        return bool(callback())
+                    except Exception:
+                        return False
 
                 def return_to_standby() -> None:
                     if self.standby_callback is not None:
@@ -440,34 +459,47 @@ class VoiceListener:
                         except Exception as exc:
                             print(f"[Aurora voz] falha ao voltar para idle: {exc}")
 
+                def activate_visual_state() -> None:
+                    if self.activation_callback is not None:
+                        try:
+                            self.activation_callback()
+                        except Exception as exc:
+                            print(f"[Aurora voz] falha no callback de ativação: {exc}")
+
+                def end_conversation() -> None:
+                    session.end()
+                    self.status_callback("Conversa encerrada; aguardando 'Aurora'.")
+                    return_to_standby()
+
                 def dispatch_command(command: str) -> None:
                     command = command.strip(" \t\r\n,.;:!?-–—")
                     if command and self.text_callback:
                         self.text_callback(command)
 
+                def drain_audio_queue() -> None:
+                    while True:
+                        try:
+                            self._audio_queue.get_nowait()
+                        except queue.Empty:
+                            break
+
                 def handle_recognized(phrase: str, utterance_pcm: bytes) -> None:
-                    nonlocal active_until
                     phrase = (phrase or "").strip()
                     if not phrase:
                         return
 
                     now = time.monotonic()
-                    if active_until and now > active_until:
-                        active_until = 0.0
-                        self.status_callback("Ativação expirou; aguardando 'Aurora'.")
+                    session.set_timeout(self.conversation_timeout_s)
+                    if session.expire_if_needed(now):
+                        self.status_callback(
+                            "Conversa expirou após silêncio; aguardando 'Aurora'."
+                        )
                         return_to_standby()
 
                     match = wakeword_pattern.search(phrase)
                     if match:
-                        if self.activation_callback is not None:
-                            try:
-                                self.activation_callback()
-                            except Exception as exc:
-                                print(f"[Aurora voz] falha no callback de ativação: {exc}")
-
-                        # Reouve o segmento inteiro. Isso permite entender, por
-                        # exemplo, "Aurora, open the browser" mesmo que o Vosk
-                        # em português erre as palavras inglesas.
+                        was_active = session.is_active
+                        # Reouve o segmento inteiro para preservar pedidos bilíngues.
                         whispered = transcribe_utterance(utterance_pcm)
                         if whispered:
                             whisper_match = wakeword_pattern.search(whispered)
@@ -480,27 +512,44 @@ class VoiceListener:
                         else:
                             command = phrase[match.end():].strip(" \t\r\n,.;:!?-–—")
 
-                        # Fallback para o texto Vosk caso Whisper não tenha reconhecido
-                        # a parte do comando, mas Vosk tenha reconhecido alguma.
+                        # Fallback ao texto Vosk se o Whisper não capturou o pedido.
                         if not command:
                             command = phrase[match.end():].strip(" \t\r\n,.;:!?-–—")
 
+                        if is_conversation_end_command(command, self.wakeword):
+                            end_conversation()
+                            return
+
                         if command:
-                            active_until = 0.0
-                            self.status_callback("Palavra de ativação detectada; processando comando bilíngue…")
+                            if not was_active:
+                                session.activate(now)
+                                activate_visual_state()
+                                self.status_callback(
+                                    "Conversa contínua ativa; diga 'Aurora, pode descansar' para encerrar."
+                                )
+                            else:
+                                session.refresh(now)
                             dispatch_command(command)
-                        else:
-                            active_until = time.monotonic() + self.command_timeout_s
+                        elif not was_active:
+                            session.activate(now)
+                            activate_visual_state()
                             self.status_callback(
-                                f"Aurora ativada. Diga seu pedido em até {int(self.command_timeout_s)} segundos."
+                                "Conversa contínua ativa; pode falar sem repetir 'Aurora'. "
+                                "Diga 'Aurora, pode descansar' para encerrar."
                             )
+                        else:
+                            session.refresh(now)
                         return
 
-                    if active_until and now <= active_until:
-                        active_until = 0.0
-                        self.status_callback("Pedido reconhecido; retornando à escuta por 'Aurora'.")
+                    if session.is_active:
                         whispered = transcribe_utterance(utterance_pcm)
-                        dispatch_command(whispered or phrase)
+                        command = (whispered or phrase).strip(" \t\r\n,.;:!?-–—")
+                        if is_conversation_end_command(command, self.wakeword):
+                            end_conversation()
+                            return
+                        if command:
+                            session.refresh(now)
+                            dispatch_command(command)
 
                 def audio_callback(indata, frames, time_info, status) -> None:
                     del frames, time_info
@@ -537,11 +586,41 @@ class VoiceListener:
                     self.status_callback("Escutando por 'Aurora' (microfone padrão, modo compartilhado quando disponível)…")
                     utterance_audio = bytearray()
                     max_utterance_bytes = 25 * 16000 * 2  # limite de 25 s, mono PCM 16-bit / 16 kHz
+                    assistant_was_speaking = False
                     while not self._stop_event.is_set():
-                        if active_until and time.monotonic() > active_until:
-                            active_until = 0.0
-                            self.status_callback("Ativação expirou; aguardando 'Aurora'.")
+                        now = time.monotonic()
+                        session.set_timeout(self.conversation_timeout_s)
+                        if session.is_active and callback_enabled(self.busy_callback):
+                            # Pausa a expiração enquanto a Aurora processa ou responde.
+                            session.refresh(now)
+                        if session.expire_if_needed(now):
+                            self.status_callback(
+                                "Conversa expirou após silêncio; aguardando 'Aurora'."
+                            )
                             return_to_standby()
+
+                        if callback_enabled(self.assistant_speaking_callback):
+                            if not assistant_was_speaking:
+                                utterance_audio.clear()
+                                try:
+                                    recognizer.Reset()
+                                except Exception:
+                                    pass
+                            assistant_was_speaking = True
+                            # Evita transcrever a própria voz sintetizada como fala do usuário.
+                            drain_audio_queue()
+                            self._stop_event.wait(0.05)
+                            continue
+
+                        if assistant_was_speaking:
+                            utterance_audio.clear()
+                            try:
+                                recognizer.Reset()
+                            except Exception:
+                                pass
+                            drain_audio_queue()
+                            assistant_was_speaking = False
+                            continue
                         try:
                             block = self._audio_queue.get(timeout=0.15)
                         except queue.Empty:
@@ -760,6 +839,7 @@ class SvgHologram(QMainWindow):
         self._allow_close = False
         self._close_prompt_active = False
         self._topmost_error_reported = False
+        self._voice_ui_state = "off"
         self._response_panel: Optional[ResponsePanel] = None
         # Respostas curtas ficam na legenda da HUD; respostas extensas usam o painel rolável.
         self._streamed_display_text = ""
@@ -904,9 +984,11 @@ class SvgHologram(QMainWindow):
             text_callback=self.recognized_text.emit,
             status_callback=self.voice_status.emit,
             wakeword=os.environ.get("AURORA_WAKE_WORD", "aurora"),
-            command_timeout_s=float(os.environ.get("AURORA_WAKE_TIMEOUT", "8")),
+            conversation_timeout_s=self._hud_preferences.get("conversation_timeout_seconds", 60),
             activation_callback=lambda: self.visual_state_requested.emit("listening"),
             standby_callback=lambda: self.visual_state_requested.emit("idle"),
+            busy_callback=self._voice_session_busy,
+            assistant_speaking_callback=self._assistant_is_speaking,
         )
 
         # Legenda flutuante com efeito fade in/out (estável para janela frameless)
@@ -972,9 +1054,21 @@ class SvgHologram(QMainWindow):
         input_layout.addWidget(self.send_inline_btn)
         self.input_container.adjustSize()
 
-        # Sem texto sobre o holograma por padrão.
+        # Indicador persistente de escuta: mostra espera, conversa, falha ou pausa.
         self.status_label = QLabel(self)
-        self.status_label.hide()
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status_label.setFixedSize(172, 23)
+        self.status_label.move(8, self.height() - 29)
+        self.status_label.setStyleSheet(
+            "QLabel { color: #9dffff; background: rgba(7, 19, 29, 210); "
+            "border: 1px solid rgba(0, 200, 255, 140); border-radius: 5px; "
+            "padding: 2px 5px; font-family: 'Consolas', 'Courier New', monospace; font-size: 8pt; }"
+        )
+        self.status_label.setToolTip(
+            "F8 ou o botão de voz alterna a escuta. A palavra de ativação é processada localmente."
+        )
+        self._set_voice_ui_state("off")
+        self.status_label.show()
 
         self.listen_shortcut = QShortcut(QKeySequence("F8"), self)
         self.listen_shortcut.activated.connect(self.toggle_listening)
@@ -996,6 +1090,10 @@ class SvgHologram(QMainWindow):
         control_layout = QHBoxLayout(self.control_strip)
         control_layout.setContentsMargins(3, 3, 3, 3)
         control_layout.setSpacing(4)
+        self.voice_mode_btn = QPushButton("○ Voz", self.control_strip)
+        self.voice_mode_btn.setToolTip("Alternar microfone (F8); a conversa termina por voz ou após silêncio")
+        self.voice_mode_btn.setFixedSize(72, 28)
+        self.voice_mode_btn.clicked.connect(self.toggle_listening)
         self.cancel_task_btn = QPushButton("■ Cancelar", self.control_strip)
         self.cancel_task_btn.setToolTip("Cancelar a instrução atual (Escape)")
         self.cancel_task_btn.setFixedSize(98, 28)
@@ -1017,14 +1115,17 @@ class SvgHologram(QMainWindow):
             "QPushButton:disabled { color: rgba(157, 255, 255, 90); "
             "border-color: rgba(0, 200, 255, 65); background-color: rgba(8, 28, 42, 100); }"
         )
+        self.voice_mode_btn.setStyleSheet(control_style)
         self.cancel_task_btn.setStyleSheet(control_style)
         self.close_aurora_btn.setStyleSheet(control_style)
         self.assistant_panel_btn.setStyleSheet(control_style)
+        self._set_voice_ui_state(self._voice_ui_state)
+        control_layout.addWidget(self.voice_mode_btn)
         control_layout.addWidget(self.cancel_task_btn)
         control_layout.addWidget(self.close_aurora_btn)
         control_layout.addWidget(self.assistant_panel_btn)
-        self.control_strip.setFixedSize(208, 34)
-        self.control_strip.move(self.width() - self.control_strip.width() - 8, 8)
+        self.control_strip.setFixedSize(286, 34)
+        self.control_strip.move(self.width() - self.control_strip.width() - 7, 8)
         self.control_strip.raise_()
 
         if listen_on_start:
@@ -1440,6 +1541,10 @@ class SvgHologram(QMainWindow):
 
     def _save_hud_preferences(self, values: dict) -> dict:
         self._hud_preferences = save_hud_preferences(self._hud_preferences_path, values)
+        if hasattr(self, "voice_listener"):
+            self.voice_listener.set_conversation_timeout(
+                self._hud_preferences.get("conversation_timeout_seconds", 60)
+            )
         # Não troque a configuração no meio de um turno; aplique assim que ele terminar.
         if not self._task_active:
             self._apply_hud_preferences()
@@ -1477,6 +1582,7 @@ class SvgHologram(QMainWindow):
             f"Chave de API: {'configurada' if settings.has_api_key() else 'ausente'} (o valor nunca é exibido)",
             f"Streaming de texto: {'ativo' if preferences.get('streaming_enabled', True) else 'inativo'}",
             f"Fala: {'ativa' if preferences.get('speech_enabled', True) else 'desativada nas preferências'}",
+            f"Tempo de silêncio para encerrar conversa: {preferences.get('conversation_timeout_seconds', 60)} s",
             f"Backend TTS: {AURORA_TTS_BACKEND}",
             f"Voz SAPI detectada: {'sim' if self._tts_engine is not None and self._tts_voice_ja else 'não'}",
             f"GPT-SoVITS direto: {'disponível' if self._gpt_sovits_enabled else 'não configurado'}",
@@ -3063,8 +3169,47 @@ class SvgHologram(QMainWindow):
             return
         self._start_agent_task(message)
 
+    def _set_voice_ui_state(self, state: str) -> None:
+        self._voice_ui_state = state
+        labels = {
+            "off": ("○ MICROFONE PAUSADO", "○ Voz"),
+            "starting": ("◌ INICIANDO VOZ", "◌ Voz…"),
+            "standby": ("◉ À ESPERA: AURORA", "◉ Espera"),
+            "conversation": ("● CONVERSA ATIVA", "● Conversa"),
+            "error": ("⚠ FALHA NA VOZ", "⚠ Falhou"),
+        }
+        label, button = labels.get(state, labels["off"])
+        if hasattr(self, "status_label"):
+            self.status_label.setText(label)
+        if hasattr(self, "voice_mode_btn"):
+            self.voice_mode_btn.setText(button)
+
+    def _voice_session_busy(self) -> bool:
+        with self._task_lock:
+            task_active = self._task_active
+        return bool(task_active or self._speech_pending or self._speech_active)
+
+    def _assistant_is_speaking(self) -> bool:
+        return bool(self._speech_active)
+
     def show_voice_status(self, message: str) -> None:
         print(f"[Aurora voz] {message}")
+        lowered = str(message or "").casefold()
+        if "falha no reconhecimento" in lowered or "falha no listener" in lowered:
+            self._set_voice_ui_state("error")
+        elif "conversa contínua ativa" in lowered or "conversa ativa;" in lowered:
+            self._set_voice_ui_state("conversation")
+        elif (
+            "conversa encerrada" in lowered
+            or "expirou após silêncio" in lowered
+            or "aguardando 'aurora'" in lowered
+            or "escutando por 'aurora'" in lowered
+        ):
+            self._set_voice_ui_state("standby")
+        elif "carregando" in lowered:
+            self._set_voice_ui_state("starting")
+        elif "escuta parada" in lowered or "escuta encerrada" in lowered:
+            self._set_voice_ui_state("off")
 
     def start_listening(self) -> None:
         # Mantém o microfone em espera pela wake word sem congelar o visual.
@@ -3073,14 +3218,17 @@ class SvgHologram(QMainWindow):
         # reconhece a palavra "Aurora". Enquanto aguarda, a interface permanece em idle.
 
         try:
+            self._set_voice_ui_state("starting")
             self.voice_listener.start()
             self.visual_state_requested.emit("idle")
         except Exception as exc:
+            self._set_voice_ui_state("error")
             self.visual_state_requested.emit("error")
             QMessageBox.warning(self, "Aurora — voz", str(exc))
 
     def stop_listening(self) -> None:
         self.voice_listener.stop()
+        self._set_voice_ui_state("off")
         self.visual_state_requested.emit("idle")
 
     def toggle_listening(self) -> None:

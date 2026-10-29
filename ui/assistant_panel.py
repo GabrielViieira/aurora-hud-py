@@ -299,17 +299,22 @@ class AssistantPanelDialog(QDialog):
         self.threshold_spin = QSpinBox(page)
         self.threshold_spin.setRange(160, 600)
         self.threshold_spin.setSuffix(" caracteres")
+        self.conversation_timeout_spin = QSpinBox(page)
+        self.conversation_timeout_spin.setRange(15, 600)
+        self.conversation_timeout_spin.setSingleStep(15)
+        self.conversation_timeout_spin.setSuffix(" segundos sem fala")
         form.addRow("Fala", self.speech_enabled_check)
         form.addRow("Texto", self.streaming_enabled_check)
         form.addRow("Respostas longas", self.long_panel_check)
         form.addRow("Volume", self.volume_spin)
         form.addRow("Velocidade", self.rate_spin)
         form.addRow("Abrir painel após", self.threshold_spin)
+        form.addRow("Encerrar conversa após", self.conversation_timeout_spin)
         layout.addLayout(form)
         layout.addWidget(QLabel(
             "As preferências são gravadas em data/hud_preferences.json. "
             "A velocidade ajusta SAPI; o volume é aplicado ao áudio sintetizado. "
-            "Nenhuma chave de API é salva neste arquivo.", page
+            "Nenhuma chave de API é salva neste arquivo. A sessão de voz fica aberta até o comando de descanso ou até este tempo sem fala.", page
         ))
         save_button = QPushButton("Salvar preferências", page)
         save_button.clicked.connect(self._save_preferences)
@@ -328,6 +333,7 @@ class AssistantPanelDialog(QDialog):
         self.volume_spin.setValue(self._preferences["speech_volume_percent"])
         self.rate_spin.setValue(self._preferences["speech_rate"])
         self.threshold_spin.setValue(self._preferences["response_panel_threshold"])
+        self.conversation_timeout_spin.setValue(self._preferences["conversation_timeout_seconds"])
 
     def _save_preferences(self) -> None:
         values = {
@@ -337,6 +343,7 @@ class AssistantPanelDialog(QDialog):
             "speech_volume_percent": self.volume_spin.value(),
             "speech_rate": self.rate_spin.value(),
             "response_panel_threshold": self.threshold_spin.value(),
+            "conversation_timeout_seconds": self.conversation_timeout_spin.value(),
         }
         try:
             saved = self._on_preferences_saved(values)

@@ -22,9 +22,13 @@ Se o endpoint de visão local recusar conexão (Ollama parado, porta fechada), o
 
 Clique no botão ⚙ ou use **Ctrl+H** para abrir o painel da Aurora. Ele reúne o histórico local, o diagnóstico de conectividade e preferências da interface. No histórico é possível consultar, excluir uma sessão ou limpar as conversas salvas; essa limpeza não apaga memórias semânticas nem a auditoria.
 
-As preferências da HUD ficam em `data/hud_preferences.json`, sem credenciais. Elas controlam a fala, o streaming, a abertura automática do painel para respostas longas, o volume e a velocidade de SAPI. O volume é aplicado ao áudio sintetizado. **Escape** continua cancelando a tarefa/fala; por voz, diga **“Aurora, para”** ou **“Aurora, pare de falar”**.
+As preferências da HUD ficam em `data/hud_preferences.json`, sem credenciais. Elas controlam a fala, o streaming, a abertura automática do painel para respostas longas, o volume, a velocidade de SAPI e o tempo de silêncio até encerrar a conversa por voz (15 a 600 segundos). O volume é aplicado ao áudio sintetizado. **Escape** continua cancelando a tarefa/fala; por voz, diga **“Aurora, para”** ou **“Aurora, pare de falar”**.
 
 
 ## HUD sobre jogos
 
 A HUD reafirma a prioridade de janela no Windows sem ativar a Aurora nem roubar o foco do jogo. Se ela ainda ficar atrás do Unturned, confira o modo de exibição do jogo e prefira **Windowed Borderless / Janela sem bordas**. A prioridade de janela não consegue garantir que uma janela comum apareça sobre jogos que estejam usando um modo exclusivo de tela cheia.
+
+## Conversa contínua por voz
+
+Diga **“Aurora”** para abrir uma sessão de conversa e continue falando sem repetir o nome. Para voltar à espera, diga **“Aurora, pode descansar”**, **“encerra a conversa”** ou uma frase equivalente reconhecida. A sessão também volta à espera depois do tempo de silêncio configurado em **⚙ → Preferências**. O botão de voz ou **F8** pausa e retoma o microfone. A palavra de ativação é reconhecida localmente pelo Vosk; durante a fala sintetizada da Aurora, a entrada é temporariamente descartada para evitar que ela ouça a própria voz como se fosse o usuário.
