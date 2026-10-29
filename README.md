@@ -32,3 +32,7 @@ A HUD reafirma a prioridade de janela no Windows sem ativar a Aurora nem roubar 
 ## Conversa contínua por voz
 
 Diga **“Aurora”** para abrir uma sessão de conversa e continue falando sem repetir o nome. Para voltar à espera, diga **“Aurora, pode descansar”**, **“encerra a conversa”** ou uma frase equivalente reconhecida. A sessão também volta à espera depois do tempo de silêncio configurado em **⚙ → Preferências**. O botão de voz ou **F8** pausa e retoma o microfone. A palavra de ativação é reconhecida localmente pelo Vosk; durante a fala sintetizada da Aurora, a entrada é temporariamente descartada para evitar que ela ouça a própria voz como se fosse o usuário.
+
+## Ajuste de captação do microfone
+
+Em **⚙ → Preferências**, escolha a entrada do Windows (ou deixe **Padrão do Windows**) e ajuste **Ganho do microfone**. A Aurora usa 16 kHz mono no reconhecimento: se a entrada não suportar 16 kHz, ela tenta capturar na taxa nativa do dispositivo e converte o áudio. Dispositivos estéreo podem ser reduzidos a mono automaticamente. Ganho alto pode aumentar ruído e distorção; comece em 125% e ajuste aos poucos. Se houver sobrecarga do buffer, a HUD mostra um aviso.

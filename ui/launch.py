@@ -70,6 +70,7 @@ from aurora.core.control_commands import classify_hud_control_command
 from aurora.ui.assistant_panel import AssistantPanelDialog
 from aurora.ui.hud_preferences import load_hud_preferences, save_hud_preferences
 from aurora.ui.voice_conversation import VoiceConversationSession, is_conversation_end_command
+from aurora.ui.audio_capture import to_vosk_pcm16
 from aurora.ui.window_overlay import set_window_topmost
 from PySide6.QtCore import (
     QPoint,
@@ -300,6 +301,8 @@ class VoiceListener:
         standby_callback: Optional[Callable[[], None]] = None,
         busy_callback: Optional[Callable[[], bool]] = None,
         assistant_speaking_callback: Optional[Callable[[], bool]] = None,
+        input_device_id: str = "default",
+        input_gain_percent: float = 125.0,
     ) -> None:
         self.model_path = model_path
         self.text_callback = text_callback
@@ -310,10 +313,61 @@ class VoiceListener:
         self.standby_callback = standby_callback
         self.busy_callback = busy_callback
         self.assistant_speaking_callback = assistant_speaking_callback
+        self.input_device_id = str(input_device_id or "default")
+        self.input_gain_percent = max(50.0, min(300.0, float(input_gain_percent)))
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._audio_queue: queue.Queue[bytes] = queue.Queue(maxsize=20)
         self._stream = None
+
+    @staticmethod
+    def input_device_identifier(device_info, hostapis) -> str:
+        try:
+            hostapi_index = int(device_info.get("hostapi", -1))
+            hostapi_name = str(hostapis[hostapi_index].get("name", "Audio"))
+        except (IndexError, TypeError, ValueError, AttributeError):
+            hostapi_name = "Audio"
+        return f"{hostapi_name}::{device_info.get('name', 'Microfone')}"
+
+    def set_input_device(self, device_id: str) -> None:
+        self.input_device_id = str(device_id or "default")
+
+    def set_input_gain_percent(self, gain_percent: float) -> None:
+        try:
+            self.input_gain_percent = max(50.0, min(300.0, float(gain_percent)))
+        except (TypeError, ValueError, OverflowError):
+            return
+
+    def _resolve_input_device(self, sd):
+        requested = self.input_device_id.strip() or "default"
+        if requested.casefold() != "default":
+            try:
+                devices = list(sd.query_devices())
+                hostapis = list(sd.query_hostapis())
+                for index, device in enumerate(devices):
+                    if int(device.get("max_input_channels", 0) or 0) < 1:
+                        continue
+                    identifier = self.input_device_identifier(device, hostapis)
+                    if identifier == requested:
+                        return index, device, f"{device.get('name', 'Microfone')} — {hostapis[int(device.get('hostapi', 0))].get('name', 'Audio')}"
+                self.status_callback(
+                    f"O microfone salvo ({requested}) não está disponível; usando o padrão do Windows."
+                )
+            except Exception as exc:
+                self.status_callback(f"Não consegui listar microfones: {exc}; usando o padrão do Windows.")
+
+        try:
+            default_device = sd.default.device[0]
+            if default_device is not None and int(default_device) >= 0:
+                index = int(default_device)
+                info = sd.query_devices(index, "input")
+            else:
+                index = None
+                info = sd.query_devices(kind="input")
+        except Exception:
+            index = None
+            info = sd.query_devices(kind="input")
+        return index, info, f"{info.get('name', 'Microfone padrão')} — padrão do Windows"
 
     def set_conversation_timeout(self, timeout_s: float) -> None:
         try:
@@ -422,21 +476,39 @@ class VoiceListener:
                     except queue.Empty:
                         break
 
-                # sounddevice usa o dispositivo padrão quando device=None.
-                # WASAPI em modo compartilhado permite que outros aplicativos
-                # também utilizem o microfone do Windows.
+                # Resolve o microfone escolhido (ou o padrão do Windows) antes de abrir
+                # o stream, em vez de assumir que todo hardware aceita 16 kHz mono.
+                selected_device, device_info, device_label = self._resolve_input_device(sd)
                 extra_settings = None
                 try:
-                    default_input = sd.default.device[0]
-                    if default_input is not None and int(default_input) >= 0:
-                        device_info = sd.query_devices(int(default_input), "input")
-                        host_info = sd.query_hostapis(int(device_info["hostapi"]))
-                        if "WASAPI" in str(host_info.get("name", "")).upper():
-                            extra_settings = sd.WasapiSettings(exclusive=False)
+                    host_info = sd.query_hostapis(int(device_info["hostapi"]))
+                    if "WASAPI" in str(host_info.get("name", "")).upper():
+                        extra_settings = sd.WasapiSettings(exclusive=False)
                 except Exception as exc:
-                    # O modo padrão do PortAudio também é compartilhado em
-                    # backends não exclusivos; falha de detecção não deve parar.
+                    # Falha ao consultar o backend não deve impedir os demais modos.
                     print(f"[Aurora voz] Não consegui confirmar o backend de áudio: {exc}")
+
+                native_rate = int(round(float(device_info.get("default_samplerate", 16000) or 16000)))
+                if native_rate < 8000:
+                    native_rate = 16000
+                capture_rate = native_rate
+                # Usa 16 kHz direto quando o driver aceita; caso contrário captura
+                # na taxa nativa e reamostra para o formato do Vosk/Whisper.
+                for candidate_rate in dict.fromkeys((16000, native_rate)):
+                    try:
+                        check_kwargs = {
+                            "device": selected_device,
+                            "samplerate": candidate_rate,
+                            "channels": 1,
+                            "dtype": "float32",
+                        }
+                        if extra_settings is not None:
+                            check_kwargs["extra_settings"] = extra_settings
+                        sd.check_input_settings(**check_kwargs)
+                        capture_rate = int(candidate_rate)
+                        break
+                    except Exception:
+                        continue
 
                 session = VoiceConversationSession(self.conversation_timeout_s)
                 wakeword_pattern = re.compile(
@@ -551,12 +623,33 @@ class VoiceListener:
                             session.refresh(now)
                             dispatch_command(command)
 
+                overflow_notified = False
+
                 def audio_callback(indata, frames, time_info, status) -> None:
+                    nonlocal overflow_notified
                     del frames, time_info
                     if self._stop_event.is_set():
                         raise sd.CallbackStop()
-                    # Não faça I/O nem reconhecimento dentro do callback de áudio.
-                    pcm = (indata[:, 0] * 32767.0).clip(-32768, 32767).astype(np.int16).tobytes()
+                    if status and ("input overflow" in str(status).casefold() or getattr(status, "input_overflow", False)):
+                        if not overflow_notified:
+                            self.status_callback(
+                                "O microfone está perdendo blocos de áudio; tente reduzir a carga do PC ou usar outra entrada."
+                            )
+                            overflow_notified = True
+                    else:
+                        overflow_notified = False
+
+                    # Converte mono/estéreo e qualquer taxa comum para PCM16 16 kHz.
+                    # O ganho é configurável, com limitador para evitar overflow.
+                    pcm = to_vosk_pcm16(
+                        indata,
+                        source_rate=capture_rate,
+                        target_rate=16000,
+                        gain_percent=self.input_gain_percent,
+                        numpy_module=np,
+                    )
+                    if not pcm:
+                        return
                     try:
                         self._audio_queue.put_nowait(pcm)
                     except queue.Full:
@@ -571,19 +664,36 @@ class VoiceListener:
                             pass
 
                 stream_kwargs = {
-                    "device": None,  # dispositivo de entrada padrão do Windows
-                    "samplerate": 16000,
+                    "device": selected_device,
+                    "samplerate": capture_rate,
                     "channels": 1,
                     "dtype": "float32",
                     "callback": audio_callback,
-                    "blocksize": 1600,  # ~100 ms a 16 kHz
+                    "blocksize": max(1, int(round(capture_rate * 0.1))),
                 }
                 if extra_settings is not None:
                     stream_kwargs["extra_settings"] = extra_settings
 
-                with sd.InputStream(**stream_kwargs) as stream:
+                # Alguns dispositivos só abrem em estéreo; se mono falhar, tenta
+                # dois canais e faz downmix no callback.
+                try:
+                    input_stream = sd.InputStream(**stream_kwargs)
+                except Exception:
+                    max_channels = int(device_info.get("max_input_channels", 1) or 1)
+                    if max_channels < 2:
+                        raise
+                    stream_kwargs["channels"] = 2
+                    input_stream = sd.InputStream(**stream_kwargs)
+                    self.status_callback(
+                        "O microfone abriu em estéreo; a Aurora converterá a entrada para mono."
+                    )
+
+                with input_stream as stream:
                     self._stream = stream
-                    self.status_callback("Escutando por 'Aurora' (microfone padrão, modo compartilhado quando disponível)…")
+                    self.status_callback(
+                        f"Microfone ativo: {device_label}; captura a {capture_rate} Hz, "
+                        f"ganho {int(self.input_gain_percent)}%; aguardando 'Aurora'."
+                    )
                     utterance_audio = bytearray()
                     max_utterance_bytes = 25 * 16000 * 2  # limite de 25 s, mono PCM 16-bit / 16 kHz
                     assistant_was_speaking = False
@@ -989,6 +1099,8 @@ class SvgHologram(QMainWindow):
             standby_callback=lambda: self.visual_state_requested.emit("idle"),
             busy_callback=self._voice_session_busy,
             assistant_speaking_callback=self._assistant_is_speaking,
+            input_device_id=self._hud_preferences.get("microphone_device", "default"),
+            input_gain_percent=self._hud_preferences.get("microphone_gain_percent", 125),
         )
 
         # Legenda flutuante com efeito fade in/out (estável para janela frameless)
@@ -1545,6 +1657,19 @@ class SvgHologram(QMainWindow):
             self.voice_listener.set_conversation_timeout(
                 self._hud_preferences.get("conversation_timeout_seconds", 60)
             )
+            self.voice_listener.set_input_gain_percent(
+                self._hud_preferences.get("microphone_gain_percent", 125)
+            )
+            old_device = str(values.get("microphone_device", "default") or "default")
+            new_device = str(self._hud_preferences.get("microphone_device", "default") or "default")
+            if old_device != new_device:
+                thread = self.voice_listener._thread
+                was_running = bool(thread and thread.is_alive())
+                if was_running:
+                    self.stop_listening()
+                self.voice_listener.set_input_device(new_device)
+                if was_running:
+                    self.start_listening()
         # Não troque a configuração no meio de um turno; aplique assim que ele terminar.
         if not self._task_active:
             self._apply_hud_preferences()
@@ -1558,6 +1683,36 @@ class SvgHologram(QMainWindow):
         if session_id is None or getattr(self._agent, "session_id", None) == session_id:
             # A próxima mensagem cria uma nova sessão válida, sem reutilizar um ID excluído.
             self._agent.session_id = ""
+
+    def _audio_input_devices(self) -> list[dict[str, str]]:
+        """Lista entradas de áudio sem exigir que a dependência de voz esteja instalada."""
+        try:
+            import sounddevice as sd
+            devices = list(sd.query_devices())
+            hostapis = list(sd.query_hostapis())
+        except Exception as exc:
+            print(f"[Aurora voz] Não foi possível listar microfones: {exc}")
+            return []
+
+        result: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for device in devices:
+            try:
+                if int(device.get("max_input_channels", 0) or 0) < 1:
+                    continue
+                identifier = VoiceListener.input_device_identifier(device, hostapis)
+                if identifier in seen:
+                    continue
+                seen.add(identifier)
+                host_index = int(device.get("hostapi", -1))
+                host_name = str(hostapis[host_index].get("name", "Audio"))
+                result.append({
+                    "id": identifier,
+                    "label": f"{device.get('name', 'Microfone')} — {host_name}",
+                })
+            except (IndexError, TypeError, ValueError, AttributeError):
+                continue
+        return result
 
     def _assistant_diagnostics(self) -> dict:
         runtime = self._runtime
@@ -1583,6 +1738,8 @@ class SvgHologram(QMainWindow):
             f"Streaming de texto: {'ativo' if preferences.get('streaming_enabled', True) else 'inativo'}",
             f"Fala: {'ativa' if preferences.get('speech_enabled', True) else 'desativada nas preferências'}",
             f"Tempo de silêncio para encerrar conversa: {preferences.get('conversation_timeout_seconds', 60)} s",
+            f"Microfone: {preferences.get('microphone_device', 'default')}",
+            f"Ganho de entrada: {preferences.get('microphone_gain_percent', 125)}%",
             f"Backend TTS: {AURORA_TTS_BACKEND}",
             f"Voz SAPI detectada: {'sim' if self._tts_engine is not None and self._tts_voice_ja else 'não'}",
             f"GPT-SoVITS direto: {'disponível' if self._gpt_sovits_enabled else 'não configurado'}",
@@ -1607,6 +1764,7 @@ class SvgHologram(QMainWindow):
                 diagnostics_provider=self._assistant_diagnostics,
                 is_busy=lambda: bool(self._task_active),
                 on_session_deleted=self._on_history_session_deleted,
+                audio_input_devices_provider=self._audio_input_devices,
             )
         else:
             self._assistant_panel.set_preferences(self._hud_preferences)

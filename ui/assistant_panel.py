@@ -10,6 +10,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QFormLayout,
     QHBoxLayout,
@@ -44,6 +45,7 @@ class AssistantPanelDialog(QDialog):
         diagnostics_provider: Callable[[], dict[str, Any]],
         is_busy: Callable[[], bool],
         on_session_deleted: Callable[[str | None], Any],
+        audio_input_devices_provider: Callable[[], list[dict[str, str]]] | None = None,
     ) -> None:
         super().__init__(
             parent,
@@ -74,6 +76,7 @@ class AssistantPanelDialog(QDialog):
         self._diagnostics_provider = diagnostics_provider
         self._is_busy = is_busy
         self._on_session_deleted = on_session_deleted
+        self._audio_input_devices_provider = audio_input_devices_provider
         self._preferences = normalize_hud_preferences(preferences)
         self._diagnostics_thread: threading.Thread | None = None
         self.diagnostics_ready.connect(
@@ -299,10 +302,30 @@ class AssistantPanelDialog(QDialog):
         self.threshold_spin = QSpinBox(page)
         self.threshold_spin.setRange(160, 600)
         self.threshold_spin.setSuffix(" caracteres")
+        self.microphone_device_combo = QComboBox(page)
+        self.microphone_device_combo.addItem("Padrão do Windows", "default")
+        try:
+            available_devices = self._audio_input_devices_provider() if self._audio_input_devices_provider else []
+        except Exception:
+            available_devices = []
+        for device in available_devices or []:
+            device_id = str(device.get("id", "") or "")
+            device_label = str(device.get("label", "") or device_id)
+            if device_id and self.microphone_device_combo.findData(device_id) < 0:
+                self.microphone_device_combo.addItem(device_label, device_id)
+        saved_device = str(self._preferences.get("microphone_device", "default") or "default")
+        if self.microphone_device_combo.findData(saved_device) < 0:
+            self.microphone_device_combo.addItem("Salvo, mas indisponível: " + saved_device, saved_device)
+        self.microphone_gain_spin = QSpinBox(page)
+        self.microphone_gain_spin.setRange(50, 300)
+        self.microphone_gain_spin.setSingleStep(25)
+        self.microphone_gain_spin.setSuffix("% de ganho")
         self.conversation_timeout_spin = QSpinBox(page)
         self.conversation_timeout_spin.setRange(15, 600)
         self.conversation_timeout_spin.setSingleStep(15)
         self.conversation_timeout_spin.setSuffix(" segundos sem fala")
+        form.addRow("Microfone de entrada", self.microphone_device_combo)
+        form.addRow("Ganho do microfone", self.microphone_gain_spin)
         form.addRow("Fala", self.speech_enabled_check)
         form.addRow("Texto", self.streaming_enabled_check)
         form.addRow("Respostas longas", self.long_panel_check)
@@ -314,7 +337,7 @@ class AssistantPanelDialog(QDialog):
         layout.addWidget(QLabel(
             "As preferências são gravadas em data/hud_preferences.json. "
             "A velocidade ajusta SAPI; o volume é aplicado ao áudio sintetizado. "
-            "Nenhuma chave de API é salva neste arquivo. A sessão de voz fica aberta até o comando de descanso ou até este tempo sem fala.", page
+            "Nenhuma chave de API é salva neste arquivo. Ajuste o microfone se a palavra de ativação falhar; ganho alto demais também amplifica ruído. A troca de dispositivo reinicia a escuta.", page
         ))
         save_button = QPushButton("Salvar preferências", page)
         save_button.clicked.connect(self._save_preferences)
@@ -327,6 +350,8 @@ class AssistantPanelDialog(QDialog):
         self._preferences = normalize_hud_preferences(preferences)
         if not hasattr(self, "speech_enabled_check"):
             return
+        self.microphone_device_combo.setCurrentIndex(max(0, self.microphone_device_combo.findData(self._preferences["microphone_device"])))
+        self.microphone_gain_spin.setValue(self._preferences["microphone_gain_percent"])
         self.speech_enabled_check.setChecked(self._preferences["speech_enabled"])
         self.streaming_enabled_check.setChecked(self._preferences["streaming_enabled"])
         self.long_panel_check.setChecked(self._preferences["long_responses_in_panel"])
@@ -337,6 +362,8 @@ class AssistantPanelDialog(QDialog):
 
     def _save_preferences(self) -> None:
         values = {
+            "microphone_device": str(self.microphone_device_combo.currentData() or "default"),
+            "microphone_gain_percent": self.microphone_gain_spin.value(),
             "speech_enabled": self.speech_enabled_check.isChecked(),
             "streaming_enabled": self.streaming_enabled_check.isChecked(),
             "long_responses_in_panel": self.long_panel_check.isChecked(),

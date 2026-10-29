@@ -17,6 +17,8 @@ def default_hud_preferences(streaming_enabled: bool = True) -> dict[str, Any]:
         "speech_rate": 165,
         "response_panel_threshold": 260,
         "conversation_timeout_seconds": 60,
+        "microphone_device": "default",
+        "microphone_gain_percent": 125,
     }
 
 
@@ -33,11 +35,15 @@ def normalize_hud_preferences(
                 preferences[key] = value
             elif isinstance(value, str):
                 preferences[key] = value.strip().casefold() in {"1", "true", "yes", "on", "sim"}
+        device = values.get("microphone_device", preferences["microphone_device"])
+        if isinstance(device, str) and device.strip():
+            preferences["microphone_device"] = device.strip()
         bounds = {
             "speech_volume_percent": (25, 125),
             "speech_rate": (100, 220),
             "response_panel_threshold": (160, 600),
             "conversation_timeout_seconds": (15, 600),
+            "microphone_gain_percent": (50, 300),
         }
         for key, (minimum, maximum) in bounds.items():
             try:
