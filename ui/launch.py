@@ -72,7 +72,7 @@ from aurora.ui.assistant_panel import AssistantPanelDialog
 from aurora.ui.hud_preferences import load_hud_preferences, save_hud_preferences
 from aurora.ui.voice_conversation import VoiceConversationSession, is_conversation_end_command, is_barge_in_command
 from aurora.ui.audio_capture import to_vosk_pcm16
-from aurora.voice.reaction_player import play_reaction_clip
+from aurora.voice.reaction_player import play_reaction_clip, warm_reaction_cache
 from aurora.ui.window_overlay import set_window_topmost
 from PySide6.QtCore import (
     QPoint,
@@ -1163,7 +1163,7 @@ class SvgHologram(QMainWindow):
             input_device_id=self._hud_preferences.get("microphone_device", "default"),
             input_gain_percent=self._hud_preferences.get("microphone_gain_percent", 125),
         )
-        self._proactive_loop = None
+        warm_reaction_cache()\n        self._proactive_loop = None
         if self._agent is not None:
             try:
                 self._proactive_loop = ProactiveLoop(
