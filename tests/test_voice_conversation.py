@@ -21,11 +21,18 @@ sys.path.insert(0, str(_REPO_ROOT.parent))
 from aurora.ui.voice_conversation import (
     VoiceConversationSession,
     is_conversation_end_command,
-    normalize_voice_command,
+    normalize_voice_command,\n    is_barge_in_command,
 )
 
 
 class VoiceCommandTests(unittest.TestCase):
+    def test_barge_in_commands(self):
+        self.assertTrue(is_barge_in_command("Aurora, para"))
+        self.assertTrue(is_barge_in_command("Aurora stop"))
+        self.assertTrue(is_barge_in_command("para Aurora"))
+        self.assertFalse(is_barge_in_command("para"))
+        self.assertFalse(is_barge_in_command("Aurora, continue"))
+
     def test_end_command_accepts_wakeword_and_accent_variants(self):
         self.assertTrue(is_conversation_end_command("Aurora, pode descansar"))
         self.assertTrue(is_conversation_end_command("pode descansar agora"))
