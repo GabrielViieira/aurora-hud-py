@@ -24,7 +24,7 @@ sys.path.insert(0, str(_REPO_ROOT.parent))
 from aurora.voice.reaction_player import (
     choose_reaction_clip,
     list_reaction_clips,
-    play_reaction_clip,\n    warm_reaction_cache,
+    play_reaction_clip,
 )
 
 
