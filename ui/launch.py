@@ -2808,7 +2808,7 @@ class SvgHologram(QMainWindow):
                         stage = "traduzindo a resposta para japonês"
                         print(f"[Aurora TTS] Geração={generation}: início da tradução.")
                         translate_started = time.monotonic()
-                        spoken_text = text if _JA_KANA_RE.search(text) else self._translate_to_japanese(text)
+                        spoken_text = text if _JA_RE.search(text) else self._translate_to_japanese(text)
                         if spoken_text is text:
                             print(f"[Aurora TTS] Geração={generation}: texto JA fornecido pelo stream; tradução ignorada.")
                         else:
@@ -2819,7 +2819,7 @@ class SvgHologram(QMainWindow):
                             )
                         if not self._is_speech_generation_current(generation):
                             return
-                        if not spoken_text or not _JA_KANA_RE.search(spoken_text):
+                        if not spoken_text or not _JA_RE.search(spoken_text):
                             audio_path = None
                         else:
                             stage = f"sintetizando áudio (backend={AURORA_TTS_BACKEND})"
