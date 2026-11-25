@@ -66,6 +66,7 @@ except Exception:
 from animation import D20Animation
 from efeitos import HologramEffects
 from aurora.core.streaming import BilingualStreamParser, StreamingSpeechSession
+from aurora.core.proactive_loop import ProactiveLoop
 from aurora.core.control_commands import classify_hud_control_command
 from aurora.ui.assistant_panel import AssistantPanelDialog
 from aurora.ui.hud_preferences import load_hud_preferences, save_hud_preferences
@@ -933,6 +934,7 @@ class SvgHologram(QMainWindow):
     approval_requested = Signal(object)
     agent_task_finished = Signal()
     voice_interrupt_requested = Signal()
+    proactive_speech_requested = Signal(str, str)
 
     def __init__(self, svg_path: Path, listen_on_start: bool = False) -> None:
         super().__init__()
@@ -994,6 +996,9 @@ class SvgHologram(QMainWindow):
         )
         self.voice_interrupt_requested.connect(
             self._cancel_speech_output, Qt.ConnectionType.QueuedConnection
+        )
+        self.proactive_speech_requested.connect(
+            self._handle_proactive_speech, Qt.ConnectionType.QueuedConnection
         )
         self._init_runtime()
         preferences_dir = (
@@ -1145,6 +1150,20 @@ class SvgHologram(QMainWindow):
             input_device_id=self._hud_preferences.get("microphone_device", "default"),
             input_gain_percent=self._hud_preferences.get("microphone_gain_percent", 125),
         )
+        self._proactive_loop = None
+        if self._agent is not None:
+            try:
+                self._proactive_loop = ProactiveLoop(
+                    provider=self._agent.provider,
+                    model_for_chat=lambda: self._agent.router.model_for("chat"),
+                    speak_callback=lambda pt, ja: self.proactive_speech_requested.emit(pt, ja),
+                    busy_callback=self._voice_session_busy,
+                )
+                self._proactive_loop.start()
+                print("[Aurora proativa] Observadores locais iniciados (somente fala, sem ferramentas).")
+            except Exception as exc:
+                self._proactive_loop = None
+                print(f"[Aurora proativa] Não foi possível iniciar o loop: {exc}")
 
         # Legenda flutuante com efeito fade in/out (estável para janela frameless)
         self.caption_label = QLabel(self)
@@ -3534,6 +3553,13 @@ class SvgHologram(QMainWindow):
         if hasattr(self, "voice_mode_btn"):
             self.voice_mode_btn.setText(button)
 
+    @Slot(str, str)
+    def _handle_proactive_speech(self, caption_pt: str, spoken_ja: str) -> None:
+        """Recebe nudge proativo apenas como fala; não executa ações."""
+        if self._voice_session_busy() or not caption_pt.strip() or not spoken_ja.strip():
+            return
+        self.speak_with_caption(f"Aurora: {caption_pt.strip()}", spoken_ja.strip())
+
     def _voice_session_busy(self) -> bool:
         with self._task_lock:
             task_active = self._task_active
@@ -3670,6 +3696,8 @@ class SvgHologram(QMainWindow):
         self.animation_timer.stop()
         self.topmost_timer.stop()
         self.stop_listening()
+        if self._proactive_loop is not None:
+            self._proactive_loop.stop()
         self._shutdown_sapi_worker()
         self._shutdown_gpt_sovits_direct()
         self._shutdown_gpt_sovits_api()
