@@ -77,6 +77,10 @@ class ProactiveLoop:
         return self.quiet_start_hour <= hour < self.quiet_end_hour
 
     def _choose_event(self, snapshot: ObserverSnapshot) -> str:
+        if snapshot.download_completed:
+            self._pending_download_notice = snapshot.download_completed
+        if snapshot.is_game and snapshot.game_seconds >= self.game_milestone_seconds:
+            self._pending_game_milestone = True
         if self._pending_download_notice:
             notice = self._pending_download_notice
             self._pending_download_notice = ""
