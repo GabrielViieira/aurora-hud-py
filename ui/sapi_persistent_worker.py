@@ -48,7 +48,6 @@ def main() -> int:
             engine.setProperty("volume", max(0.0, min(1.0, float(request.get("volume", 0.5)))))
             engine.save_to_file(text, output)
             engine.runAndWait()
-            engine.stop()
             emit({"id": request_id, "ok": True, "output": output})
         except Exception as exc:
             try:
