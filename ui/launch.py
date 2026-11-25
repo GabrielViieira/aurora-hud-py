@@ -737,27 +737,31 @@ class VoiceListener:
                             utterance_audio.extend(block)
                             if len(utterance_audio) > max_utterance_bytes:
                                 del utterance_audio[:-max_utterance_bytes]
-                            if recognizer.AcceptWaveform(block):
-                                utterance_audio.clear()
-                                try:
+                            heard = ""
+                            try:
+                                if recognizer.AcceptWaveform(block):
                                     result = json.loads(recognizer.Result())
                                     heard = str(result.get("text") or "").strip()
-                                except (json.JSONDecodeError, TypeError):
-                                    heard = ""
-                                if heard and is_barge_in_command(heard, self.wakeword):
-                                    print(f"[Aurora voz] Interrupção detectada: {heard}")
-                                    self.status_callback("Interrupção por voz detectada; parando a fala.")
-                                    if self.interrupt_callback is not None:
-                                        try:
-                                            self.interrupt_callback()
-                                        except Exception as exc:
-                                            print(f"[Aurora voz] callback de interrupção falhou: {exc}")
-                                    barge_in_latched = True
+                                else:
+                                    partial = json.loads(recognizer.PartialResult())
+                                    heard = str(partial.get("partial") or "").strip()
+                            except (json.JSONDecodeError, TypeError):
+                                heard = ""
+                            if heard and is_barge_in_command(heard, self.wakeword):
+                                utterance_audio.clear()
+                                print(f"[Aurora voz] Interrupção detectada: {heard}")
+                                self.status_callback("Interrupção por voz detectada; parando a fala.")
+                                if self.interrupt_callback is not None:
                                     try:
-                                        recognizer.Reset()
-                                    except Exception:
-                                        pass
-                                    drain_audio_queue()
+                                        self.interrupt_callback()
+                                    except Exception as exc:
+                                        print(f"[Aurora voz] callback de interrupção falhou: {exc}")
+                                barge_in_latched = True
+                                try:
+                                    recognizer.Reset()
+                                except Exception:
+                                    pass
+                                drain_audio_queue()
                             continue
 
                         if assistant_was_speaking:
@@ -986,6 +990,7 @@ class SvgHologram(QMainWindow):
         self._active_speech_stop_event: Optional[threading.Event] = None
         self._active_speech_done = None
         self._stream_turn_counter = 0
+        self._voice_interrupted_stream_tokens: set[int] = set()
         self._stream_session_lock = threading.Lock()
         self._stream_speech_session: Optional[StreamingSpeechSession] = None
         self._allow_close = False
@@ -1003,7 +1008,7 @@ class SvgHologram(QMainWindow):
             self._on_agent_task_finished, Qt.ConnectionType.QueuedConnection
         )
         self.voice_interrupt_requested.connect(
-            self._cancel_speech_output, Qt.ConnectionType.QueuedConnection
+            self._handle_voice_barge_in, Qt.ConnectionType.QueuedConnection
         )
         self.proactive_speech_requested.connect(
             self._handle_proactive_speech, Qt.ConnectionType.QueuedConnection
@@ -3080,6 +3085,14 @@ class SvgHologram(QMainWindow):
         finally:
             done.set()
 
+    @Slot()
+    def _handle_voice_barge_in(self) -> None:
+        """Stop current audio and suppress later speech for the interrupted stream."""
+        session = self._stream_speech_session
+        if session is not None:
+            self._voice_interrupted_stream_tokens.add(session.token)
+        self._cancel_speech_output()
+
     def _cancel_speech_output(self) -> bool:
         with self._speech_generation_lock:
             previous_generation = self._speech_generation
@@ -3431,19 +3444,27 @@ class SvgHologram(QMainWindow):
                     self.visual_state_requested.emit("idle")
                 elif reply_text:
                     final_state = "error" if status.endswith(("FAILED", "ERROR")) else "completed"
-                    spoken_incrementally = self._finish_streamed_speech_session(
-                        stream_session, final_state
-                    )
-                    if not spoken_incrementally:
-                        caption_pt, spoken_ja = self._extract_bilingual_response(reply_text)
-                        if spoken_ja:
-                            self.speak_with_caption(
-                                f"Aurora: {caption_pt}", spoken_ja, final_state=final_state
-                            )
-                        else:
-                            self.speak_with_caption(
-                                f"Aurora: {caption_pt or reply_text}", reply_text, final_state=final_state
-                            )
+                    if stream_token in self._voice_interrupted_stream_tokens:
+                        caption_pt, _spoken_ja = self._extract_bilingual_response(reply_text)
+                        self.show_caption_requested.emit(
+                            f"Aurora: {caption_pt or reply_text}"
+                        )
+                        self.visual_state_requested.emit(final_state)
+                        print("[Aurora voz] Resposta final mantida em texto após barge-in; TTS suprimido.")
+                    else:
+                        spoken_incrementally = self._finish_streamed_speech_session(
+                            stream_session, final_state
+                        )
+                        if not spoken_incrementally:
+                            caption_pt, spoken_ja = self._extract_bilingual_response(reply_text)
+                            if spoken_ja:
+                                self.speak_with_caption(
+                                    f"Aurora: {caption_pt}", spoken_ja, final_state=final_state
+                                )
+                            else:
+                                self.speak_with_caption(
+                                    f"Aurora: {caption_pt or reply_text}", reply_text, final_state=final_state
+                                )
                 else:
                     self._cancel_streamed_speech_session(stream_session)
                     self.visual_state_requested.emit("completed")
@@ -3460,6 +3481,7 @@ class SvgHologram(QMainWindow):
                     err = f"Erro ao processar: {exc}"
                     self.speak_with_caption(err, "エラーが発生しました。", final_state="error")
             finally:
+                self._voice_interrupted_stream_tokens.discard(stream_token)
                 print(f"[Aurora tarefa] Worker saindo após {time.monotonic() - task_started:.1f}s.")
                 self.agent_task_finished.emit()
 
