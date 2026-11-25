@@ -44,6 +44,12 @@ def system_prompt(user_name: str = "", voice_enabled: bool = False) -> str:
         parts.append(TOOL_GUIDANCE)
     if user_name:
         parts.append(f"O nome do usuário é {user_name}.")
+    # O HUD exibe PT e usa JA diretamente no TTS; não chama tradutor no fluxo.
+    parts.append(
+        "No HUD Aurora, responda sempre em pares curtos e alternados [PT]legenda em português brasileiro [JA]fala em japonês natural. "
+        "Não escreva nada fora das tags; não faça tradução posterior. Preserve o sentido e fatos, "
+        "e não gere prévia textual durante execução de ferramentas."
+    )
     if voice_enabled:
         parts.append(
             "A resposta também será lida em voz alta: use frases curtas, sem markdown, "
