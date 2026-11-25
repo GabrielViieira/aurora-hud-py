@@ -50,7 +50,7 @@ class ProactiveLoop:
         self._thread: threading.Thread | None = None
         self._last_nudge = 0.0
         self._game_milestone_sent = False
-        self._last_download_notice = ""
+        self._last_download_notice = ""\n        self._pending_download_notice = ""\n        self._pending_game_milestone = False
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -75,10 +75,14 @@ class ProactiveLoop:
         return self.quiet_start_hour <= hour < self.quiet_end_hour
 
     def _choose_event(self, snapshot: ObserverSnapshot) -> str:
-        if snapshot.download_completed and snapshot.download_completed != self._last_download_notice:
-            self._last_download_notice = snapshot.download_completed
-            return "download_completed"
-        if snapshot.is_game and snapshot.game_seconds >= self.game_milestone_seconds and not self._game_milestone_sent:
+        if self._pending_download_notice:
+            notice = self._pending_download_notice
+            self._pending_download_notice = ""
+            if notice != self._last_download_notice:
+                self._last_download_notice = notice
+                return "download_completed"
+        if self._pending_game_milestone and not self._game_milestone_sent:
+            self._pending_game_milestone = False
             self._game_milestone_sent = True
             return "game_milestone"
         return ""
@@ -87,6 +91,10 @@ class ProactiveLoop:
         while not self._stop.wait(self.interval_seconds):
             try:
                 snapshot = self.observers.snapshot()
+                if snapshot.download_completed:
+                    self._pending_download_notice = snapshot.download_completed
+                if snapshot.is_game and snapshot.game_seconds >= self.game_milestone_seconds:
+                    self._pending_game_milestone = True
                 if self._quiet_hours(datetime.now()) or self._stop.is_set():
                     continue
                 now = time.monotonic()
