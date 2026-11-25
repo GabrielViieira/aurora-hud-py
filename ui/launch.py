@@ -71,6 +71,7 @@ from aurora.ui.assistant_panel import AssistantPanelDialog
 from aurora.ui.hud_preferences import load_hud_preferences, save_hud_preferences
 from aurora.ui.voice_conversation import VoiceConversationSession, is_conversation_end_command
 from aurora.ui.audio_capture import to_vosk_pcm16
+from aurora.voice.reaction_player import play_reaction_clip
 from aurora.ui.window_overlay import set_window_topmost
 from PySide6.QtCore import (
     QPoint,
@@ -3165,6 +3166,10 @@ class SvgHologram(QMainWindow):
             self._stream_speech_session = stream_session
 
         self._update_cancel_button()
+        # Reação pré-gravada: inicia imediatamente sem esperar o LLM/TTS.
+        # Se o cache local ainda não foi gerado, segue sem alterar o fluxo.
+        if play_reaction_clip():
+            print("[Aurora reação] Áudio curto iniciado em modo assíncrono.")
         self._reset_streamed_text()
         self.show_caption_requested.emit(f"Você: {message}")
         self.visual_state_requested.emit("thinking")
