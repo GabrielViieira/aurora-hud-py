@@ -1492,11 +1492,11 @@ class SvgHologram(QMainWindow):
                 return spoken_text, None
             # O streaming PT/JA já fornece o texto falado em japonês.
             # Só o fluxo legado sem tags recorre ao tradutor de compatibilidade.
-            spoken_text = text if _JA_KANA_RE.search(text) else self._translate_to_japanese(text)
+            spoken_text = text if _JA_RE.search(text) else self._translate_to_japanese(text)
             if (
                 not self._is_speech_generation_current(generation)
                 or not spoken_text
-                or not _JA_KANA_RE.search(spoken_text)
+                or not _JA_RE.search(spoken_text)
             ):
                 return spoken_text, None
 
