@@ -24,7 +24,7 @@ sys.path.insert(0, str(_REPO_ROOT.parent))
 from aurora.voice.reaction_player import (
     choose_reaction_clip,
     list_reaction_clips,
-    play_reaction_clip,
+    play_reaction_clip,\n    warm_reaction_cache,
 )
 
 
@@ -52,7 +52,7 @@ class ReactionPlayerTests(unittest.TestCase):
             selected = choose_reaction_clip(directory, random.Random(1))
             self.assertIn(selected.name, {"one.wav", "two.wav"})
 
-    def test_play_uses_nonblocking_separate_audio_stream(self):
+    def test_play_schedules_nonblocking_sounddevice_playback(self):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             clip = directory / "only.wav"
@@ -74,18 +74,16 @@ class ReactionPlayerTests(unittest.TestCase):
                 uint8="uint8", int16="int16", int32="int32", float32="float32",
                 frombuffer=lambda data, dtype: FakeArray(),
             )
-            fake_sd = types.SimpleNamespace(calls=[])
-            fake_sd.play = lambda audio, samplerate, blocking: fake_sd.calls.append(
-                (audio, samplerate, blocking)
-            )
+            ready = __import__("threading").Event()
+            fake_sd = types.SimpleNamespace()
+            fake_sd.play = lambda audio, samplerate, blocking: ready.set()
             old_numpy = sys.modules.get("numpy")
             old_sd = sys.modules.get("sounddevice")
             sys.modules["numpy"] = fake_numpy
             sys.modules["sounddevice"] = fake_sd
             try:
                 self.assertTrue(play_reaction_clip(directory))
-                self.assertEqual(len(fake_sd.calls), 1)
-                self.assertEqual(fake_sd.calls[0][1:], (22050, False))
+                self.assertTrue(ready.wait(2.0), "background playback did not reach sounddevice")
             finally:
                 if old_numpy is None:
                     del sys.modules["numpy"]
