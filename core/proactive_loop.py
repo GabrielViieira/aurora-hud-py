@@ -87,13 +87,13 @@ class ProactiveLoop:
         while not self._stop.wait(self.interval_seconds):
             try:
                 snapshot = self.observers.snapshot()
-                event = self._choose_event(snapshot)
-                if not event or self._quiet_hours(datetime.now()) or self._stop.is_set():
+                if self._quiet_hours(datetime.now()) or self._stop.is_set():
                     continue
                 now = time.monotonic()
-                if now - self._last_nudge < self.cooldown_seconds:
+                if now - self._last_nudge < self.cooldown_seconds or self.busy_callback():
                     continue
-                if self.busy_callback():
+                event = self._choose_event(snapshot)
+                if not event:
                     continue
                 self._last_nudge = now
                 self._generate_and_speak(event, snapshot)
