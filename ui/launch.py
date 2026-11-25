@@ -561,7 +561,7 @@ class VoiceListener:
                         except queue.Empty:
                             break
 
-                def play_early_reaction(command: str) -> None:
+                def play_early_reaction(command: str) -> bool:
                     command = (command or "").strip()
                     if not command or is_conversation_end_command(command, self.wakeword):
                         return
@@ -569,9 +569,10 @@ class VoiceListener:
                         return
                     if self.reaction_callback is not None:
                         try:
-                            self.reaction_callback()
+                            return bool(self.reaction_callback())
                         except Exception as exc:
                             print(f"[Aurora voz] reação antecipada falhou: {exc}")
+                    return False
 
                 def handle_recognized(phrase: str, utterance_pcm: bytes) -> None:
                     phrase = (phrase or "").strip()
@@ -592,7 +593,7 @@ class VoiceListener:
                         # Reação no endpoint Vosk, antes da transcrição Whisper,
                         # para reduzir o tempo de primeiro som percebido.
                         early_command = phrase[match.end():].strip(" \\t\\r\\n,.;:!?-–—")
-                        play_early_reaction(early_command)
+                        reaction_started = play_early_reaction(early_command)
                         # Reouve o segmento inteiro para preservar pedidos bilíngues.
                         whispered = transcribe_utterance(utterance_pcm)
                         if whispered:
@@ -610,6 +611,9 @@ class VoiceListener:
                         if not command:
                             command = phrase[match.end():].strip(" \t\r\n,.;:!?-–—")
 
+                        if reaction_started and not callback_enabled(self.assistant_speaking_callback):
+                            # Reação já terminou durante Whisper: descarta eco residual.
+                            drain_audio_queue()
                         if is_conversation_end_command(command, self.wakeword):
                             end_conversation()
                             return
@@ -636,8 +640,10 @@ class VoiceListener:
                         return
 
                     if session.is_active:
-                        play_early_reaction(phrase)
+                        reaction_started = play_early_reaction(phrase)
                         whispered = transcribe_utterance(utterance_pcm)
+                        if reaction_started and not callback_enabled(self.assistant_speaking_callback):
+                            drain_audio_queue()
                         command = (whispered or phrase).strip(" \t\r\n,.;:!?-–—")
                         if is_conversation_end_command(command, self.wakeword):
                             end_conversation()
