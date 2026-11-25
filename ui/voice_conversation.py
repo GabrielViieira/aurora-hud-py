@@ -93,3 +93,23 @@ class VoiceConversationSession:
         if not self.is_active:
             return 0
         return max(0, int(self._expires_at - float(now)))
+
+_BARGE_IN_COMMANDS = {
+    "aurora para", "para aurora", "aurora pare", "pare aurora",
+    "aurora stop", "stop aurora", "aurora interrompe", "interrompe aurora",
+    "aurora cancela", "cancela aurora", "aurora quieta", "aurora quieto",
+}
+
+
+def is_barge_in_command(text: str, wakeword: str = "aurora") -> bool:
+    """Detecta comandos curtos explícitos de interrupção de fala."""
+    normalized = normalize_voice_command(text)
+    wake = normalize_voice_command(wakeword)
+    if not normalized:
+        return False
+    if normalized in _BARGE_IN_COMMANDS:
+        return True
+    return bool(wake and re.search(
+        r"\\b" + re.escape(wake) + r"\\b.*\\b(?:para|pare|stop|interrompe|cancela)\\b",
+        normalized,
+    ))
