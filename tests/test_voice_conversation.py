@@ -21,7 +21,8 @@ sys.path.insert(0, str(_REPO_ROOT.parent))
 from aurora.ui.voice_conversation import (
     VoiceConversationSession,
     is_conversation_end_command,
-    normalize_voice_command,\n    is_barge_in_command,
+    normalize_voice_command,
+    is_barge_in_command,
 )
 
 
