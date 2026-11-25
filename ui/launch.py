@@ -701,6 +701,7 @@ class VoiceListener:
                     utterance_audio = bytearray()
                     max_utterance_bytes = 25 * 16000 * 2  # limite de 25 s, mono PCM 16-bit / 16 kHz
                     assistant_was_speaking = False
+                    barge_in_latched = False
                     while not self._stop_event.is_set():
                         now = time.monotonic()
                         session.set_timeout(self.conversation_timeout_s)
@@ -714,6 +715,12 @@ class VoiceListener:
                             return_to_standby()
 
                         if callback_enabled(self.assistant_speaking_callback):
+                            if barge_in_latched:
+                                # Evita detectar repetidamente a mesma ordem durante
+                                # a latência do sinal Qt que interrompe o playback.
+                                drain_audio_queue()
+                                self._stop_event.wait(0.05)
+                                continue
                             if not assistant_was_speaking:
                                 utterance_audio.clear()
                                 try:
@@ -745,7 +752,7 @@ class VoiceListener:
                                             self.interrupt_callback()
                                         except Exception as exc:
                                             print(f"[Aurora voz] callback de interrupção falhou: {exc}")
-                                    assistant_was_speaking = False
+                                    barge_in_latched = True
                                     try:
                                         recognizer.Reset()
                                     except Exception:
@@ -754,6 +761,7 @@ class VoiceListener:
                             continue
 
                         if assistant_was_speaking:
+                            barge_in_latched = False
                             # Limpa eco residual quando a fala termina naturalmente.
                             utterance_audio.clear()
                             try:
