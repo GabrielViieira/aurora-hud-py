@@ -22,7 +22,7 @@ jobs:
       - name: Compile core modules
         run: python -m compileall -q config core llm memory security storage tools
       - name: Compile active HUD modules
-        run: python -m py_compile ui/launch.py ui/assistant_panel.py ui/hud_preferences.py ui/voice_conversation.py ui/audio_capture.py ui/window_overlay.py
+        run: python -m py_compile ui/launch.py ui/assistant_panel.py ui/hud_preferences.py ui/voice_conversation.py ui/audio_capture.py ui/window_overlay.py voice/reaction_player.py tools/generate_reactions.py
       - name: Test Windows overlay z-order helper
         run: python tests/test_window_overlay.py
       - name: Test streaming HTTP client and policy
@@ -33,6 +33,8 @@ jobs:
         run: python tests/test_conversation_history.py
       - name: Test HUD preferences
         run: python tests/test_hud_preferences.py
+      - name: Test cached voice reactions
+        run: python tests/test_reaction_player.py
       - name: Test continuous voice conversation
         run: python tests/test_voice_conversation.py
       - name: Test microphone audio conversion
