@@ -110,6 +110,6 @@ def is_barge_in_command(text: str, wakeword: str = "aurora") -> bool:
     if normalized in _BARGE_IN_COMMANDS:
         return True
     return bool(wake and re.search(
-        r"\b" + re.escape(wake) + r"\b.*\b(?:para|pare|stop|interrompe|cancela)\\b",
+        r"\b" + re.escape(wake) + r"\b.*\b(?:para|pare|stop|interrompe|cancela)\b",
         normalized,
     ))
