@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import random
 from pathlib import Path
-from typing import Iterable
 
 DEFAULT_REACTION_DIR = Path(__file__).resolve().parent / "reactions"
 
