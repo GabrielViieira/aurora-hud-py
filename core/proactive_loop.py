@@ -103,7 +103,7 @@ class ProactiveLoop:
     def _generate_and_speak(self, event: str, snapshot: ObserverSnapshot) -> None:
         event_pt = {
             "game_milestone": "A pessoa está há cerca de três horas em uma janela reconhecida como jogo.",
-            "download_completed": f"Um arquivo parece ter terminado de baixar: {snapshot.download_completed}.",
+            "download_completed": "Um arquivo parece ter terminado de baixar.",
         }.get(event, "Uma observação local.")
         system = (
             "Você é Aurora, uma companheira conversacional. Gere apenas uma fala curta e natural, "
