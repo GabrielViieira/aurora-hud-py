@@ -84,7 +84,7 @@ class CheapObservers:
                 else:
                     stable_count += 1
                     current[str(path)] = (size, stable_since, stable_count)
-                    if stable_count == 2 and old_size > 1024 and now - self._recent_completion_at > 180:
+                    if stable_count == 2 and old_size > 1024 and (not self._recent_completion_at or now - self._recent_completion_at > 180):
                         completed = path.name
                         self._recent_completion_at = now
             except OSError:
