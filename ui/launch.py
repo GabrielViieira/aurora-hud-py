@@ -1062,6 +1062,13 @@ class SvgHologram(QMainWindow):
 
         self._tts_engine = None
         self._tts_lock = threading.Lock()
+        # Worker SAPI persistente: evita criar processo COM para cada frase.
+        self._sapi_worker_process: Optional[subprocess.Popen] = None
+        self._sapi_worker_messages: Optional[queue.Queue] = None
+        self._sapi_worker_ready = False
+        self._sapi_worker_start_failed = False
+        self._sapi_worker_start_lock = threading.Lock()
+        self._sapi_worker_request_id = 0
         self._piper_voice = None
         self._piper_load_lock = threading.Lock()
         self._piper_import_error_reported = False
@@ -2527,70 +2534,157 @@ class SvgHologram(QMainWindow):
             shutil.rmtree(work_dir, ignore_errors=True)
             return None
 
+    def _ensure_sapi_worker(self) -> bool:
+        """Inicializa um único worker SAPI isolado e reutilizável."""
+        process = self._sapi_worker_process
+        messages = self._sapi_worker_messages
+        if process is not None and process.poll() is None and self._sapi_worker_ready and messages is not None:
+            return True
+        if self._sapi_worker_start_failed:
+            return False
+        with self._sapi_worker_start_lock:
+            process = self._sapi_worker_process
+            messages = self._sapi_worker_messages
+            if process is not None and process.poll() is None and self._sapi_worker_ready and messages is not None:
+                return True
+            if process is not None:
+                self._shutdown_sapi_worker()
+            worker_path = Path(__file__).resolve().with_name("sapi_persistent_worker.py")
+            log_path = Path(__file__).resolve().parents[1] / "data" / "sapi_worker.log"
+            try:
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                with log_path.open("a", encoding="utf-8", errors="replace") as log:
+                    process = subprocess.Popen(
+                        [sys.executable, "-u", str(worker_path)],
+                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log,
+                        text=True, encoding="utf-8", errors="replace", bufsize=1,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    )
+                messages = queue.Queue()
+                self._sapi_worker_process = process
+                self._sapi_worker_messages = messages
+                self._sapi_worker_ready = False
+                threading.Thread(
+                    target=self._read_sapi_worker_output,
+                    args=(process, messages),
+                    daemon=True, name="AuroraSapiWorkerReader",
+                ).start()
+                startup_timeout = max(5.0, min(25.0, float(os.environ.get("AURORA_SAPI_STARTUP_TIMEOUT", "15"))))
+                ready = messages.get(timeout=startup_timeout)
+                if not isinstance(ready, dict) or not ready.get("ready") or not ready.get("ok"):
+                    raise RuntimeError(f"Worker SAPI não iniciou: {ready}")
+                self._sapi_worker_ready = True
+                print("[Aurora TTS] Worker SAPI persistente pronto.")
+                return True
+            except Exception as exc:
+                self._sapi_worker_start_failed = True
+                print(f"[Aurora TTS] Falha ao iniciar worker SAPI persistente: {exc}")
+                self._shutdown_sapi_worker()
+                return False
+
+    @staticmethod
+    def _read_sapi_worker_output(process, messages: queue.Queue) -> None:
+        stream = process.stdout
+        if stream is None:
+            messages.put(None)
+            return
+        try:
+            for line in stream:
+                try:
+                    messages.put(json.loads(line))
+                except json.JSONDecodeError:
+                    print(f"[Aurora SAPI worker] Resposta JSON inválida: {line[:250]}")
+        finally:
+            messages.put(None)
+
+    def _shutdown_sapi_worker(self) -> None:
+        process = self._sapi_worker_process
+        self._sapi_worker_ready = False
+        if process is not None:
+            if process.poll() is None:
+                try:
+                    if process.stdin is not None:
+                        process.stdin.write(json.dumps({"cmd": "shutdown"}) + "\n")
+                        process.stdin.flush()
+                    process.wait(timeout=3.5)
+                except Exception:
+                    try:
+                        process.terminate()
+                        process.wait(timeout=2.0)
+                    except Exception:
+                        try:
+                            process.kill()
+                        except Exception:
+                            pass
+            try:
+                if process.stdin is not None:
+                    process.stdin.close()
+            except Exception:
+                pass
+            try:
+                if process.stdout is not None:
+                    process.stdout.close()
+            except Exception:
+                pass
+        self._sapi_worker_process = None
+        self._sapi_worker_messages = None
+
     def _prepare_sapi_audio(self, japanese_text: str, out_wav: Path) -> Optional[Path]:
-        # O motor pyttsx3/SAPI deve executar no próprio processo/thread COM.
-        # O engine criado pela HUD era reutilizado em uma thread de worker, onde
-        # runAndWait() podia travar indefinidamente. Isolar a síntese em processo
-        # filho permite impor timeout e não bloquear a fila de fala da HUD.
-        if not self._tts_engine or not self._tts_voice_ja:
+        """Synthesizes through the persistent SAPI worker; isolated and timeout-bounded."""
+        if not self._tts_engine or not self._tts_voice_ja or not japanese_text.strip():
             return None
-        text_path = out_wav.with_suffix(".txt")
-        worker_path = Path(__file__).resolve().with_name("sapi_synthesize.py")
         timeout_s = max(5.0, float(os.environ.get("AURORA_SAPI_TIMEOUT_S", "35")))
         try:
             out_wav.parent.mkdir(parents=True, exist_ok=True)
-            text_path.write_text(japanese_text, encoding="utf-8")
-            command = [
-                sys.executable,
-                str(worker_path),
-                "--text-file", str(text_path),
-                "--output", str(out_wav),
-                "--voice-id", str(self._tts_voice_ja),
-                "--rate", str(int(self._hud_preferences.get("speech_rate", 165))),
-                "--volume", "0.5",
-            ]
-            sapi_started = time.monotonic()
-            print(
-                f"[Aurora TTS] SAPI: sintetizando em processo isolado "
-                f"(timeout={timeout_s:.0f}s)."
-            )
-            completed = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout_s,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-            if completed.returncode != 0:
-                detail = (completed.stderr or completed.stdout or "").strip()[:500]
-                print(f"[Aurora TTS] Processo SAPI falhou (código={completed.returncode}): {detail}")
+            if not self._ensure_sapi_worker():
                 return None
-            print(
-                f"[Aurora TTS] Processo SAPI terminou em "
-                f"{time.monotonic() - sapi_started:.1f}s."
-            )
-            if out_wav.is_file() and out_wav.stat().st_size > 44:
-                return out_wav
-            print("[Aurora TTS] Processo SAPI terminou sem gerar um WAV válido.")
-        except subprocess.TimeoutExpired:
-            print(
-                f"[Aurora TTS] SAPI excedeu {timeout_s:.0f}s; "
-                "processo isolado interrompido para evitar travar a fila de fala."
-            )
+            process = self._sapi_worker_process
+            messages = self._sapi_worker_messages
+            if process is None or process.poll() is not None or process.stdin is None or messages is None:
+                raise RuntimeError("Worker SAPI indisponível.")
+            self._sapi_worker_request_id += 1
+            request_id = self._sapi_worker_request_id
+            request = {
+                "id": request_id,
+                "text": japanese_text,
+                "output": str(out_wav),
+                "voice_id": str(self._tts_voice_ja),
+                "rate": int(self._hud_preferences.get("speech_rate", 165)),
+                "volume": 0.5,
+            }
+            started = time.monotonic()
+            process.stdin.write(json.dumps(request, ensure_ascii=True) + "\n")
+            process.stdin.flush()
+            deadline = started + timeout_s
+            while time.monotonic() < deadline:
+                try:
+                    response = messages.get(timeout=min(0.4, max(0.05, deadline - time.monotonic())))
+                except queue.Empty:
+                    if process.poll() is not None:
+                        raise RuntimeError("Worker SAPI terminou durante a síntese.")
+                    continue
+                if response is None:
+                    raise RuntimeError("Worker SAPI fechou o canal de respostas.")
+                if response.get("id") != request_id:
+                    # As chamadas são serializadas pelo _tts_lock; respostas inesperadas
+                    # indicam perda de sincronização do protocolo, portanto reinicia.
+                    raise RuntimeError(f"ID inesperado no protocolo SAPI: {response}")
+                if not response.get("ok"):
+                    raise RuntimeError(response.get("error", "síntese SAPI falhou"))
+                if out_wav.is_file() and out_wav.stat().st_size > 44:
+                    print(f"[Aurora TTS] SAPI persistente: síntese em {time.monotonic()-started:.2f}s.")
+                    return out_wav
+                raise RuntimeError("Worker SAPI concluiu sem WAV válido.")
+            raise TimeoutError(f"SAPI excedeu {timeout_s:.0f}s.")
         except Exception as exc:
-            print(f"[Aurora TTS] Não consegui pré-gerar WAV via SAPI: {type(exc).__name__}: {exc}")
-        finally:
+            print(f"[Aurora TTS] Worker SAPI: {type(exc).__name__}: {exc}")
+            self._shutdown_sapi_worker()
+            self._sapi_worker_start_failed = False
             try:
-                text_path.unlink(missing_ok=True)
+                out_wav.unlink(missing_ok=True)
             except OSError:
                 pass
-        try:
-            out_wav.unlink(missing_ok=True)
-        except OSError:
-            pass
-        return None
+            return None
 
     def _queue_speech(self, caption: str, text: str, final_state: str) -> None:
         if not text or not text.strip():
@@ -3537,6 +3631,7 @@ class SvgHologram(QMainWindow):
         self.animation_timer.stop()
         self.topmost_timer.stop()
         self.stop_listening()
+        self._shutdown_sapi_worker()
         self._shutdown_gpt_sovits_direct()
         self._shutdown_gpt_sovits_api()
         try:
