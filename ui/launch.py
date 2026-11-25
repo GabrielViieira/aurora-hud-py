@@ -3089,7 +3089,9 @@ class SvgHologram(QMainWindow):
     def _handle_voice_barge_in(self) -> None:
         """Stop current audio and suppress later speech for the interrupted stream."""
         session = self._stream_speech_session
-        if session is not None:
+        with self._task_lock:
+            active_task = self._task_active
+        if active_task and session is not None:
             self._voice_interrupted_stream_tokens.add(session.token)
         self._cancel_speech_output()
 
@@ -3122,6 +3124,11 @@ class SvgHologram(QMainWindow):
             import winsound
             # PlaySound(None, 0) é a forma documentada de parar o som atual.
             winsound.PlaySound(None, 0)
+        except Exception:
+            pass
+        try:
+            import sounddevice as sd
+            sd.stop()
         except Exception:
             pass
         try:
