@@ -3344,6 +3344,17 @@ class SvgHologram(QMainWindow):
             return True
         return False
 
+    @staticmethod
+    def _extract_bilingual_response(text: str) -> tuple[str, str]:
+        """Extract PT captions and JA speech from a non-streaming tagged reply."""
+        parser = BilingualStreamParser()
+        caption, ready_speech = parser.feed(text or "")
+        caption_tail, speech_tail, legacy = parser.flush()
+        if not parser.has_bilingual_markers:
+            return (legacy or text or "").strip(), ""
+        spoken = " ".join(part.strip() for part in (ready_speech + speech_tail) if part.strip())
+        return (caption + caption_tail).strip(), spoken.strip()
+
     def _start_agent_task(self, message: str, *, voice_input: bool = False) -> None:
         if self._agent is None:
             self.visual_state_requested.emit("error")
@@ -3416,9 +3427,15 @@ class SvgHologram(QMainWindow):
                         stream_session, final_state
                     )
                     if not spoken_incrementally:
-                        self.speak_with_caption(
-                            f"Aurora: {reply_text}", reply_text, final_state=final_state
-                        )
+                        caption_pt, spoken_ja = self._extract_bilingual_response(reply_text)
+                        if spoken_ja:
+                            self.speak_with_caption(
+                                f"Aurora: {caption_pt}", spoken_ja, final_state=final_state
+                            )
+                        else:
+                            self.speak_with_caption(
+                                f"Aurora: {caption_pt or reply_text}", reply_text, final_state=final_state
+                            )
                 else:
                     self._cancel_streamed_speech_session(stream_session)
                     self.visual_state_requested.emit("completed")
