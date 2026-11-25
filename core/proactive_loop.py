@@ -50,7 +50,9 @@ class ProactiveLoop:
         self._thread: threading.Thread | None = None
         self._last_nudge = 0.0
         self._game_milestone_sent = False
-        self._last_download_notice = ""\n        self._pending_download_notice = ""\n        self._pending_game_milestone = False
+        self._last_download_notice = ""
+        self._pending_download_notice = ""
+        self._pending_game_milestone = False
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
