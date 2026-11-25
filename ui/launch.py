@@ -65,12 +65,14 @@ except Exception:
 
 from animation import D20Animation
 from efeitos import HologramEffects
-from aurora.core.streaming import StreamingSpeechSession
+from aurora.core.streaming import BilingualStreamParser, StreamingSpeechSession
+from aurora.core.proactive_loop import ProactiveLoop
 from aurora.core.control_commands import classify_hud_control_command
 from aurora.ui.assistant_panel import AssistantPanelDialog
 from aurora.ui.hud_preferences import load_hud_preferences, save_hud_preferences
-from aurora.ui.voice_conversation import VoiceConversationSession, is_conversation_end_command
+from aurora.ui.voice_conversation import VoiceConversationSession, is_conversation_end_command, is_barge_in_command
 from aurora.ui.audio_capture import to_vosk_pcm16
+from aurora.voice.reaction_player import play_reaction_clip, warm_reaction_cache
 from aurora.ui.window_overlay import set_window_topmost
 from PySide6.QtCore import (
     QPoint,
@@ -301,6 +303,8 @@ class VoiceListener:
         standby_callback: Optional[Callable[[], None]] = None,
         busy_callback: Optional[Callable[[], bool]] = None,
         assistant_speaking_callback: Optional[Callable[[], bool]] = None,
+        interrupt_callback: Optional[Callable[[], None]] = None,
+        reaction_callback: Optional[Callable[[], bool]] = None,
         input_device_id: str = "default",
         input_gain_percent: float = 125.0,
     ) -> None:
@@ -313,6 +317,8 @@ class VoiceListener:
         self.standby_callback = standby_callback
         self.busy_callback = busy_callback
         self.assistant_speaking_callback = assistant_speaking_callback
+        self.interrupt_callback = interrupt_callback
+        self.reaction_callback = reaction_callback
         self.input_device_id = str(input_device_id or "default")
         self.input_gain_percent = max(50.0, min(300.0, float(input_gain_percent)))
         self._stop_event = threading.Event()
@@ -555,6 +561,19 @@ class VoiceListener:
                         except queue.Empty:
                             break
 
+                def play_early_reaction(command: str) -> bool:
+                    command = (command or "").strip()
+                    if not command or is_conversation_end_command(command, self.wakeword):
+                        return
+                    if classify_hud_control_command(command) in {"cancel", "exit"}:
+                        return
+                    if self.reaction_callback is not None:
+                        try:
+                            return bool(self.reaction_callback())
+                        except Exception as exc:
+                            print(f"[Aurora voz] reação antecipada falhou: {exc}")
+                    return False
+
                 def handle_recognized(phrase: str, utterance_pcm: bytes) -> None:
                     phrase = (phrase or "").strip()
                     if not phrase:
@@ -571,6 +590,10 @@ class VoiceListener:
                     match = wakeword_pattern.search(phrase)
                     if match:
                         was_active = session.is_active
+                        # Reação no endpoint Vosk, antes da transcrição Whisper,
+                        # para reduzir o tempo de primeiro som percebido.
+                        early_command = phrase[match.end():].strip(" \\t\\r\\n,.;:!?-–—")
+                        reaction_started = play_early_reaction(early_command)
                         # Reouve o segmento inteiro para preservar pedidos bilíngues.
                         whispered = transcribe_utterance(utterance_pcm)
                         if whispered:
@@ -588,6 +611,9 @@ class VoiceListener:
                         if not command:
                             command = phrase[match.end():].strip(" \t\r\n,.;:!?-–—")
 
+                        if reaction_started and not callback_enabled(self.assistant_speaking_callback):
+                            # Reação já terminou durante Whisper: descarta eco residual.
+                            drain_audio_queue()
                         if is_conversation_end_command(command, self.wakeword):
                             end_conversation()
                             return
@@ -614,7 +640,10 @@ class VoiceListener:
                         return
 
                     if session.is_active:
+                        reaction_started = play_early_reaction(phrase)
                         whispered = transcribe_utterance(utterance_pcm)
+                        if reaction_started and not callback_enabled(self.assistant_speaking_callback):
+                            drain_audio_queue()
                         command = (whispered or phrase).strip(" \t\r\n,.;:!?-–—")
                         if is_conversation_end_command(command, self.wakeword):
                             end_conversation()
@@ -697,6 +726,7 @@ class VoiceListener:
                     utterance_audio = bytearray()
                     max_utterance_bytes = 25 * 16000 * 2  # limite de 25 s, mono PCM 16-bit / 16 kHz
                     assistant_was_speaking = False
+                    barge_in_latched = False
                     while not self._stop_event.is_set():
                         now = time.monotonic()
                         session.set_timeout(self.conversation_timeout_s)
@@ -710,6 +740,12 @@ class VoiceListener:
                             return_to_standby()
 
                         if callback_enabled(self.assistant_speaking_callback):
+                            if barge_in_latched:
+                                # Evita detectar repetidamente a mesma ordem durante
+                                # a latência do sinal Qt que interrompe o playback.
+                                drain_audio_queue()
+                                self._stop_event.wait(0.05)
+                                continue
                             if not assistant_was_speaking:
                                 utterance_audio.clear()
                                 try:
@@ -717,12 +753,45 @@ class VoiceListener:
                                 except Exception:
                                     pass
                             assistant_was_speaking = True
-                            # Evita transcrever a própria voz sintetizada como fala do usuário.
-                            drain_audio_queue()
-                            self._stop_event.wait(0.05)
+                            # Mantém reconhecimento local durante playback somente para
+                            # comandos explícitos de interrupção; ignora outras falas/eco.
+                            try:
+                                block = self._audio_queue.get(timeout=0.15)
+                            except queue.Empty:
+                                continue
+                            utterance_audio.extend(block)
+                            if len(utterance_audio) > max_utterance_bytes:
+                                del utterance_audio[:-max_utterance_bytes]
+                            heard = ""
+                            try:
+                                if recognizer.AcceptWaveform(block):
+                                    result = json.loads(recognizer.Result())
+                                    heard = str(result.get("text") or "").strip()
+                                else:
+                                    partial = json.loads(recognizer.PartialResult())
+                                    heard = str(partial.get("partial") or "").strip()
+                            except (json.JSONDecodeError, TypeError):
+                                heard = ""
+                            if heard and is_barge_in_command(heard, self.wakeword):
+                                utterance_audio.clear()
+                                print(f"[Aurora voz] Interrupção detectada: {heard}")
+                                self.status_callback("Interrupção por voz detectada; parando a fala.")
+                                if self.interrupt_callback is not None:
+                                    try:
+                                        self.interrupt_callback()
+                                    except Exception as exc:
+                                        print(f"[Aurora voz] callback de interrupção falhou: {exc}")
+                                barge_in_latched = True
+                                try:
+                                    recognizer.Reset()
+                                except Exception:
+                                    pass
+                                drain_audio_queue()
                             continue
 
                         if assistant_was_speaking:
+                            barge_in_latched = False
+                            # Limpa eco residual quando a fala termina naturalmente.
                             utterance_audio.clear()
                             try:
                                 recognizer.Reset()
@@ -901,6 +970,8 @@ class SvgHologram(QMainWindow):
     visual_state_requested = Signal(str)
     approval_requested = Signal(object)
     agent_task_finished = Signal()
+    voice_interrupt_requested = Signal()
+    proactive_speech_requested = Signal(str, str)
 
     def __init__(self, svg_path: Path, listen_on_start: bool = False) -> None:
         super().__init__()
@@ -944,6 +1015,10 @@ class SvgHologram(QMainWindow):
         self._active_speech_stop_event: Optional[threading.Event] = None
         self._active_speech_done = None
         self._stream_turn_counter = 0
+        self._voice_interrupted_stream_tokens: set[int] = set()
+        self._reaction_active = False
+        self._voice_reaction_preplayed = False
+        self._voice_reaction_lock = threading.Lock()
         self._stream_session_lock = threading.Lock()
         self._stream_speech_session: Optional[StreamingSpeechSession] = None
         self._allow_close = False
@@ -959,6 +1034,12 @@ class SvgHologram(QMainWindow):
         )
         self.agent_task_finished.connect(
             self._on_agent_task_finished, Qt.ConnectionType.QueuedConnection
+        )
+        self.voice_interrupt_requested.connect(
+            self._handle_voice_barge_in, Qt.ConnectionType.QueuedConnection
+        )
+        self.proactive_speech_requested.connect(
+            self._handle_proactive_speech, Qt.ConnectionType.QueuedConnection
         )
         self._init_runtime()
         preferences_dir = (
@@ -1027,6 +1108,13 @@ class SvgHologram(QMainWindow):
 
         self._tts_engine = None
         self._tts_lock = threading.Lock()
+        # Worker SAPI persistente: evita criar processo COM para cada frase.
+        self._sapi_worker_process: Optional[subprocess.Popen] = None
+        self._sapi_worker_messages: Optional[queue.Queue] = None
+        self._sapi_worker_ready = False
+        self._sapi_worker_start_failed = False
+        self._sapi_worker_start_lock = threading.Lock()
+        self._sapi_worker_request_id = 0
         self._piper_voice = None
         self._piper_load_lock = threading.Lock()
         self._piper_import_error_reported = False
@@ -1099,9 +1187,26 @@ class SvgHologram(QMainWindow):
             standby_callback=lambda: self.visual_state_requested.emit("idle"),
             busy_callback=self._voice_session_busy,
             assistant_speaking_callback=self._assistant_is_speaking,
+            interrupt_callback=self.voice_interrupt_requested.emit,
+            reaction_callback=self._play_voice_reaction_early,
             input_device_id=self._hud_preferences.get("microphone_device", "default"),
             input_gain_percent=self._hud_preferences.get("microphone_gain_percent", 125),
         )
+        warm_reaction_cache()
+        self._proactive_loop = None
+        if self._agent is not None:
+            try:
+                self._proactive_loop = ProactiveLoop(
+                    provider=self._agent.provider,
+                    model_for_chat=lambda: self._agent.router.model_for("chat"),
+                    speak_callback=lambda pt, ja: self.proactive_speech_requested.emit(pt, ja),
+                    busy_callback=self._voice_session_busy,
+                )
+                self._proactive_loop.start()
+                print("[Aurora proativa] Observadores locais iniciados (somente fala, sem ferramentas).")
+            except Exception as exc:
+                self._proactive_loop = None
+                print(f"[Aurora proativa] Não foi possível iniciar o loop: {exc}")
 
         # Legenda flutuante com efeito fade in/out (estável para janela frameless)
         self.caption_label = QLabel(self)
@@ -1345,14 +1450,16 @@ class SvgHologram(QMainWindow):
         return session if session is not None and session.token == token else None
 
     def _receive_agent_stream_delta(self, token: int, fragment: str) -> None:
-        """Entrega texto à HUD e encaminha frases completas à fila de voz."""
+        """Parseia pares PT/JA: legenda PT é exibida, JA segue direto ao TTS."""
         session = self._stream_session_for_token(token)
-        if session is None or not fragment:
+        if session is None or not fragment or not session.is_accepting:
             return
-        segments = session.feed(fragment)
-        if not session.is_accepting:
-            return
-        self.streamed_text_requested.emit(fragment)
+        caption_delta, ja_segments = session.bilingual_parser.feed(fragment)
+        if caption_delta:
+            self.streamed_text_requested.emit(caption_delta)
+        segments: list[str] = []
+        for ja in ja_segments:
+            segments.extend(session.feed(ja))
         if segments:
             self._enqueue_streamed_speech_segments(session, segments)
 
@@ -1426,11 +1533,13 @@ class SvgHologram(QMainWindow):
         with self._tts_lock:
             if not self._is_speech_generation_current(generation):
                 return spoken_text, None
-            spoken_text = self._translate_to_japanese(text)
+            # O streaming PT/JA já fornece o texto falado em japonês.
+            # Só o fluxo legado sem tags recorre ao tradutor de compatibilidade.
+            spoken_text = text if _JA_RE.search(text) else self._translate_to_japanese(text)
             if (
                 not self._is_speech_generation_current(generation)
                 or not spoken_text
-                or not _JA_KANA_RE.search(spoken_text)
+                or not _JA_RE.search(spoken_text)
             ):
                 return spoken_text, None
 
@@ -1458,42 +1567,76 @@ class SvgHologram(QMainWindow):
         return spoken_text, audio_path
 
     def _prepare_streamed_speech_job(self, session: StreamingSpeechSession) -> None:
-        """Consome frases à medida que chegam; cada áudio termina antes do próximo."""
+        """Pipeline: sintetiza o próximo segmento enquanto o anterior é reproduzido."""
         generation = session.generation
         if generation is None:
             return
+        prepared: queue.Queue = queue.Queue(maxsize=2)
+
+        def producer() -> None:
+            while not session.stop_event.is_set() and self._is_speech_generation_current(generation):
+                try:
+                    segment = session.segments.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                if segment is None:
+                    break
+                job_dir = Path(tempfile.mkdtemp(prefix="aurora_stream_speech_"))
+                audio_path: Optional[Path] = None
+                spoken_text = segment
+                try:
+                    spoken_text, audio_path = self._synthesize_streamed_speech_segment(
+                        segment, generation, job_dir
+                    )
+                except Exception as exc:
+                    print(f"[Aurora TTS] Segmento incremental falhou: {type(exc).__name__}: {exc}")
+                    audio_path = None
+                item = (f"Aurora: {segment}", spoken_text, audio_path, job_dir)
+                while not session.stop_event.is_set() and self._is_speech_generation_current(generation):
+                    try:
+                        prepared.put(item, timeout=0.15)
+                        item = None
+                        break
+                    except queue.Full:
+                        continue
+                if item is not None:
+                    if audio_path:
+                        shutil.rmtree(Path(audio_path).parent, ignore_errors=True)
+                    shutil.rmtree(job_dir, ignore_errors=True)
+                    break
+            # Sentinel não bloqueia quando cancelado; consumidor também consulta o stop event.
+            try:
+                prepared.put_nowait(None)
+            except queue.Full:
+                while not session.stop_event.is_set():
+                    try:
+                        prepared.put(None, timeout=0.15)
+                        break
+                    except queue.Full:
+                        continue
+
+        producer_thread = threading.Thread(
+            target=producer, daemon=True, name=f"AuroraSpeechSynth-{session.token}"
+        )
+        producer_thread.start()
         try:
+            # Apenas a reprodução mantém a fila de fala serial. O produtor não
+            # mantém este lock e pode preparar o próximo WAV durante o playback.
             with self._speech_sequence_lock:
                 while not session.stop_event.is_set() and self._is_speech_generation_current(generation):
                     try:
-                        segment = session.segments.get(timeout=0.2)
+                        item = prepared.get(timeout=0.2)
                     except queue.Empty:
-                        # finish() enfileira o sentinel depois do último fragmento.
-                        # Não sair apenas porque a entrada foi fechada: podem estar
-                        # chegando os fragmentos de flush antes do sentinel.
+                        if not producer_thread.is_alive():
+                            break
                         continue
-                    if segment is None:
+                    if item is None:
                         break
-
-                    job_dir = Path(tempfile.mkdtemp(prefix="aurora_stream_speech_"))
-                    audio_path: Optional[Path] = None
-                    spoken_text = segment
+                    caption, spoken_text, audio_path, job_dir = item
                     done = threading.Event()
                     try:
-                        try:
-                            spoken_text, audio_path = self._synthesize_streamed_speech_segment(
-                                segment, generation, job_dir
-                            )
-                        except Exception as exc:
-                            print(
-                                f"[Aurora TTS] Segmento incremental falhou: "
-                                f"{type(exc).__name__}: {exc}"
-                            )
-                            audio_path = None
-
                         if session.stop_event.is_set() or not self._is_speech_generation_current(generation):
                             break
-                        caption = f"Aurora: {segment}"
                         if audio_path and audio_path.is_file() and audio_path.stat().st_size > 44:
                             self.speech_ready.emit(
                                 caption, spoken_text, str(audio_path), "streaming", generation, done
@@ -1503,38 +1646,55 @@ class SvgHologram(QMainWindow):
                                 caption, spoken_text, "streaming", generation, done
                             )
                         if not done.wait(timeout=900):
-                            print(
-                                f"[Aurora TTS] Timeout esperando segmento de voz "
-                                f"da geração={generation}."
-                            )
+                            print(f"[Aurora TTS] Timeout esperando playback de geração={generation}.")
                     finally:
-                        try:
-                            if audio_path:
-                                shutil.rmtree(Path(audio_path).parent, ignore_errors=True)
-                            shutil.rmtree(job_dir, ignore_errors=True)
-                        except Exception:
-                            pass
+                        if audio_path:
+                            shutil.rmtree(Path(audio_path).parent, ignore_errors=True)
+                        shutil.rmtree(job_dir, ignore_errors=True)
         except Exception as exc:
             print(f"[Aurora TTS] Worker de fala incremental terminou com erro: {exc}")
         finally:
+            session.stop_event.set() if session.cancelled else None
+            producer_thread.join(timeout=2.0)
+            # Limpa qualquer WAV ainda na fila, inclusive se a geração foi cancelada.
+            while True:
+                try:
+                    item = prepared.get_nowait()
+                except queue.Empty:
+                    break
+                if item is not None:
+                    _, _, audio_path, job_dir = item
+                    if audio_path:
+                        shutil.rmtree(Path(audio_path).parent, ignore_errors=True)
+                    shutil.rmtree(job_dir, ignore_errors=True)
             if (
                 not session.cancelled
                 and not session.stop_event.is_set()
                 and self._is_speech_generation_current(generation)
             ):
-                self.streamed_speech_finished_requested.emit(
-                    generation, session.final_state
-                )
+                self.streamed_speech_finished_requested.emit(generation, session.final_state)
 
     def _finish_streamed_speech_session(
         self, session: StreamingSpeechSession, final_state: str
     ) -> bool:
-        """Fecha a segmentação e indica se a resposta já está sendo falada por partes."""
-        tail = session.finish(final_state)
+        """Fecha parsing PT/JA e enfileira o último segmento de voz."""
+        caption_tail, ja_tail, legacy = session.bilingual_parser.flush()
+        if caption_tail:
+            self.streamed_text_requested.emit(caption_tail)
+        if not session.bilingual_parser.has_bilingual_markers and legacy:
+            # Compatibilidade para respostas de modelos antigos sem tags PT/JA.
+            self.streamed_text_requested.emit(legacy)
+            ja_segments = session.feed(legacy)
+        else:
+            ja_segments = []
+            for text in ja_tail:
+                ja_segments.extend(session.feed(text))
         if session.cancelled or session.stop_event.is_set():
             return False
-        if tail:
-            self._enqueue_streamed_speech_segments(session, tail)
+        tail = session.finish(final_state)
+        all_segments = ja_segments + tail
+        if all_segments:
+            self._enqueue_streamed_speech_segments(session, all_segments)
         if session.started and not session.cancelled and not session.stop_event.is_set():
             session.segments.put(None)
             return True
@@ -2475,70 +2635,157 @@ class SvgHologram(QMainWindow):
             shutil.rmtree(work_dir, ignore_errors=True)
             return None
 
+    def _ensure_sapi_worker(self) -> bool:
+        """Inicializa um único worker SAPI isolado e reutilizável."""
+        process = self._sapi_worker_process
+        messages = self._sapi_worker_messages
+        if process is not None and process.poll() is None and self._sapi_worker_ready and messages is not None:
+            return True
+        if self._sapi_worker_start_failed:
+            return False
+        with self._sapi_worker_start_lock:
+            process = self._sapi_worker_process
+            messages = self._sapi_worker_messages
+            if process is not None and process.poll() is None and self._sapi_worker_ready and messages is not None:
+                return True
+            if process is not None:
+                self._shutdown_sapi_worker()
+            worker_path = Path(__file__).resolve().with_name("sapi_persistent_worker.py")
+            log_path = Path(__file__).resolve().parents[1] / "data" / "sapi_worker.log"
+            try:
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                with log_path.open("a", encoding="utf-8", errors="replace") as log:
+                    process = subprocess.Popen(
+                        [sys.executable, "-u", str(worker_path)],
+                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log,
+                        text=True, encoding="utf-8", errors="replace", bufsize=1,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    )
+                messages = queue.Queue()
+                self._sapi_worker_process = process
+                self._sapi_worker_messages = messages
+                self._sapi_worker_ready = False
+                threading.Thread(
+                    target=self._read_sapi_worker_output,
+                    args=(process, messages),
+                    daemon=True, name="AuroraSapiWorkerReader",
+                ).start()
+                startup_timeout = max(5.0, min(25.0, float(os.environ.get("AURORA_SAPI_STARTUP_TIMEOUT", "15"))))
+                ready = messages.get(timeout=startup_timeout)
+                if not isinstance(ready, dict) or not ready.get("ready") or not ready.get("ok"):
+                    raise RuntimeError(f"Worker SAPI não iniciou: {ready}")
+                self._sapi_worker_ready = True
+                print("[Aurora TTS] Worker SAPI persistente pronto.")
+                return True
+            except Exception as exc:
+                self._sapi_worker_start_failed = True
+                print(f"[Aurora TTS] Falha ao iniciar worker SAPI persistente: {exc}")
+                self._shutdown_sapi_worker()
+                return False
+
+    @staticmethod
+    def _read_sapi_worker_output(process, messages: queue.Queue) -> None:
+        stream = process.stdout
+        if stream is None:
+            messages.put(None)
+            return
+        try:
+            for line in stream:
+                try:
+                    messages.put(json.loads(line))
+                except json.JSONDecodeError:
+                    print(f"[Aurora SAPI worker] Resposta JSON inválida: {line[:250]}")
+        finally:
+            messages.put(None)
+
+    def _shutdown_sapi_worker(self) -> None:
+        process = self._sapi_worker_process
+        self._sapi_worker_ready = False
+        if process is not None:
+            if process.poll() is None:
+                try:
+                    if process.stdin is not None:
+                        process.stdin.write(json.dumps({"cmd": "shutdown"}) + "\n")
+                        process.stdin.flush()
+                    process.wait(timeout=3.5)
+                except Exception:
+                    try:
+                        process.terminate()
+                        process.wait(timeout=2.0)
+                    except Exception:
+                        try:
+                            process.kill()
+                        except Exception:
+                            pass
+            try:
+                if process.stdin is not None:
+                    process.stdin.close()
+            except Exception:
+                pass
+            try:
+                if process.stdout is not None:
+                    process.stdout.close()
+            except Exception:
+                pass
+        self._sapi_worker_process = None
+        self._sapi_worker_messages = None
+
     def _prepare_sapi_audio(self, japanese_text: str, out_wav: Path) -> Optional[Path]:
-        # O motor pyttsx3/SAPI deve executar no próprio processo/thread COM.
-        # O engine criado pela HUD era reutilizado em uma thread de worker, onde
-        # runAndWait() podia travar indefinidamente. Isolar a síntese em processo
-        # filho permite impor timeout e não bloquear a fila de fala da HUD.
-        if not self._tts_engine or not self._tts_voice_ja:
+        """Synthesizes through the persistent SAPI worker; isolated and timeout-bounded."""
+        if not self._tts_engine or not self._tts_voice_ja or not japanese_text.strip():
             return None
-        text_path = out_wav.with_suffix(".txt")
-        worker_path = Path(__file__).resolve().with_name("sapi_synthesize.py")
         timeout_s = max(5.0, float(os.environ.get("AURORA_SAPI_TIMEOUT_S", "35")))
         try:
             out_wav.parent.mkdir(parents=True, exist_ok=True)
-            text_path.write_text(japanese_text, encoding="utf-8")
-            command = [
-                sys.executable,
-                str(worker_path),
-                "--text-file", str(text_path),
-                "--output", str(out_wav),
-                "--voice-id", str(self._tts_voice_ja),
-                "--rate", str(int(self._hud_preferences.get("speech_rate", 165))),
-                "--volume", "0.5",
-            ]
-            sapi_started = time.monotonic()
-            print(
-                f"[Aurora TTS] SAPI: sintetizando em processo isolado "
-                f"(timeout={timeout_s:.0f}s)."
-            )
-            completed = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout_s,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-            if completed.returncode != 0:
-                detail = (completed.stderr or completed.stdout or "").strip()[:500]
-                print(f"[Aurora TTS] Processo SAPI falhou (código={completed.returncode}): {detail}")
+            if not self._ensure_sapi_worker():
                 return None
-            print(
-                f"[Aurora TTS] Processo SAPI terminou em "
-                f"{time.monotonic() - sapi_started:.1f}s."
-            )
-            if out_wav.is_file() and out_wav.stat().st_size > 44:
-                return out_wav
-            print("[Aurora TTS] Processo SAPI terminou sem gerar um WAV válido.")
-        except subprocess.TimeoutExpired:
-            print(
-                f"[Aurora TTS] SAPI excedeu {timeout_s:.0f}s; "
-                "processo isolado interrompido para evitar travar a fila de fala."
-            )
+            process = self._sapi_worker_process
+            messages = self._sapi_worker_messages
+            if process is None or process.poll() is not None or process.stdin is None or messages is None:
+                raise RuntimeError("Worker SAPI indisponível.")
+            self._sapi_worker_request_id += 1
+            request_id = self._sapi_worker_request_id
+            request = {
+                "id": request_id,
+                "text": japanese_text,
+                "output": str(out_wav),
+                "voice_id": str(self._tts_voice_ja),
+                "rate": int(self._hud_preferences.get("speech_rate", 165)),
+                "volume": 0.5,
+            }
+            started = time.monotonic()
+            process.stdin.write(json.dumps(request, ensure_ascii=True) + "\n")
+            process.stdin.flush()
+            deadline = started + timeout_s
+            while time.monotonic() < deadline:
+                try:
+                    response = messages.get(timeout=min(0.4, max(0.05, deadline - time.monotonic())))
+                except queue.Empty:
+                    if process.poll() is not None:
+                        raise RuntimeError("Worker SAPI terminou durante a síntese.")
+                    continue
+                if response is None:
+                    raise RuntimeError("Worker SAPI fechou o canal de respostas.")
+                if response.get("id") != request_id:
+                    # As chamadas são serializadas pelo _tts_lock; respostas inesperadas
+                    # indicam perda de sincronização do protocolo, portanto reinicia.
+                    raise RuntimeError(f"ID inesperado no protocolo SAPI: {response}")
+                if not response.get("ok"):
+                    raise RuntimeError(response.get("error", "síntese SAPI falhou"))
+                if out_wav.is_file() and out_wav.stat().st_size > 44:
+                    print(f"[Aurora TTS] SAPI persistente: síntese em {time.monotonic()-started:.2f}s.")
+                    return out_wav
+                raise RuntimeError("Worker SAPI concluiu sem WAV válido.")
+            raise TimeoutError(f"SAPI excedeu {timeout_s:.0f}s.")
         except Exception as exc:
-            print(f"[Aurora TTS] Não consegui pré-gerar WAV via SAPI: {type(exc).__name__}: {exc}")
-        finally:
+            print(f"[Aurora TTS] Worker SAPI: {type(exc).__name__}: {exc}")
+            self._shutdown_sapi_worker()
+            self._sapi_worker_start_failed = False
             try:
-                text_path.unlink(missing_ok=True)
+                out_wav.unlink(missing_ok=True)
             except OSError:
                 pass
-        try:
-            out_wav.unlink(missing_ok=True)
-        except OSError:
-            pass
-        return None
+            return None
 
     def _queue_speech(self, caption: str, text: str, final_state: str) -> None:
         if not text or not text.strip():
@@ -2604,15 +2851,18 @@ class SvgHologram(QMainWindow):
                         stage = "traduzindo a resposta para japonês"
                         print(f"[Aurora TTS] Geração={generation}: início da tradução.")
                         translate_started = time.monotonic()
-                        spoken_text = self._translate_to_japanese(text)
-                        print(
-                            f"[Aurora TTS] Geração={generation}: tradução terminou em "
-                            f"{time.monotonic() - translate_started:.1f}s; "
-                            f"caracteres={len(spoken_text or '')}."
-                        )
+                        spoken_text = text if _JA_RE.search(text) else self._translate_to_japanese(text)
+                        if spoken_text is text:
+                            print(f"[Aurora TTS] Geração={generation}: texto JA fornecido pelo stream; tradução ignorada.")
+                        else:
+                            print(
+                                f"[Aurora TTS] Geração={generation}: tradução terminou em "
+                                f"{time.monotonic() - translate_started:.1f}s; "
+                                f"caracteres={len(spoken_text or '')}."
+                            )
                         if not self._is_speech_generation_current(generation):
                             return
-                        if not spoken_text or not _JA_KANA_RE.search(spoken_text):
+                        if not spoken_text or not _JA_RE.search(spoken_text):
                             audio_path = None
                         else:
                             stage = f"sintetizando áudio (backend={AURORA_TTS_BACKEND})"
@@ -2865,6 +3115,16 @@ class SvgHologram(QMainWindow):
         finally:
             done.set()
 
+    @Slot()
+    def _handle_voice_barge_in(self) -> None:
+        """Stop current audio and suppress later speech for the interrupted stream."""
+        session = self._stream_speech_session
+        with self._task_lock:
+            active_task = self._task_active
+        if active_task and session is not None:
+            self._voice_interrupted_stream_tokens.add(session.token)
+        self._cancel_speech_output()
+
     def _cancel_speech_output(self) -> bool:
         with self._speech_generation_lock:
             previous_generation = self._speech_generation
@@ -2894,6 +3154,11 @@ class SvgHologram(QMainWindow):
             import winsound
             # PlaySound(None, 0) é a forma documentada de parar o som atual.
             winsound.PlaySound(None, 0)
+        except Exception:
+            pass
+        try:
+            import sounddevice as sd
+            sd.stop()
         except Exception:
             pass
         try:
@@ -3137,7 +3402,18 @@ class SvgHologram(QMainWindow):
             return True
         return False
 
-    def _start_agent_task(self, message: str) -> None:
+    @staticmethod
+    def _extract_bilingual_response(text: str) -> tuple[str, str]:
+        """Extract PT captions and JA speech from a non-streaming tagged reply."""
+        parser = BilingualStreamParser()
+        caption, ready_speech = parser.feed(text or "")
+        caption_tail, speech_tail, legacy = parser.flush()
+        if not parser.has_bilingual_markers:
+            return (legacy or text or "").strip(), ""
+        spoken = " ".join(part.strip() for part in (ready_speech + speech_tail) if part.strip())
+        return (caption + caption_tail).strip(), spoken.strip()
+
+    def _start_agent_task(self, message: str, *, voice_input: bool = False, reaction_preplayed: bool = False) -> None:
         if self._agent is None:
             self.visual_state_requested.emit("error")
             self.show_caption_requested.emit(
@@ -3165,6 +3441,10 @@ class SvgHologram(QMainWindow):
             self._stream_speech_session = stream_session
 
         self._update_cancel_button()
+        # Reação pré-gravada: inicia imediatamente sem esperar o LLM/TTS.
+        # Se o cache local ainda não foi gerado, segue sem alterar o fluxo.
+        if voice_input and not reaction_preplayed and self._play_voice_reaction_early():
+            print("[Aurora reação] Áudio curto iniciado antes do processamento do agente.")
         self._reset_streamed_text()
         self.show_caption_requested.emit(f"Você: {message}")
         self.visual_state_requested.emit("thinking")
@@ -3201,13 +3481,27 @@ class SvgHologram(QMainWindow):
                     self.visual_state_requested.emit("idle")
                 elif reply_text:
                     final_state = "error" if status.endswith(("FAILED", "ERROR")) else "completed"
-                    spoken_incrementally = self._finish_streamed_speech_session(
-                        stream_session, final_state
-                    )
-                    if not spoken_incrementally:
-                        self.speak_with_caption(
-                            f"Aurora: {reply_text}", reply_text, final_state=final_state
+                    if stream_token in self._voice_interrupted_stream_tokens:
+                        caption_pt, _spoken_ja = self._extract_bilingual_response(reply_text)
+                        self.show_caption_requested.emit(
+                            f"Aurora: {caption_pt or reply_text}"
                         )
+                        self.visual_state_requested.emit(final_state)
+                        print("[Aurora voz] Resposta final mantida em texto após barge-in; TTS suprimido.")
+                    else:
+                        spoken_incrementally = self._finish_streamed_speech_session(
+                            stream_session, final_state
+                        )
+                        if not spoken_incrementally:
+                            caption_pt, spoken_ja = self._extract_bilingual_response(reply_text)
+                            if spoken_ja:
+                                self.speak_with_caption(
+                                    f"Aurora: {caption_pt}", spoken_ja, final_state=final_state
+                                )
+                            else:
+                                self.speak_with_caption(
+                                    f"Aurora: {caption_pt or reply_text}", reply_text, final_state=final_state
+                                )
                 else:
                     self._cancel_streamed_speech_session(stream_session)
                     self.visual_state_requested.emit("completed")
@@ -3224,6 +3518,7 @@ class SvgHologram(QMainWindow):
                     err = f"Erro ao processar: {exc}"
                     self.speak_with_caption(err, "エラーが発生しました。", final_state="error")
             finally:
+                self._voice_interrupted_stream_tokens.discard(stream_token)
                 print(f"[Aurora tarefa] Worker saindo após {time.monotonic() - task_started:.1f}s.")
                 self.agent_task_finished.emit()
 
@@ -3323,9 +3618,12 @@ class SvgHologram(QMainWindow):
         message = text.strip()
         if not message:
             return
+        with self._voice_reaction_lock:
+            reaction_preplayed = self._voice_reaction_preplayed
+            self._voice_reaction_preplayed = False
         if self._dispatch_local_control_command(message):
             return
-        self._start_agent_task(message)
+        self._start_agent_task(message, voice_input=True, reaction_preplayed=reaction_preplayed)
 
     def _set_voice_ui_state(self, state: str) -> None:
         self._voice_ui_state = state
@@ -3342,13 +3640,38 @@ class SvgHologram(QMainWindow):
         if hasattr(self, "voice_mode_btn"):
             self.voice_mode_btn.setText(button)
 
+    @Slot(str, str)
+    def _handle_proactive_speech(self, caption_pt: str, spoken_ja: str) -> None:
+        """Recebe nudge proativo apenas como fala; não executa ações."""
+        if self._voice_session_busy() or not caption_pt.strip() or not spoken_ja.strip():
+            return
+        self.speak_with_caption(f"Aurora: {caption_pt.strip()}", spoken_ja.strip())
+
     def _voice_session_busy(self) -> bool:
         with self._task_lock:
             task_active = self._task_active
         return bool(task_active or self._speech_pending or self._speech_active)
 
     def _assistant_is_speaking(self) -> bool:
-        return bool(self._speech_active)
+        return bool(self._speech_active or self._reaction_active)
+
+    def _play_voice_reaction_early(self) -> bool:
+        """Schedule the cached reaction before Whisper/LLM work; mark it to avoid duplicates."""
+        with self._voice_reaction_lock:
+            if self._voice_reaction_preplayed:
+                return True
+            self._voice_reaction_preplayed = True
+            self._reaction_active = True
+
+        def finished() -> None:
+            self._reaction_active = False
+
+        started = play_reaction_clip(on_finished=finished)
+        if not started:
+            with self._voice_reaction_lock:
+                self._voice_reaction_preplayed = False
+            self._reaction_active = False
+        return started
 
     def show_voice_status(self, message: str) -> None:
         print(f"[Aurora voz] {message}")
@@ -3478,6 +3801,9 @@ class SvgHologram(QMainWindow):
         self.animation_timer.stop()
         self.topmost_timer.stop()
         self.stop_listening()
+        if self._proactive_loop is not None:
+            self._proactive_loop.stop()
+        self._shutdown_sapi_worker()
         self._shutdown_gpt_sovits_direct()
         self._shutdown_gpt_sovits_api()
         try:

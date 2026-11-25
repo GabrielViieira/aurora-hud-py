@@ -37,3 +37,6 @@ htmlcov/
 
 # Preferências locais da HUD
 data/hud_preferences.json
+
+# Locally generated reaction voice cache (not committed)
+voice/reactions/*.wav
