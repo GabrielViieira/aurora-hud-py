@@ -1163,7 +1163,8 @@ class SvgHologram(QMainWindow):
             input_device_id=self._hud_preferences.get("microphone_device", "default"),
             input_gain_percent=self._hud_preferences.get("microphone_gain_percent", 125),
         )
-        warm_reaction_cache()\n        self._proactive_loop = None
+        warm_reaction_cache()
+        self._proactive_loop = None
         if self._agent is not None:
             try:
                 self._proactive_loop = ProactiveLoop(
