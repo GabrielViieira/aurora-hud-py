@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 _GAME_TITLE_RE = re.compile(
-    r"(?i)(steam|game|unreal|unity|valorant|minecraft|elden ring|unturned|apex|"
+    r"(?i)(unreal|unity|valorant|minecraft|elden ring|unturned|apex|"
     r"league of legends|dota|counter.?strike|cs2|overwatch|fortnite|genshin|honkai|"
     r"roblox|final fantasy|warframe|cyberpunk|witcher|skyrim|red dead|gta|resident evil)"
 )
