@@ -19,7 +19,7 @@ else:
 
 sys.path.insert(0, str(_REPO_ROOT.parent))
 
-from aurora.core.streaming import SentenceSegmenter, StreamingSpeechSession
+from aurora.core.streaming import BilingualStreamParser, SentenceSegmenter, StreamingSpeechSession
 
 
 class SentenceSegmenterTests(unittest.TestCase):
@@ -61,6 +61,31 @@ class SentenceSegmenterTests(unittest.TestCase):
         segmenter.reset()
         self.assertEqual(segmenter.flush(), [])
 
+
+
+class BilingualStreamParserTests(unittest.TestCase):
+    def test_split_markers_and_caption_speech_channels(self):
+        parser = BilingualStreamParser()
+        captions, speech = parser.feed("[P")
+        self.assertEqual((captions, speech), ("", []))
+        captions, speech = parser.feed("T]Olá. [J")
+        self.assertEqual(captions, "Olá. ")
+        self.assertEqual(speech, [])
+        captions, speech = parser.feed("A]こんにちは。 [PT]Tudo bem? [JA]元気です。")
+        self.assertEqual(captions, "Tudo bem? ")
+        self.assertEqual(speech, ["こんにちは。"])
+        cap_tail, speech_tail, legacy = parser.flush()
+        self.assertEqual(cap_tail, "")
+        self.assertEqual(speech_tail, ["元気です。"])
+        self.assertEqual(legacy, "")
+        self.assertTrue(parser.has_bilingual_markers)
+
+    def test_plain_legacy_response_retained_for_fallback(self):
+        parser = BilingualStreamParser()
+        parser.feed("Resposta sem tags.")
+        _, _, legacy = parser.flush()
+        self.assertEqual(legacy, "Resposta sem tags.")
+        self.assertFalse(parser.has_bilingual_markers)
 
 class StreamingSpeechSessionTests(unittest.TestCase):
     def test_finish_closes_input_but_preserves_final_segments(self):
