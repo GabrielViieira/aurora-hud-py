@@ -304,6 +304,7 @@ class VoiceListener:
         busy_callback: Optional[Callable[[], bool]] = None,
         assistant_speaking_callback: Optional[Callable[[], bool]] = None,
         interrupt_callback: Optional[Callable[[], None]] = None,
+        reaction_callback: Optional[Callable[[], bool]] = None,
         input_device_id: str = "default",
         input_gain_percent: float = 125.0,
     ) -> None:
@@ -317,6 +318,7 @@ class VoiceListener:
         self.busy_callback = busy_callback
         self.assistant_speaking_callback = assistant_speaking_callback
         self.interrupt_callback = interrupt_callback
+        self.reaction_callback = reaction_callback
         self.input_device_id = str(input_device_id or "default")
         self.input_gain_percent = max(50.0, min(300.0, float(input_gain_percent)))
         self._stop_event = threading.Event()
@@ -559,6 +561,18 @@ class VoiceListener:
                         except queue.Empty:
                             break
 
+                def play_early_reaction(command: str) -> None:
+                    command = (command or "").strip()
+                    if not command or is_conversation_end_command(command, self.wakeword):
+                        return
+                    if classify_hud_control_command(command) in {"cancel", "exit"}:
+                        return
+                    if self.reaction_callback is not None:
+                        try:
+                            self.reaction_callback()
+                        except Exception as exc:
+                            print(f"[Aurora voz] reação antecipada falhou: {exc}")
+
                 def handle_recognized(phrase: str, utterance_pcm: bytes) -> None:
                     phrase = (phrase or "").strip()
                     if not phrase:
@@ -575,6 +589,10 @@ class VoiceListener:
                     match = wakeword_pattern.search(phrase)
                     if match:
                         was_active = session.is_active
+                        # Reação no endpoint Vosk, antes da transcrição Whisper,
+                        # para reduzir o tempo de primeiro som percebido.
+                        early_command = phrase[match.end():].strip(" \\t\\r\\n,.;:!?-–—")
+                        play_early_reaction(early_command)
                         # Reouve o segmento inteiro para preservar pedidos bilíngues.
                         whispered = transcribe_utterance(utterance_pcm)
                         if whispered:
@@ -618,6 +636,7 @@ class VoiceListener:
                         return
 
                     if session.is_active:
+                        play_early_reaction(phrase)
                         whispered = transcribe_utterance(utterance_pcm)
                         command = (whispered or phrase).strip(" \t\r\n,.;:!?-–—")
                         if is_conversation_end_command(command, self.wakeword):
@@ -991,6 +1010,9 @@ class SvgHologram(QMainWindow):
         self._active_speech_done = None
         self._stream_turn_counter = 0
         self._voice_interrupted_stream_tokens: set[int] = set()
+        self._reaction_active = False
+        self._voice_reaction_preplayed = False
+        self._voice_reaction_lock = threading.Lock()
         self._stream_session_lock = threading.Lock()
         self._stream_speech_session: Optional[StreamingSpeechSession] = None
         self._allow_close = False
@@ -1160,6 +1182,7 @@ class SvgHologram(QMainWindow):
             busy_callback=self._voice_session_busy,
             assistant_speaking_callback=self._assistant_is_speaking,
             interrupt_callback=self.voice_interrupt_requested.emit,
+            reaction_callback=self._play_voice_reaction_early,
             input_device_id=self._hud_preferences.get("microphone_device", "default"),
             input_gain_percent=self._hud_preferences.get("microphone_gain_percent", 125),
         )
@@ -3384,7 +3407,7 @@ class SvgHologram(QMainWindow):
         spoken = " ".join(part.strip() for part in (ready_speech + speech_tail) if part.strip())
         return (caption + caption_tail).strip(), spoken.strip()
 
-    def _start_agent_task(self, message: str, *, voice_input: bool = False) -> None:
+    def _start_agent_task(self, message: str, *, voice_input: bool = False, reaction_preplayed: bool = False) -> None:
         if self._agent is None:
             self.visual_state_requested.emit("error")
             self.show_caption_requested.emit(
@@ -3414,8 +3437,8 @@ class SvgHologram(QMainWindow):
         self._update_cancel_button()
         # Reação pré-gravada: inicia imediatamente sem esperar o LLM/TTS.
         # Se o cache local ainda não foi gerado, segue sem alterar o fluxo.
-        if voice_input and play_reaction_clip():
-            print("[Aurora reação] Áudio curto iniciado em modo assíncrono.")
+        if voice_input and not reaction_preplayed and self._play_voice_reaction_early():
+            print("[Aurora reação] Áudio curto iniciado antes do processamento do agente.")
         self._reset_streamed_text()
         self.show_caption_requested.emit(f"Você: {message}")
         self.visual_state_requested.emit("thinking")
@@ -3589,9 +3612,12 @@ class SvgHologram(QMainWindow):
         message = text.strip()
         if not message:
             return
+        with self._voice_reaction_lock:
+            reaction_preplayed = self._voice_reaction_preplayed
+            self._voice_reaction_preplayed = False
         if self._dispatch_local_control_command(message):
             return
-        self._start_agent_task(message, voice_input=True)
+        self._start_agent_task(message, voice_input=True, reaction_preplayed=reaction_preplayed)
 
     def _set_voice_ui_state(self, state: str) -> None:
         self._voice_ui_state = state
@@ -3621,7 +3647,25 @@ class SvgHologram(QMainWindow):
         return bool(task_active or self._speech_pending or self._speech_active)
 
     def _assistant_is_speaking(self) -> bool:
-        return bool(self._speech_active)
+        return bool(self._speech_active or self._reaction_active)
+
+    def _play_voice_reaction_early(self) -> bool:
+        """Schedule the cached reaction before Whisper/LLM work; mark it to avoid duplicates."""
+        with self._voice_reaction_lock:
+            if self._voice_reaction_preplayed:
+                return True
+            self._voice_reaction_preplayed = True
+            self._reaction_active = True
+
+        def finished() -> None:
+            self._reaction_active = False
+
+        started = play_reaction_clip(on_finished=finished)
+        if not started:
+            with self._voice_reaction_lock:
+                self._voice_reaction_preplayed = False
+            self._reaction_active = False
+        return started
 
     def show_voice_status(self, message: str) -> None:
         print(f"[Aurora voz] {message}")
