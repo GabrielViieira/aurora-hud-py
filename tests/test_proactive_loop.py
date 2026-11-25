@@ -36,6 +36,18 @@ class ObserverTests(unittest.TestCase):
         self.assertFalse(snap.is_game)
         self.assertAlmostEqual(snap.game_seconds, 10, delta=0.1)
 
+    def test_stable_download_file_emits_completion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            downloads = Path(tmp)
+            target = downloads / "sample.bin"
+            target.write_bytes(b"x" * 2048)
+            observer = CheapObservers(downloads_dir=downloads, window_reader=lambda: "")
+            start = observer._last_tick
+            observer.snapshot(now=start + 10)
+            observer.snapshot(now=start + 20)
+            snapshot = observer.snapshot(now=start + 30)
+            self.assertEqual(snapshot.download_completed, "sample.bin")
+
     def test_game_milestone_emitted_once(self):
         loop = ProactiveLoop(provider=None, model_for_chat=lambda: "unused", speak_callback=lambda *_: None, busy_callback=lambda: False, game_milestone_seconds=60)
         snap = type("Snapshot", (), {"is_game": True, "game_seconds": 70, "download_completed": ""})()
