@@ -1505,42 +1505,76 @@ class SvgHologram(QMainWindow):
         return spoken_text, audio_path
 
     def _prepare_streamed_speech_job(self, session: StreamingSpeechSession) -> None:
-        """Consome frases à medida que chegam; cada áudio termina antes do próximo."""
+        """Pipeline: sintetiza o próximo segmento enquanto o anterior é reproduzido."""
         generation = session.generation
         if generation is None:
             return
+        prepared: queue.Queue = queue.Queue(maxsize=2)
+
+        def producer() -> None:
+            while not session.stop_event.is_set() and self._is_speech_generation_current(generation):
+                try:
+                    segment = session.segments.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                if segment is None:
+                    break
+                job_dir = Path(tempfile.mkdtemp(prefix="aurora_stream_speech_"))
+                audio_path: Optional[Path] = None
+                spoken_text = segment
+                try:
+                    spoken_text, audio_path = self._synthesize_streamed_speech_segment(
+                        segment, generation, job_dir
+                    )
+                except Exception as exc:
+                    print(f"[Aurora TTS] Segmento incremental falhou: {type(exc).__name__}: {exc}")
+                    audio_path = None
+                item = (f"Aurora: {segment}", spoken_text, audio_path, job_dir)
+                while not session.stop_event.is_set() and self._is_speech_generation_current(generation):
+                    try:
+                        prepared.put(item, timeout=0.15)
+                        item = None
+                        break
+                    except queue.Full:
+                        continue
+                if item is not None:
+                    if audio_path:
+                        shutil.rmtree(Path(audio_path).parent, ignore_errors=True)
+                    shutil.rmtree(job_dir, ignore_errors=True)
+                    break
+            # Sentinel não bloqueia quando cancelado; consumidor também consulta o stop event.
+            try:
+                prepared.put_nowait(None)
+            except queue.Full:
+                while not session.stop_event.is_set():
+                    try:
+                        prepared.put(None, timeout=0.15)
+                        break
+                    except queue.Full:
+                        continue
+
+        producer_thread = threading.Thread(
+            target=producer, daemon=True, name=f"AuroraSpeechSynth-{session.token}"
+        )
+        producer_thread.start()
         try:
+            # Apenas a reprodução mantém a fila de fala serial. O produtor não
+            # mantém este lock e pode preparar o próximo WAV durante o playback.
             with self._speech_sequence_lock:
                 while not session.stop_event.is_set() and self._is_speech_generation_current(generation):
                     try:
-                        segment = session.segments.get(timeout=0.2)
+                        item = prepared.get(timeout=0.2)
                     except queue.Empty:
-                        # finish() enfileira o sentinel depois do último fragmento.
-                        # Não sair apenas porque a entrada foi fechada: podem estar
-                        # chegando os fragmentos de flush antes do sentinel.
+                        if not producer_thread.is_alive():
+                            break
                         continue
-                    if segment is None:
+                    if item is None:
                         break
-
-                    job_dir = Path(tempfile.mkdtemp(prefix="aurora_stream_speech_"))
-                    audio_path: Optional[Path] = None
-                    spoken_text = segment
+                    caption, spoken_text, audio_path, job_dir = item
                     done = threading.Event()
                     try:
-                        try:
-                            spoken_text, audio_path = self._synthesize_streamed_speech_segment(
-                                segment, generation, job_dir
-                            )
-                        except Exception as exc:
-                            print(
-                                f"[Aurora TTS] Segmento incremental falhou: "
-                                f"{type(exc).__name__}: {exc}"
-                            )
-                            audio_path = None
-
                         if session.stop_event.is_set() or not self._is_speech_generation_current(generation):
                             break
-                        caption = f"Aurora: {segment}"
                         if audio_path and audio_path.is_file() and audio_path.stat().st_size > 44:
                             self.speech_ready.emit(
                                 caption, spoken_text, str(audio_path), "streaming", generation, done
@@ -1550,28 +1584,33 @@ class SvgHologram(QMainWindow):
                                 caption, spoken_text, "streaming", generation, done
                             )
                         if not done.wait(timeout=900):
-                            print(
-                                f"[Aurora TTS] Timeout esperando segmento de voz "
-                                f"da geração={generation}."
-                            )
+                            print(f"[Aurora TTS] Timeout esperando playback de geração={generation}.")
                     finally:
-                        try:
-                            if audio_path:
-                                shutil.rmtree(Path(audio_path).parent, ignore_errors=True)
-                            shutil.rmtree(job_dir, ignore_errors=True)
-                        except Exception:
-                            pass
+                        if audio_path:
+                            shutil.rmtree(Path(audio_path).parent, ignore_errors=True)
+                        shutil.rmtree(job_dir, ignore_errors=True)
         except Exception as exc:
             print(f"[Aurora TTS] Worker de fala incremental terminou com erro: {exc}")
         finally:
+            session.stop_event.set() if session.cancelled else None
+            producer_thread.join(timeout=2.0)
+            # Limpa qualquer WAV ainda na fila, inclusive se a geração foi cancelada.
+            while True:
+                try:
+                    item = prepared.get_nowait()
+                except queue.Empty:
+                    break
+                if item is not None:
+                    _, _, audio_path, job_dir = item
+                    if audio_path:
+                        shutil.rmtree(Path(audio_path).parent, ignore_errors=True)
+                    shutil.rmtree(job_dir, ignore_errors=True)
             if (
                 not session.cancelled
                 and not session.stop_event.is_set()
                 and self._is_speech_generation_current(generation)
             ):
-                self.streamed_speech_finished_requested.emit(
-                    generation, session.final_state
-                )
+                self.streamed_speech_finished_requested.emit(generation, session.final_state)
 
     def _finish_streamed_speech_session(
         self, session: StreamingSpeechSession, final_state: str
