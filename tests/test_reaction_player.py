@@ -5,6 +5,7 @@ import random
 import sys
 import tempfile
 import types
+import wave
 import unittest
 from pathlib import Path
 
@@ -51,23 +52,49 @@ class ReactionPlayerTests(unittest.TestCase):
             selected = choose_reaction_clip(directory, random.Random(1))
             self.assertIn(selected.name, {"one.wav", "two.wav"})
 
-    def test_play_uses_async_winsound(self):
+    def test_play_uses_nonblocking_separate_audio_stream(self):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             clip = directory / "only.wav"
-            clip.write_bytes(b"x" * 60)
-            fake = types.SimpleNamespace(SND_FILENAME=1, SND_ASYNC=2, calls=[])
-            fake.PlaySound = lambda path, flags: fake.calls.append((path, flags))
-            original = sys.modules.get("winsound")
-            sys.modules["winsound"] = fake
+            with wave.open(str(clip), "wb") as out:
+                out.setnchannels(1)
+                out.setsampwidth(2)
+                out.setframerate(22050)
+                out.writeframes(b"\\x00\\x00" * 16)
+
+            class FakeArray:
+                def astype(self, dtype):
+                    return self
+                def __truediv__(self, value):
+                    return self
+                def reshape(self, shape):
+                    return self
+
+            fake_numpy = types.SimpleNamespace(
+                uint8="uint8", int16="int16", int32="int32", float32="float32",
+                frombuffer=lambda data, dtype: FakeArray(),
+            )
+            fake_sd = types.SimpleNamespace(calls=[])
+            fake_sd.play = lambda audio, samplerate, blocking: fake_sd.calls.append(
+                (audio, samplerate, blocking)
+            )
+            old_numpy = sys.modules.get("numpy")
+            old_sd = sys.modules.get("sounddevice")
+            sys.modules["numpy"] = fake_numpy
+            sys.modules["sounddevice"] = fake_sd
             try:
                 self.assertTrue(play_reaction_clip(directory))
-                self.assertEqual(fake.calls, [(str(clip), 3)])
+                self.assertEqual(len(fake_sd.calls), 1)
+                self.assertEqual(fake_sd.calls[0][1:], (22050, False))
             finally:
-                if original is None:
-                    del sys.modules["winsound"]
+                if old_numpy is None:
+                    del sys.modules["numpy"]
                 else:
-                    sys.modules["winsound"] = original
+                    sys.modules["numpy"] = old_numpy
+                if old_sd is None:
+                    del sys.modules["sounddevice"]
+                else:
+                    sys.modules["sounddevice"] = old_sd
 
 
 if __name__ == "__main__":
