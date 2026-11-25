@@ -76,7 +76,7 @@ class ReactionPlayerTests(unittest.TestCase):
             )
             ready = __import__("threading").Event()
             fake_sd = types.SimpleNamespace()
-            fake_sd.play = lambda audio, samplerate, blocking: ready.set()
+            fake_sd.play = lambda audio, samplerate, blocking: ready.set()\n            fake_sd.wait = lambda: None
             old_numpy = sys.modules.get("numpy")
             old_sd = sys.modules.get("sounddevice")
             sys.modules["numpy"] = fake_numpy
