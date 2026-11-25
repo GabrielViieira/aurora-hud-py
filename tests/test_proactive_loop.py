@@ -42,6 +42,33 @@ class ObserverTests(unittest.TestCase):
         self.assertEqual(loop._choose_event(snap), "game_milestone")
         self.assertEqual(loop._choose_event(snap), "")
 
+    def test_proactive_request_is_chat_only_and_tool_free(self):
+        class FakeProvider:
+            def __init__(self):
+                self.request = None
+            def chat(self, request):
+                self.request = request
+                return type("Reply", (), {"text": "[PT]Tudo certo por aí? [JA]大丈夫ですか？"})()
+        provider = FakeProvider()
+        delivered = []
+        loop = ProactiveLoop(
+            provider=provider,
+            model_for_chat=lambda: "chat-role-model",
+            speak_callback=lambda pt, ja: delivered.append((pt, ja)),
+            busy_callback=lambda: False,
+        )
+        snapshot = type("Snapshot", (), {
+            "active_window": "Unturned",
+            "is_game": True,
+            "game_seconds": 10800,
+            "local_time": "18:30",
+            "download_completed": "",
+        })()
+        loop._generate_and_speak("game_milestone", snapshot)
+        self.assertEqual(provider.request.model, "chat-role-model")
+        self.assertEqual(provider.request.tools, [])
+        self.assertEqual(delivered, [("Tudo certo por aí?", "大丈夫ですか？")])
+
     def test_quiet_hours_wrap_midnight(self):
         loop = ProactiveLoop(provider=None, model_for_chat=lambda: "unused", speak_callback=lambda *_: None, busy_callback=lambda: False, quiet_start_hour=22, quiet_end_hour=7)
         from datetime import datetime
