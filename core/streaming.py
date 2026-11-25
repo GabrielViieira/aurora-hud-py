@@ -107,8 +107,13 @@ class BilingualStreamParser:
                 else:
                     self._ja_ever = True
                 continue
-            # Keep a possible split marker suffix from being emitted as content.
-            keep = min(3, len(self._buffer))
+            # Preserve only a suffix that could become a marker. This keeps
+            # whitespace before a split marker with the preceding PT caption.
+            keep = 0
+            for marker_text in ("[PT]", "[JA]"):
+                for size in range(1, len(marker_text)):
+                    if self._buffer[-size:].casefold() == marker_text[:size].casefold():
+                        keep = max(keep, size)
             safe = self._buffer[:-keep] if keep else self._buffer
             self._buffer = self._buffer[-keep:] if keep else ""
             if self._mode == "PT":
