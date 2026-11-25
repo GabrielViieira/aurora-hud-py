@@ -83,15 +83,15 @@ def warm_reaction_cache(directory: Path = DEFAULT_REACTION_DIR) -> bool:
 
 
 def _play_clip(path: Path, directory: Path, on_finished=None) -> bool:
-    sd = _cached_sd
-    audio_info = _cached_audio.get(path)
-    if sd is not None and audio_info is not None:
-        audio, rate = audio_info
-        sd.play(audio, samplerate=rate, blocking=False)
-        sd.wait()
-        return True
-    # Cold cache: decode/import off the turn-start thread, then play.
     try:
+        sd = _cached_sd
+        audio_info = _cached_audio.get(path)
+        if sd is not None and audio_info is not None:
+            audio, rate = audio_info
+            sd.play(audio, samplerate=rate, blocking=False)
+            sd.wait()
+            return True
+        # Cold cache: decode/import off the turn-start thread, then play.
         import numpy as np
         import sounddevice as sd_local
         audio, rate = _load_wav_float32(path, np)
