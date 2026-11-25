@@ -113,7 +113,7 @@ class ProactiveLoop:
             "No máximo uma frase em cada idioma; não inclua explicações."
         )
         user = (
-            f"Observação: {event_pt}\nJanela em foco: {snapshot.active_window or 'não identificada'}. "
+            f"Janela em foco: {(snapshot.active_window if snapshot.is_game else 'título omitido por privacidade') or 'não identificada'}. "
             f"Hora local: {snapshot.local_time}. Tempo acumulado de jogo: "
             f"{int(snapshot.game_seconds // 60)} minutos. Crie uma fala breve, contextual e não invasiva."
         )
