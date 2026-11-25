@@ -5,6 +5,21 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import sys
+import types
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if "aurora" in sys.modules:
+    _package = sys.modules["aurora"]
+    _paths = getattr(_package, "__path__", None)
+    if _paths is not None and str(_REPO_ROOT) not in _paths:
+        _paths.insert(0, str(_REPO_ROOT))
+else:
+    _package = types.ModuleType("aurora")
+    _package.__path__ = [str(_REPO_ROOT)]
+    sys.modules["aurora"] = _package
+sys.path.insert(0, str(_REPO_ROOT.parent))
+
 from aurora.core.observers import CheapObservers
 from aurora.core.proactive_loop import ProactiveLoop
 
