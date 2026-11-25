@@ -5,7 +5,7 @@ import queue
 import re
 import threading
 
-_BOUNDARY_RE = re.compile(r"""(?:[.!?。！？…]+["'’”)]]*\s+|\n+)""")
+_BOUNDARY_RE = re.compile(r"""(?:[.!?。！？…]+["'’”)\]]*\s+|\n+)""")
 _MARKER_RE = re.compile(r"\[(PT|JA)\]", re.IGNORECASE)
 
 
