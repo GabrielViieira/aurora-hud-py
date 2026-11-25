@@ -69,7 +69,7 @@ from aurora.core.streaming import BilingualStreamParser, StreamingSpeechSession
 from aurora.core.control_commands import classify_hud_control_command
 from aurora.ui.assistant_panel import AssistantPanelDialog
 from aurora.ui.hud_preferences import load_hud_preferences, save_hud_preferences
-from aurora.ui.voice_conversation import VoiceConversationSession, is_conversation_end_command
+from aurora.ui.voice_conversation import VoiceConversationSession, is_conversation_end_command, is_barge_in_command
 from aurora.ui.audio_capture import to_vosk_pcm16
 from aurora.voice.reaction_player import play_reaction_clip
 from aurora.ui.window_overlay import set_window_topmost
@@ -302,6 +302,7 @@ class VoiceListener:
         standby_callback: Optional[Callable[[], None]] = None,
         busy_callback: Optional[Callable[[], bool]] = None,
         assistant_speaking_callback: Optional[Callable[[], bool]] = None,
+        interrupt_callback: Optional[Callable[[], None]] = None,
         input_device_id: str = "default",
         input_gain_percent: float = 125.0,
     ) -> None:
@@ -314,6 +315,7 @@ class VoiceListener:
         self.standby_callback = standby_callback
         self.busy_callback = busy_callback
         self.assistant_speaking_callback = assistant_speaking_callback
+        self.interrupt_callback = interrupt_callback
         self.input_device_id = str(input_device_id or "default")
         self.input_gain_percent = max(50.0, min(300.0, float(input_gain_percent)))
         self._stop_event = threading.Event()
@@ -718,12 +720,40 @@ class VoiceListener:
                                 except Exception:
                                     pass
                             assistant_was_speaking = True
-                            # Evita transcrever a própria voz sintetizada como fala do usuário.
-                            drain_audio_queue()
-                            self._stop_event.wait(0.05)
+                            # Mantém reconhecimento local durante playback somente para
+                            # comandos explícitos de interrupção; ignora outras falas/eco.
+                            try:
+                                block = self._audio_queue.get(timeout=0.15)
+                            except queue.Empty:
+                                continue
+                            utterance_audio.extend(block)
+                            if len(utterance_audio) > max_utterance_bytes:
+                                del utterance_audio[:-max_utterance_bytes]
+                            if recognizer.AcceptWaveform(block):
+                                utterance_audio.clear()
+                                try:
+                                    result = json.loads(recognizer.Result())
+                                    heard = str(result.get("text") or "").strip()
+                                except (json.JSONDecodeError, TypeError):
+                                    heard = ""
+                                if heard and is_barge_in_command(heard, self.wakeword):
+                                    print(f"[Aurora voz] Interrupção detectada: {heard}")
+                                    self.status_callback("Interrupção por voz detectada; parando a fala.")
+                                    if self.interrupt_callback is not None:
+                                        try:
+                                            self.interrupt_callback()
+                                        except Exception as exc:
+                                            print(f"[Aurora voz] callback de interrupção falhou: {exc}")
+                                    assistant_was_speaking = False
+                                    try:
+                                        recognizer.Reset()
+                                    except Exception:
+                                        pass
+                                    drain_audio_queue()
                             continue
 
                         if assistant_was_speaking:
+                            # Limpa eco residual quando a fala termina naturalmente.
                             utterance_audio.clear()
                             try:
                                 recognizer.Reset()
@@ -902,6 +932,7 @@ class SvgHologram(QMainWindow):
     visual_state_requested = Signal(str)
     approval_requested = Signal(object)
     agent_task_finished = Signal()
+    voice_interrupt_requested = Signal()
 
     def __init__(self, svg_path: Path, listen_on_start: bool = False) -> None:
         super().__init__()
@@ -960,6 +991,9 @@ class SvgHologram(QMainWindow):
         )
         self.agent_task_finished.connect(
             self._on_agent_task_finished, Qt.ConnectionType.QueuedConnection
+        )
+        self.voice_interrupt_requested.connect(
+            self._cancel_speech_output, Qt.ConnectionType.QueuedConnection
         )
         self._init_runtime()
         preferences_dir = (
@@ -1100,6 +1134,7 @@ class SvgHologram(QMainWindow):
             standby_callback=lambda: self.visual_state_requested.emit("idle"),
             busy_callback=self._voice_session_busy,
             assistant_speaking_callback=self._assistant_is_speaking,
+            interrupt_callback=self.voice_interrupt_requested.emit,
             input_device_id=self._hud_preferences.get("microphone_device", "default"),
             input_gain_percent=self._hud_preferences.get("microphone_gain_percent", 125),
         )
