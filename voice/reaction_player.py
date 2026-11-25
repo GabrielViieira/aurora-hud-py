@@ -106,7 +106,7 @@ def play_reaction_clip(directory: Path = DEFAULT_REACTION_DIR, rng: random.Rando
     clip = choose_reaction_clip(directory, rng)
     if clip is None:
         return False
-    if _cached_sd is not None and clip in _cached_audio:
-        return _play_clip(clip, directory)
+    # Keep the turn-start hook nonblocking even when sounddevice needs to
+    # initialize an output stream; warm cache makes the worker path fast.
     threading.Thread(target=_play_clip, args=(clip, directory), daemon=True, name="AuroraReactionPlayback").start()
     return True
