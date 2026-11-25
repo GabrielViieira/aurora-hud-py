@@ -82,12 +82,13 @@ def warm_reaction_cache(directory: Path = DEFAULT_REACTION_DIR) -> bool:
     return True
 
 
-def _play_clip(path: Path, directory: Path) -> bool:
+def _play_clip(path: Path, directory: Path, on_finished=None) -> bool:
     sd = _cached_sd
     audio_info = _cached_audio.get(path)
     if sd is not None and audio_info is not None:
         audio, rate = audio_info
         sd.play(audio, samplerate=rate, blocking=False)
+        sd.wait()
         return True
     # Cold cache: decode/import off the turn-start thread, then play.
     try:
@@ -95,18 +96,25 @@ def _play_clip(path: Path, directory: Path) -> bool:
         import sounddevice as sd_local
         audio, rate = _load_wav_float32(path, np)
         sd_local.play(audio, samplerate=rate, blocking=False)
+        sd_local.wait()
         return True
     except Exception as exc:
         print(f"[Aurora reação] Não foi possível iniciar {path.name}: {type(exc).__name__}: {exc}")
         return False
+    finally:
+        if on_finished is not None:
+            try:
+                on_finished()
+            except Exception:
+                pass
 
 
-def play_reaction_clip(directory: Path = DEFAULT_REACTION_DIR, rng: random.Random | None = None) -> bool:
+def play_reaction_clip(directory: Path = DEFAULT_REACTION_DIR, rng: random.Random | None = None, on_finished=None) -> bool:
     """Schedule a cached clip immediately; sounddevice playback is nonblocking."""
     clip = choose_reaction_clip(directory, rng)
     if clip is None:
         return False
     # Keep the turn-start hook nonblocking even when sounddevice needs to
     # initialize an output stream; warm cache makes the worker path fast.
-    threading.Thread(target=_play_clip, args=(clip, directory), daemon=True, name="AuroraReactionPlayback").start()
+    threading.Thread(target=_play_clip, args=(clip, directory, on_finished), daemon=True, name="AuroraReactionPlayback").start()
     return True
