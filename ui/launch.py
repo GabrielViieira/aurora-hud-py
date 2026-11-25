@@ -65,7 +65,7 @@ except Exception:
 
 from animation import D20Animation
 from efeitos import HologramEffects
-from aurora.core.streaming import StreamingSpeechSession
+from aurora.core.streaming import BilingualStreamParser, StreamingSpeechSession
 from aurora.core.control_commands import classify_hud_control_command
 from aurora.ui.assistant_panel import AssistantPanelDialog
 from aurora.ui.hud_preferences import load_hud_preferences, save_hud_preferences
@@ -1346,14 +1346,16 @@ class SvgHologram(QMainWindow):
         return session if session is not None and session.token == token else None
 
     def _receive_agent_stream_delta(self, token: int, fragment: str) -> None:
-        """Entrega texto à HUD e encaminha frases completas à fila de voz."""
+        """Parseia pares PT/JA: legenda PT é exibida, JA segue direto ao TTS."""
         session = self._stream_session_for_token(token)
-        if session is None or not fragment:
+        if session is None or not fragment or not session.is_accepting:
             return
-        segments = session.feed(fragment)
-        if not session.is_accepting:
-            return
-        self.streamed_text_requested.emit(fragment)
+        caption_delta, ja_segments = session.bilingual_parser.feed(fragment)
+        if caption_delta:
+            self.streamed_text_requested.emit(caption_delta)
+        segments: list[str] = []
+        for ja in ja_segments:
+            segments.extend(session.feed(ja))
         if segments:
             self._enqueue_streamed_speech_segments(session, segments)
 
@@ -1427,7 +1429,9 @@ class SvgHologram(QMainWindow):
         with self._tts_lock:
             if not self._is_speech_generation_current(generation):
                 return spoken_text, None
-            spoken_text = self._translate_to_japanese(text)
+            # O streaming PT/JA já fornece o texto falado em japonês.
+            # Só o fluxo legado sem tags recorre ao tradutor de compatibilidade.
+            spoken_text = text if _JA_KANA_RE.search(text) else self._translate_to_japanese(text)
             if (
                 not self._is_speech_generation_current(generation)
                 or not spoken_text
@@ -1530,12 +1534,24 @@ class SvgHologram(QMainWindow):
     def _finish_streamed_speech_session(
         self, session: StreamingSpeechSession, final_state: str
     ) -> bool:
-        """Fecha a segmentação e indica se a resposta já está sendo falada por partes."""
-        tail = session.finish(final_state)
+        """Fecha parsing PT/JA e enfileira o último segmento de voz."""
+        caption_tail, ja_tail, legacy = session.bilingual_parser.flush()
+        if caption_tail:
+            self.streamed_text_requested.emit(caption_tail)
+        if not session.bilingual_parser.has_bilingual_markers and legacy:
+            # Compatibilidade para respostas de modelos antigos sem tags PT/JA.
+            self.streamed_text_requested.emit(legacy)
+            ja_segments = session.feed(legacy)
+        else:
+            ja_segments = []
+            for text in ja_tail:
+                ja_segments.extend(session.feed(text))
         if session.cancelled or session.stop_event.is_set():
             return False
-        if tail:
-            self._enqueue_streamed_speech_segments(session, tail)
+        tail = session.finish(final_state)
+        all_segments = ja_segments + tail
+        if all_segments:
+            self._enqueue_streamed_speech_segments(session, all_segments)
         if session.started and not session.cancelled and not session.stop_event.is_set():
             session.segments.put(None)
             return True
@@ -2605,12 +2621,15 @@ class SvgHologram(QMainWindow):
                         stage = "traduzindo a resposta para japonês"
                         print(f"[Aurora TTS] Geração={generation}: início da tradução.")
                         translate_started = time.monotonic()
-                        spoken_text = self._translate_to_japanese(text)
-                        print(
-                            f"[Aurora TTS] Geração={generation}: tradução terminou em "
-                            f"{time.monotonic() - translate_started:.1f}s; "
-                            f"caracteres={len(spoken_text or '')}."
-                        )
+                        spoken_text = text if _JA_KANA_RE.search(text) else self._translate_to_japanese(text)
+                        if spoken_text is text:
+                            print(f"[Aurora TTS] Geração={generation}: texto JA fornecido pelo stream; tradução ignorada.")
+                        else:
+                            print(
+                                f"[Aurora TTS] Geração={generation}: tradução terminou em "
+                                f"{time.monotonic() - translate_started:.1f}s; "
+                                f"caracteres={len(spoken_text or '')}."
+                            )
                         if not self._is_speech_generation_current(generation):
                             return
                         if not spoken_text or not _JA_KANA_RE.search(spoken_text):
