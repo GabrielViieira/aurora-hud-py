@@ -3138,7 +3138,7 @@ class SvgHologram(QMainWindow):
             return True
         return False
 
-    def _start_agent_task(self, message: str) -> None:
+    def _start_agent_task(self, message: str, *, voice_input: bool = False) -> None:
         if self._agent is None:
             self.visual_state_requested.emit("error")
             self.show_caption_requested.emit(
@@ -3168,7 +3168,7 @@ class SvgHologram(QMainWindow):
         self._update_cancel_button()
         # Reação pré-gravada: inicia imediatamente sem esperar o LLM/TTS.
         # Se o cache local ainda não foi gerado, segue sem alterar o fluxo.
-        if play_reaction_clip():
+        if voice_input and play_reaction_clip():
             print("[Aurora reação] Áudio curto iniciado em modo assíncrono.")
         self._reset_streamed_text()
         self.show_caption_requested.emit(f"Você: {message}")
@@ -3330,7 +3330,7 @@ class SvgHologram(QMainWindow):
             return
         if self._dispatch_local_control_command(message):
             return
-        self._start_agent_task(message)
+        self._start_agent_task(message, voice_input=True)
 
     def _set_voice_ui_state(self, state: str) -> None:
         self._voice_ui_state = state
