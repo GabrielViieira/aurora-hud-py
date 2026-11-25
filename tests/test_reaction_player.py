@@ -75,6 +75,7 @@ class ReactionPlayerTests(unittest.TestCase):
                 frombuffer=lambda data, dtype: FakeArray(),
             )
             ready = __import__("threading").Event()
+            finished = __import__("threading").Event()
             fake_sd = types.SimpleNamespace()
             fake_sd.play = lambda audio, samplerate, blocking: ready.set()
             fake_sd.wait = lambda: None
@@ -83,8 +84,9 @@ class ReactionPlayerTests(unittest.TestCase):
             sys.modules["numpy"] = fake_numpy
             sys.modules["sounddevice"] = fake_sd
             try:
-                self.assertTrue(play_reaction_clip(directory))
+                self.assertTrue(play_reaction_clip(directory, on_finished=finished.set))
                 self.assertTrue(ready.wait(2.0), "background playback did not reach sounddevice")
+                self.assertTrue(finished.wait(2.0), "reaction completion callback did not run")
             finally:
                 if old_numpy is None:
                     del sys.modules["numpy"]
