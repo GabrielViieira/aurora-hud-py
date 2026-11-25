@@ -54,6 +54,15 @@ class ObserverTests(unittest.TestCase):
         self.assertEqual(loop._choose_event(snap), "game_milestone")
         self.assertEqual(loop._choose_event(snap), "")
 
+    def test_pending_events_survive_busy_cooldown_gates(self):
+        loop = ProactiveLoop(provider=None, model_for_chat=lambda: "unused", speak_callback=lambda *_: None, busy_callback=lambda: True)
+        snap = type("Snapshot", (), {"is_game": True, "game_seconds": 10800, "download_completed": "download.zip"})()
+        loop._pending_download_notice = snap.download_completed
+        loop._pending_game_milestone = True
+        self.assertEqual(loop._choose_event(snap), "download_completed")
+        self.assertTrue(loop._pending_game_milestone)
+        self.assertEqual(loop._choose_event(snap), "game_milestone")
+
     def test_proactive_request_is_chat_only_and_tool_free(self):
         class FakeProvider:
             def __init__(self):
